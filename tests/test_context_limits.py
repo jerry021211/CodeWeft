@@ -76,7 +76,7 @@ class CapturingClient:
 
 def _new_summary_messages(call):
     text = call["messages"][0]["content"]
-    return json.loads(text.split("<new-messages>\n", 1)[1].split("\n</new-messages>", 1)[0])
+    return json.loads(text.split("<conversation>\n", 1)[1].split("\n</conversation>", 1)[0])
 
 
 class ContextLimitsIntegrationTests(unittest.TestCase):

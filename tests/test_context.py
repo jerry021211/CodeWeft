@@ -86,7 +86,7 @@ class ContextManagerTests(unittest.TestCase):
             }
 
             messages = [
-                {"role": "user" if i % 2 == 0 else "assistant", "content": f"inspect a.py {i}"}
+                {"role": "user" if i % 2 == 0 else "assistant", "content": f"inspect a.py {i} " * 40}
                 for i in range(28)
             ]
             first = manager.compact_history(
@@ -95,7 +95,7 @@ class ContextManagerTests(unittest.TestCase):
                 client=client,
             )
             messages.extend([
-                {"role": "user" if i % 2 == 0 else "assistant", "content": f"continue {i}"}
+                {"role": "user" if i % 2 == 0 else "assistant", "content": f"continue {i} " * 40}
                 for i in range(16)
             ])
             second = manager.compact_history(
@@ -110,8 +110,9 @@ class ContextManagerTests(unittest.TestCase):
             self.assertEqual(manager.state.compacted_message_count, 32)
             self.assertEqual(manager.state.history_generation, 2)
             self.assertIn("<previous-summary>", client.calls[1]["messages"][0]["content"])
-            self.assertIn('"count": 3', client.calls[0]["messages"][0]["content"])
-            self.assertIn('"status":"pending"', client.calls[0]["messages"][0]["content"])
+            self.assertNotIn('"count": 3', client.calls[0]["messages"][0]["content"])
+            self.assertNotIn('"status":"pending"', client.calls[0]["messages"][0]["content"])
+            self.assertEqual(manager.state.files_read["a.py|0|100"]["count"], 3)
             self.assertEqual(client.calls[0]["model"], "summary-model")
             self.assertEqual(client.calls[0]["tools"], [])
             self.assertNotIn("max_tokens", client.calls[0])

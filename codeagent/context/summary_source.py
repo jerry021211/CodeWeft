@@ -67,37 +67,6 @@ def summary_source_messages(messages: list[Any]) -> list[Any]:
     return _messages(messages, None, None)
 
 
-def summary_file_ledger(messages: list[Any]) -> list[str]:
-    """Extract exact paths from this batch's structured execution records.
-
-    Do not infer paths from prose, shell commands or source code. A tool input
-    records an attempted operation, not proof that the file exists or changed.
-    """
-    paths: dict[str, None] = {}
-    for message in messages:
-        message = _json_shape(message)
-        if not isinstance(message, dict) or not isinstance(message.get("content"), list):
-            continue
-        for block in message["content"]:
-            block = _json_shape(block)
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                arguments = block.get("input")
-                if isinstance(arguments, dict):
-                    for key in ("file_path", "path", "target_path", "artifact_path"):
-                        path = arguments.get(key)
-                        if isinstance(path, str) and path.strip():
-                            paths[path] = None
-            elif block.get("type") == "tool_result":
-                changed = block.get("changed_files", [])
-                if isinstance(changed, (list, tuple)):
-                    for path in changed:
-                        if isinstance(path, str) and path.strip():
-                            paths[path] = None
-    return list(paths)
-
-
 def _messages(messages: list[Any], text_limit: int | None, argument_limit: int | None) -> list[Any]:
     result = []
     for original in messages:
@@ -228,4 +197,4 @@ def _check_limit(name: str, value: Any) -> None:
         raise ValueError(f"{name} must be a non-negative integer")
 
 
-__all__ = ["bounded_summary_messages", "bounded_summary_data", "summary_source_messages", "summary_file_ledger"]
+__all__ = ["bounded_summary_messages", "bounded_summary_data", "summary_source_messages"]

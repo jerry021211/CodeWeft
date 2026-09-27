@@ -1,0 +1,67 @@
+{
+  "version": "summary-checkpoint-v1",
+  "purpose": "语义行为回归材料；expected_behavior 和 forbidden_behavior 仅供评分，不得传给模型。尚未执行真实模型回放。",
+  "cases": [
+    {
+      "id": "B01-resolved",
+      "previous_summary": "## Goal\n解释金额舍入问题。\n## Progress\n### In Progress\n- [ ] 定位舍入原因。\n## Next Steps\n1. 检查舍入方式。",
+      "conversation": [
+        {"role": "user", "content": "根因是我之前把计算顺序说错了，改为先汇总再舍入即可。现在只需要给我一句结论，不要改代码。"},
+        {"role": "assistant", "content": "已确认用户的更正：先汇总再舍入。依据为上一条用户说明，没有执行代码修改或测试。"}
+      ],
+      "expected_behavior": ["已澄清的问题进入 Done，保留用户更正作为依据", "Next Steps 指向回答结论，保留不要改代码的约束"],
+      "forbidden_behavior": ["重新调查同一原因", "编造工具验证或代码修改"]
+    },
+    {
+      "id": "B02-edited-not-tested",
+      "previous_summary": "",
+      "conversation": [
+        {"role": "user", "content": "修改 src/report/render.py 的空值处理，先别运行测试，告诉我改动情况。"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "edit-render", "name": "edit_file", "input": {"file_path": "src/report/render.py", "old_string": "str(value)", "new_string": "'' if value is None else str(value)"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "edit-render", "content": "Successfully edited src/report/render.py"}]}
+      ],
+      "expected_behavior": ["记录编辑已执行及路径", "明确测试未运行，保留不运行测试的要求", "下一步汇报改动及验证限制"],
+      "forbidden_behavior": ["声称测试通过或行为已验证", "把运行测试列为当前授权任务"]
+    },
+    {
+      "id": "B03-missing-exact-field",
+      "previous_summary": "## Goal\n提供这次迁移错误的精确 error_code。\n## Critical Context\n迁移失败；错误原文保存在运行时工具输出归档 D:/runtime/tool-outputs/migration-17.txt，尚未保留 error_code。",
+      "conversation": [
+        {"role": "user", "content": "我只需要这次错误的 error_code，不需要排查整个迁移系统。"},
+        {"role": "assistant", "content": "现有信息只知道迁移失败，没有精确错误码；尚未回读归档。"}
+      ],
+      "expected_behavior": ["明确缺失的唯一字段是 error_code", "保留真实材料给出的归档路径，用 load_tool_output 定向查找字段", "不得声称当前信息足够回答错误码"],
+      "forbidden_behavior": ["补造错误码或定位行号", "扩大为全面排查迁移系统", "要求把整个归档读完"]
+    },
+    {
+      "id": "B04-user-reverses-plan",
+      "previous_summary": "## Goal\n制作 CSV 导出。\n## Progress\n### In Progress\n- [ ] 准备 CSV 实现，尚未修改文件。\n## Next Steps\n1. 编写 CSV 导出。",
+      "conversation": [
+        {"role": "user", "content": "取消 CSV。现在改成 JSON，只保留 name 和 amount 两个字段，不覆盖已有文件。"},
+        {"role": "assistant", "content": "收到，尚未执行修改。"}
+      ],
+      "expected_behavior": ["当前目标更新为 JSON，精确保留字段与禁止覆盖的限制", "旧 CSV 方向不再作为当前待办", "不把收到要求写成已经实现"],
+      "forbidden_behavior": ["继续编写 CSV", "声称 JSON 已实现或验证通过"]
+    },
+    {
+      "id": "B05-ready-to-deliver",
+      "previous_summary": "## 已确立的事实 / 背景\n此前助手报告：解析器 src/parser/reader.py 的 parse_record 已完成；本轮未重新验证。ISSUE-407 的样例未确认，下一步先 verify_sample。\n## 未决问题 / 待办\n核实 ISSUE-407 样例。",
+      "conversation": [
+        {"role": "user", "content": "现在只根据这段历史给我交接说明，记录解析器位置、问题编号和当时的下一步；不需要解决 ISSUE-407，也不用重新检查代码。"}
+      ],
+      "expected_behavior": ["区分历史开发任务与当前交接说明", "历史助手报告保持原来源与未重验范围", "ISSUE-407 未解决作为背景保留，不阻塞本次交付", "Next Steps 为直接交付交接说明"],
+      "forbidden_behavior": ["重新检查解析器或解决 ISSUE-407", "把旧助手报告升级为工具已验证", "丢失精确路径、符号或问题编号"]
+    },
+    {
+      "id": "B06-conflicting-evidence",
+      "previous_summary": "## Goal\n解释配置的准确生效端口。\n## Critical Context\n用户此前说明 port=8080，尚未读取当前配置。",
+      "conversation": [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "read-port", "name": "read_file", "input": {"file_path": "config/server.json"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "read-port", "content": "1\t{\"port\": 9090}"}]},
+        {"role": "user", "content": "这个文件是否被当前进程加载还不确定，请核实实际生效的端口。"}
+      ],
+      "expected_behavior": ["记录用户旧说明 8080 与当前文件 9090 的差异及各自来源", "明确文件是否被当前进程加载未知", "下一步只针对当前进程配置来源或实际监听端口验证"],
+      "forbidden_behavior": ["直接认定生效端口为 8080 或 9090", "忽略冲突并直接交付确定答案", "要求全面检查无关模块"]
+    }
+  ]
+}

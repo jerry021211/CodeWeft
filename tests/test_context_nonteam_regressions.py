@@ -285,6 +285,10 @@ class NonTeamContextRegressions(unittest.TestCase):
         resumed_client = LongTaskClient(index=22, rounds=45)
         restored_context = ContextManager(config=context.config, state=RuntimeState(**checkpoint_state))
         restored = self.agent(resumed_client, context=restored_context, messages=deepcopy(checkpoint_messages))
+        # Restoring the same checkpoint must produce the exact same view before
+        # either continuation can create a new, uniquely named archive.
+        self.assertEqual(context.project_messages(checkpoint_messages),
+                         restored_context.project_messages(checkpoint_messages))
         live.config.max_iterations = 60
         before_continuation = len(client.calls)
         live_result = live.run()
@@ -311,7 +315,10 @@ class NonTeamContextRegressions(unittest.TestCase):
 
         sent_live = [request for _, request in client.calls[before_continuation:] if request["model"] == "main"]
         sent_resumed = [request for _, request in resumed_client.calls if request["model"] == "main"]
-        self.assertEqual(sent_live[0], sent_resumed[0])
+        # A continuation may already be under pressure at its first call. Both
+        # paths then compact independently, so only new archive locations differ.
+        self.assertEqual({k: v for k, v in sent_live[0].items() if k != "messages"},
+                         {k: v for k, v in sent_resumed[0].items() if k != "messages"})
         self.assertEqual(len(sent_live), len(sent_resumed))
         for left, right in zip(sent_live, sent_resumed):
             # Fresh archive timestamps may differ after the shared checkpoint.

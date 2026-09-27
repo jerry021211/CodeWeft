@@ -15,6 +15,7 @@ from codeagent.prompts.models import (
     PromptTraceItem,
 )
 from codeagent.runtime_platform import RuntimePlatform, current_runtime_platform
+from codeagent.prompts.template import load_template
 from codeagent.tools import (
     LOAD_MEMORY_TOOL_NAME,
     REMEMBER_TOOL_NAME,
@@ -325,7 +326,7 @@ class PromptRuntime:
         )
 
     def _load_template(self, name: str) -> str:
-        return self._template_path(name).read_text(encoding="utf-8").strip()
+        return load_template(name, directory=self._template_path(name).parent)
 
     def _template_path(self, name: str) -> Path:
         filename = f"{name}.md"

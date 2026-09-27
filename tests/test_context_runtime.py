@@ -410,7 +410,7 @@ class ContextRuntimeTests(unittest.TestCase):
                 self.assertEqual(len(client.summary_calls), 1)
                 self.assertEqual(manager.last_compaction["status"], "failed")
 
-    def test_task_snapshot_failure_cools_down_without_blocking_safe_main_request(self):
+    def test_summary_does_not_depend_on_task_snapshot_availability(self):
         manager = self.manager()
         manager.begin_turn(0)
         snapshot_calls = []
@@ -425,15 +425,11 @@ class ContextRuntimeTests(unittest.TestCase):
         agent = self.agent(client, manager=manager, messages=history)
         result = agent.run()
         self.assertEqual(result.final_text, "main request continued")
-        self.assertEqual(manager.last_compaction, {"status": "failed", "reason": "RuntimeError"})
-        self.assertEqual(manager.state.summary_revision, 0)
+        self.assertEqual(manager.state.summary_revision, 1)
+        self.assertEqual(manager.state.summary_retry_after_epoch, 0)
         self.assertEqual(len(client.main_calls), 1)
-        self.assertEqual(client.summary_calls, [])
-        self.assertEqual(snapshot_calls, [True])
-        manager.prepare_before_model_call(agent.messages, client=client)
-        self.assertEqual(manager.last_compaction["reason"], "failure_cooldown")
-        self.assertEqual(snapshot_calls, [True])
-        self.assertEqual(client.summary_calls, [])
+        self.assertEqual(len(client.summary_calls), 1)
+        self.assertEqual(snapshot_calls, [])
 
     def test_edit_or_truncate_unfolded_snapshot_tail_invalidates_restored_summary(self):
         for mutation in ("edit", "truncate"):

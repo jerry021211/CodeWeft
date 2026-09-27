@@ -15,7 +15,6 @@ import httpx
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.context import ContextCompactionError, ContextConfig, ContextManager
 from codeagent.context.budget import BoundModelClient, RequestBudgetError, inspect_request
-from codeagent.context.summary_source import summary_file_ledger
 from codeagent.models import ModelResponse
 
 
@@ -50,8 +49,8 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertNotIn("max_tokens", client.calls[0])
         self.assertEqual(client.calls[0]["tools"], [])
-        self.assertIn("最多 4000 字符", client.calls[0]["system"])
-        self.assertIn("不是 token 数", client.calls[0]["system"])
+        self.assertIn("最多 4000 字符", client.calls[0]["messages"][0]["content"])
+        self.assertIn("不是 token 数", client.calls[0]["messages"][0]["content"])
 
     def test_overlong_output_is_recompressed_once_with_original_evidence(self):
         history = [{"role": "user", "content": "保留目标和原始证据"}]
@@ -68,7 +67,7 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         self.manager.config.summary_max_chars = 30
         client = ScriptedClient("字" * 31, "字" * 30)
         self.assertEqual(len(self.manager._model_summary([], client=client)), 30)
-        self.assertIn("最多 30 字符", client.calls[0]["system"])
+        self.assertIn("最多 30 字符", client.calls[0]["messages"][0]["content"])
         self.assertIn("最多 30 字符", client.calls[1]["messages"][-1]["content"])
 
     def test_repair_failure_preserves_existing_summary_watermark_and_archives(self):
@@ -125,18 +124,21 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
             self.manager._model_summary([], client=client)
         self.assertEqual(len(client.calls), 1)
 
-    def test_paths_are_exact_deduplicated_batch_records_not_guessed_from_text(self):
+    def test_paths_stay_in_original_tool_records_without_appended_ledger(self):
         path = "D:/项目/修复 文件.py"
         messages = [{"role": "assistant", "content": [
             {"type": "tool_use", "id": "a", "name": "write_file", "input": {"file_path": path, "content": "fake.py"}},
             {"type": "tool_use", "id": "b", "name": "read_file", "input": {"path": path}},
             {"type": "text", "text": "计划编辑 guessed.py"},
         ]}]
-        self.assertEqual(summary_file_ledger(messages), [path])
-        request = self.manager._summary_params(messages)
-        self.assertIn("# 本批涉及的文件", request["messages"][0]["content"])
-        self.assertIn(path, request["messages"][0]["content"])
-        self.assertIn("首次压缩", self.manager._summary_params([])["messages"][0]["content"])
+        for bounded in (False, True):
+            request = self.manager._summary_params(messages, bounded=bounded)
+            text = request["messages"][0]["content"]
+            self.assertNotIn("# 本批涉及的文件", text)
+            source = json.loads(text.split("<conversation>\n", 1)[1].split("\n</conversation>", 1)[0])
+            self.assertEqual(source, messages)
+            self.assertEqual(text.count(path), 2)
+        self.assertIn("首次摘要", self.manager._summary_params([])["messages"][0]["content"])
         self.assertNotIn("# 本批涉及的文件", self.manager._summary_params([])["messages"][0]["content"])
 
     def test_budget_without_token_cap_does_not_reserve_characters_as_tokens(self):
