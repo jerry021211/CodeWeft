@@ -179,7 +179,7 @@ def build_agent(profile: dict, workspace: Path, trial: Path, repository, emitter
     agent.context.summary_credentials_scope = hashlib.sha256(json.dumps([env.base_url, summary_key or env.api_key]).encode()).hexdigest()
     agent.allow_subagents = False
     agent.subagent_environment_factory = None
-    if profile.get("suite") == "context-v1":
+    if profile.get("suite") in {"context-v1", "context-journey-v1"}:
         allowed = {"read_file", "write_file", "edit_file", "grep", "glob", "load_tool_output", "load_context_history"}
         agent.tools = agent.tools.copy_without({s["name"] for s in agent.tools.schemas()} - allowed)
     else:

@@ -327,3 +327,9 @@ python -m evals.context_suite verify eval-results/20260923T135008Z-context-live-
 | 没看到 LangSmith | 可能开关未启用、项目/时间过滤或发送失败 | 看终端 enabled、trial 的 tracing.json 和 stderr.txt |
 
 LangSmith 记录名形如 `eval.context.S03.D.r1`，重复运行会同名，结合 metadata 的 suite/trial 和时间区分。模型调用的 `call_kind` 区分 main 与 context_summary。本地请求和响应是主要完整证据，界面截短不等于本地丢失。
+
+## 继续检查：多次压缩后任务有没有偏移
+
+固定历史续答通过后，使用 [连续任务保持评测操作说明](context-journey-walkthrough.md)。
+新入口 `python -m evals.context_journey` 提供 T01–T06 六套项目源码与分阶段任务，分别检查需求变化、禁止覆盖、完成状态、验证范围、停止开发后的交接和精确回读。
+它区分最终结果、操作约束、实际压缩覆盖和待人工核查的过程问题；先离线，再小范围 A/D 真实试跑。
