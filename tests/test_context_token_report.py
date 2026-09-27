@@ -184,6 +184,7 @@ class ContextTokenReportTests(unittest.TestCase):
         old_pair = build_token_report(self.root, results, "live")["paired_A_D"][0]
         self.assertTrue(old_pair["comparable"])
         self.assertIn("sdk_retries", old_pair["unrecorded_optional_fields"])
+        self.assertNotIn("summary_max_tokens", old_pair["unrecorded_optional_fields"])
         path = self.root / d["trial_directory"] / "manifest.json"
         original = read_json(path)
         for field in ("wall_timeout_seconds", "sdk_retries", "recovery_retries", "summary_max_tokens"):
@@ -194,6 +195,15 @@ class ContextTokenReportTests(unittest.TestCase):
                 pair = build_token_report(self.root, results, "live")["paired_A_D"][0]
                 self.assertFalse(pair["comparable"])
                 self.assertIn("runtime_options." + field, pair["reason"])
+
+        for row in results:
+            legacy_path = self.root / row["trial_directory"] / "manifest.json"
+            manifest = read_json(legacy_path)
+            manifest["profile"]["summary_max_tokens"] = 4000
+            write_json(legacy_path, manifest)
+        report = build_token_report(self.root, results, "live")
+        self.assertTrue(report["paired_A_D"][0]["comparable"])
+        self.assertEqual(report["trials"][0]["pair_identity"]["runtime_options"]["summary_max_tokens"], 4000)
 
     def test_missing_critical_identity_field_names_are_reported(self):
         a = self.trial("A", [usage()])

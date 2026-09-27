@@ -6,7 +6,7 @@ from pathlib import Path
 
 from evals.evidence import hashes, read_json
 from evals.metrics import request_usage, summarize
-from codeagent.context.manager import SUMMARIZATION_SYSTEM_PROMPT
+from evals.context_suite.request_kinds import is_summary_request
 from codeagent.context.projection import TOOL_VIEW_MARKER, WRITE_VIEW_MARKER
 
 GRADING_VERSION = "context-v2"
@@ -101,14 +101,8 @@ def grade_trial(trial: Path, execution: dict):
                 recalls.append({"tool": calls[block["tool_use_id"]], "content": block.get("content", ""), "is_error": block.get("is_error", False)})
     archive_evidence = any(r["tool"] == "load_tool_output" and not r["is_error"] and all(m in str(r["content"]) for m in gold["fact_markers"]) for r in recalls)
     archive_ok = archive_evidence or not gold["requires_archive_evidence"]
-    def is_summary(request):
-        system = request.get("system")
-        return isinstance(system, str) and system.startswith((
-            SUMMARIZATION_SYSTEM_PROMPT.split("{summary_char_budget}", 1)[0],
-            "你是编程助手的上下文摘要器，只生成供后续继续工作的结构化 Markdown 摘要。",
-        ))
-    main = [r for r in requests if not is_summary(r)]
-    summaries = [r for r in requests if is_summary(r)]
+    main = [r for r in requests if not is_summary_request(r)]
+    summaries = [r for r in requests if is_summary_request(r)]
     first_messages = main[0].get("messages", []) if main else []
     summary_blocks = [m for m in first_messages if "<context_summary" in str(m.get("content", ""))]
     tail = [m for m in first_messages if m not in summary_blocks]

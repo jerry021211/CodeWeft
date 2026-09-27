@@ -150,6 +150,7 @@ def run_suite(*, output=ROOT / "eval-results", mode="offline", scale="production
             target.write_text(text, encoding="utf-8")
         settings = {**context_settings(variant, scale), "context_window_tokens": context_window_tokens,
                     "summary_context_window_tokens": summary_context_window_tokens}
+        settings["summary_max_chars"] = ContextConfig(**settings).summary_max_chars
         model = env["MODEL_ID"] if mode == "live" else "offline-context-script"
         profile = {"suite": "context-v1", "mode": mode, "model": model,
                    "summary_model": env.get("SUMMARIZATION_MODEL_ID") or model if mode == "live" else model,
@@ -158,7 +159,7 @@ def run_suite(*, output=ROOT / "eval-results", mode="offline", scale="production
                    "max_api_calls": max_api_calls, "wall_timeout_seconds": timeout, "allowed_writes": ["answer.json"],
                    "provider_host": urlsplit(env.get("BASE_URL") or "https://api.anthropic.com").hostname if mode == "live" else None,
                    "memory": False, "skills": False, "mcp": False, "team": False, "shell": False,
-                   "sdk_retries": 0, "recovery_retries": 1, "summary_max_tokens": 4000,
+                   "sdk_retries": 0, "recovery_retries": 1,
                    "tracing": tracing,
                    "separate_summary_credentials": bool(mode == "live" and env.get("SUMMARIZATION_API_KEY") and env["SUMMARIZATION_API_KEY"] != env.get("API_KEY")),
                    "isolation": "WorkspaceGuard + restricted tools; not an OS sandbox"}

@@ -120,6 +120,10 @@ class ContextEvaluationTests(unittest.TestCase):
             result = read_json(root / "result.json")
             self.assertTrue(result["all_passed"])
             trial = root / result["results"][0]["trial_directory"]
+            profile = read_json(trial / "manifest.json")["profile"]
+            self.assertNotIn("summary_max_tokens", profile)
+            self.assertEqual(profile["context"]["summary_max_chars"],
+                             read_json(trial / "effective-context.json")["summary_max_chars"])
             self.assertEqual(read_json(trial / "effective-loop-guard.json")["max_total_tokens"], 300000)
             self.assertIn("每场累计 token 预算：300,000 token", (root / "report.md").read_text(encoding="utf-8"))
 

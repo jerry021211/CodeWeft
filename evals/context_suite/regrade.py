@@ -23,7 +23,7 @@ def regrade(source: Path, *, output: Path = ROOT / "eval-results") -> Path:
     results, changes = [], []
     # Preserve the grader used for this reinterpretation, separately from the
     # original engine snapshot which remains untouched.
-    for relative in ("evals/context_suite/grading.py", "evals/context_suite/runner.py", "evals/context_suite/regrade.py", "evals/context_suite/token_report.py", "evals/context_suite/cost_report.py", "evals/context_suite/pricing.json", "evals/metrics.py", "evals/evidence.py"):
+    for relative in ("evals/context_suite/grading.py", "evals/context_suite/runner.py", "evals/context_suite/regrade.py", "evals/context_suite/token_report.py", "evals/context_suite/request_kinds.py", "evals/context_suite/cost_report.py", "evals/context_suite/pricing.json", "evals/metrics.py", "evals/evidence.py"):
         target = root / "grader-snapshot" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)

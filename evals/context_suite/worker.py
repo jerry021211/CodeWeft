@@ -10,7 +10,7 @@ import time
 from types import SimpleNamespace
 
 from codeagent.context.history import history_hash
-from codeagent.context.manager import SUMMARIZATION_SYSTEM_PROMPT
+from evals.context_suite.request_kinds import is_summary_request
 from codeagent.events import EventEmitter, ExecutionContext
 from codeagent.events.sink import RecordingEventSink
 from codeagent.messages import ToolUse, validate_tool_history
@@ -44,7 +44,7 @@ class OfflineContextSDK:
 
     def create(self, **kwargs):
         stop = "end_turn"
-        if kwargs.get("system", "").startswith(SUMMARIZATION_SYSTEM_PROMPT.split("{summary_char_budget}", 1)[0]):
+        if is_summary_request(kwargs):
             text = "离线脚本检查点（不能用于评判摘要质量）：\n" + json.dumps(self.gold["expected"], ensure_ascii=False)
             content = [{"type": "text", "text": text}]
         else:

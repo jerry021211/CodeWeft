@@ -6,12 +6,15 @@ import json
 from pathlib import Path
 
 from evals.metrics import TOKEN_FIELDS, request_usage
+from evals.context_suite.request_kinds import is_summary_request
 
 KINDS = ("main", "context_summary")
 ALL_FIELDS = (*TOKEN_FIELDS, "total_tokens")
 # These fields were not required by every historical manifest. Compare recorded
 # values (including one-sided presence), never invent today's defaults for them.
-OPTIONAL_PAIR_FIELDS = ("wall_timeout_seconds", "sdk_retries", "recovery_retries", "summary_max_tokens", "max_total_tokens")
+OPTIONAL_PAIR_FIELDS = ("wall_timeout_seconds", "sdk_retries", "recovery_retries", "max_total_tokens")
+# Read historical metadata without requiring an obsolete field in new reports.
+LEGACY_PAIR_FIELDS = ("summary_max_tokens",)
 
 
 def _read_records(path):
@@ -28,15 +31,6 @@ def _read_manifest(path):
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
-
-
-def _summary(request):
-    from codeagent.context.manager import SUMMARIZATION_SYSTEM_PROMPT
-    system = request.get("system")
-    return isinstance(system, str) and system.startswith((
-        SUMMARIZATION_SYSTEM_PROMPT.split("{summary_char_budget}", 1)[0],
-        "你是编程助手的上下文摘要器，只生成供后续继续工作的结构化 Markdown 摘要。",
-    ))
 
 
 def _sum_known(values):
@@ -78,7 +72,7 @@ def trial_tokens(root: Path, result: dict, mode: str) -> dict:
     kinds = {}
     missing = []
     for kind in KINDS:
-        subset = [request for request in requests if ("context_summary" if _summary(request) else "main") == kind] if requests_ok else []
+        subset = [request for request in requests if ("context_summary" if is_summary_request(request) else "main") == kind] if requests_ok else []
         values = {}
         for field in TOKEN_FIELDS:
             reported = []
@@ -117,7 +111,7 @@ def trial_tokens(root: Path, result: dict, mode: str) -> dict:
             "max_iterations": profile.get("max_iterations"), "max_tokens": profile.get("max_tokens"),
             "max_api_calls": profile.get("max_api_calls"),
             "common_context": common_context,
-            "runtime_options": {key: profile[key] for key in OPTIONAL_PAIR_FIELDS if key in profile},
+            "runtime_options": {key: profile[key] for key in (*OPTIONAL_PAIR_FIELDS, *LEGACY_PAIR_FIELDS) if key in profile},
         },
         "unrecorded_optional_pair_fields": [key for key in OPTIONAL_PAIR_FIELDS if key not in profile],
     }
