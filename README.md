@@ -85,6 +85,43 @@ Web 运行时有以下边界：
 
 ## 环境配置
 
+推理等级可通过 `.env` 的 `REASONING_EFFORT` 设置，也可以在输入框旁的“推理”下拉框
+逐次选择。
+CLI 也可使用 `codeagent --reasoning-effort max "分析这个项目"` 覆盖环境配置。
+当前适配 DeepSeek 官方 Anthropic 兼容接口，优先读取 `/models` 的真实档位；
+元数据不可用时，对已核实的 DeepSeek 模型使用官方定义的 `low`、`high`、`max`。
+`none` 关闭思考，`default` 省略推理参数并使用官方默认（目前 DeepSeek 为 `high`）。
+未知模型或未适配的供应商仅提供官方默认，显式传入不支持的档位会报错。
+
+`POST /api/conversations/{conversation_id}/runs` 支持可选字段 `reasoningEffort`，例如：
+
+```json
+{"content": "分析并修复这个问题", "reasoningEffort": "max"}
+```
+
+省略或传 `null` 使用环境配置；显式传 `"default"` 覆盖环境配置、恢复官方默认。
+选择会随消息和 Run metadata 持久化，并固定用于本次任务的模型调用、重试和子 Agent；
+Team 成员继承启动任务的选择。摘要、记忆和搜索改写等辅助调用使用官方默认。
+流式与非流式请求均发送官方 `thinking` / `output_config.effort` 字段。
+推理等级与 `MAX_TOKENS` 独立；输出上限过低仍可能截断高强度推理的响应。
+
+官方协议依据：[思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)、
+[模型元数据](https://api-docs.deepseek.com/api/list-models/)。
+
+普通 Agent 现在支持同一 Run 内的读取工具与只读子 Agent 并行。默认每个 Run 最多
+4 个并行读取、3 个子 Agent；另有进程级请求限额。写入、shell、MCP、`search_code`
+和未声明并发合同的自定义工具仍串行。关闭 `CODEAGENT_PARALLEL_ENABLED` 可回退。
+
+旧的 `subagent(description)` 保持前台串行行为。独立调查可使用
+`subagent(description, access="read_only")`，同轮多个调用可以同时执行；再传
+`run_in_background=true` 可让主 Agent 继续独立读取。`subagent_result` 查询或有限等待，
+`subagent_cancel` 停止单项；Web 的 Agent 面板也提供结果和停止入口。
+
+子 Agent 只有明确允许的读取和私有归档工具，不再委派。后台结果在安全边界通知主 Agent，
+写入前和最终回答前收齐当前 Run 的后台任务。取消一个 child 不影响兄弟；进程重启后未完成
+任务标记为 interrupted，不自动重放。多个会话或外部编辑器仍可能修改共享目录，这不是文件快照隔离。
+配置和实现边界见 [普通 Agent 并行说明](docs/parallel-execution.md)。
+
 复制 `.env.example` 为 `.env`，按你的模型服务填写：
 
 ```bash
@@ -129,6 +166,33 @@ CLI 默认启用基础 hooks：
 保护状态独立于上下文压缩；Web checkpoint 保存状态，循环或预算停止会标记为失败，
 CLI 单次执行返回非零退出码。规则、可调阈值、恢复语义和输入识别限制见
 [防循环与执行预算](docs/loop-guard.md)。
+
+## 可选联网搜索
+
+内置 `web_search` 工具使用 [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)，
+返回标题、来源 URL 和摘要供 Agent 引用。无需安装额外搜索 SDK。
+在启动目录的 `.env` 中配置后重启后端：
+
+```dotenv
+TAVILY_API_KEY=你的_Tavily_API_Key
+CODEAGENT_WEB_SEARCH_ENABLED=false
+CODEAGENT_WEB_SEARCH_TIMEOUT=20
+```
+
+- **Web**：输入框下方的「联网搜索：关 / 开」控制下一次请求。默认关闭；发送后保存选择，
+  重新打开会话时恢复，运行中不能修改。未配置 Key 时按钮禁用并提示配置方法。
+- **CLI**：`python -m codeagent --web-search "搜索 Python 最新发布信息"` 开启，
+  `python -m codeagent --no-web-search "分析当前项目"` 关闭。省略参数时使用环境默认值。
+- **API**：`POST /api/conversations/{id}/runs` 支持 `{"content":"搜索资料","webSearch":true}`；
+  `false` 强制关闭，省略或 `null` 使用环境默认值。缺少 Key 时开启请求返回 422。
+- **SDK**：`create_default_registry(web_search_config=env.web_search_config)`；也可从
+  `codeagent.tools.web_search` 导入 `WebSearchConfig` 自行配置。
+
+普通编码和 Discuss 均支持，普通子 Agent 继承父请求的选择；Team 会话暂不支持。
+关闭时不注册搜索工具，也不会调用 Tavily。这个开关只控制内置搜索工具，并非整个进程的网络隔离：
+模型 API、既有 shell/MCP 工具仍按原配置工作。搜索词会发送给 Tavily，Key 仅保存在服务端配置中。
+每次搜索默认 5 条、最多 10 条，使用 basic 深度；网络错误、限流或额度不足会明确报告，
+不自动重试收费请求。搜索结果作为外部参考资料处理。
 
 ## Discuss：只读讨论模式
 
@@ -454,13 +518,21 @@ CLI 和 Web 使用相同的加载规则，切换项目不会切换技能目录�
 
 ## 长期记忆：Memory
 
-默认启用轻量级长期记忆。每次主模型调用前，Agent 会先发起一次轻量 side-query：
+默认启用长期记忆，每个新用户回合执行一次选择，工具循环中不重复执行：
 
-1. 后端列出 memory 的 `filename + name + description` 清单。
-2. 使用当前配置的模型，让它从清单里选择真正有用的记忆文件，最多 5 个。
-3. 模型必须返回严格 JSON，例如 `{"selected_memories":["project-style.md"]}`。
-4. 后端只读取被选中的真实 markdown 文件，把完整内容注入本轮 system prompt。
-5. 单轮注入总预算默认 60KB，避免 memory 把上下文撑爆。
+1. 以本轮明确请求构建查询；长请求保留头尾，简短续问可补充上一条用户意图。
+2. 从完整 Markdown 记忆库的 SQLite FTS5 索引中按 BM25 召回候选，默认最多 50 条。
+   中文使用相邻双字词项，代码符号保留完整形式及拆分词项。
+3. 选择模型读取标题、描述及命中的正文片段，返回最多 5 个文件名，允许选空。
+4. 校验候选白名单，重新读取 Markdown；选择期间发生变化或消失的记录跳过。
+5. 按默认 60,000 字符预算注入完整记录，与当前用户请求一起进入历史。
+   超预算的整条跳过，继续尝试后续记录。候选为空时不调用选择模型。
+
+Markdown 是权威来源，`.retrieval-v1.sqlite3` 是可重建的派生索引。每次查询检查文件清单和
+元数据，通常只重新读取变化文件；默认每 60 秒进行一次按需全文核对（不是后台定时器）。
+索引不可用时降级到内存检索；Discuss、Team 只读期间及手动搜索均不写索引。
+`memory.selection.completed` 事件分别记录候选、选中、注入和跳过原因，不包含完整查询或记忆正文。
+具体行为、限制和离线数据见 [长期记忆改造说明](docs/memory-retrieval.md)。
 
 你的项目使用 `deepseek-v4-pro` 时，这个 side-query 也会走同一个 Anthropic-compatible
 客户端和同一个 `MODEL_ID`，不会硬编码 Sonnet。
@@ -504,6 +576,8 @@ MEMORY_MAX_LOADED_ITEMS=5
 MEMORY_SESSION_BUDGET_CHARS=60000
 MEMORY_MAX_MEMORY_BYTES=50000
 MEMORY_SELECTION_MODE=llm
+MEMORY_RETRIEVAL_MODE=indexed       # indexed | legacy；legacy 保留旧排序候选作对照
+MEMORY_INDEX_VERIFY_SECONDS=60     # 全文核对间隔；0 表示每次核对
 MEMORY_AUTO_EXTRACT=false
 MEMORY_EXTRACT_RECENT_MESSAGES=12
 MEMORY_CONSOLIDATE_THRESHOLD=30
@@ -513,7 +587,8 @@ MEMORY_ALLOW_SUBAGENT_WRITE=false
 
 `MEMORY_AUTO_EXTRACT=true` 时，Agent 会在每轮结束后让模型从最近对话中抽取稳定记忆。
 默认关闭，是为了避免把临时对话误写成长期状态。`MEMORY_CONSOLIDATE_MODE=model`
-会在记忆数量超过阈值后让模型合并重复记忆；默认 `simple` 只重建索引。
+会在记忆数量超过阈值后让模型合并重复记忆；默认 `simple` 不调用合并模型。
+`MEMORY.md` 人工目录在保存记忆时更新，回合结束不再为它重复扫描所有正文；检索索引按查询刷新。
 
 可以用下面的 query 测试手动记忆：
 

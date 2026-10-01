@@ -82,6 +82,15 @@ class ToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.definition.to_schema() for tool in self._tools.values()]
 
+    def parallel_safe(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        return bool(tool and tool.definition.effect == "read" and
+                    tool.definition.reentrant and self._execution_wrapper is None)
+
+    def read_only_copy(self) -> ToolRegistry:
+        """Only explicitly reentrant readers may be shared by an SDK child."""
+        return self.copy_without(name for name in self._tools if not self.parallel_safe(name))
+
     def execute(self, name: str, args: dict[str, Any] | None = None) -> ToolOutput:
         arguments = {} if args is None else args
         with trace_run(

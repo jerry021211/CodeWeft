@@ -67,6 +67,31 @@ class SequenceClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_source_answer_is_returned_without_format_retry(self) -> None:
+        from codeagent.tools.read import ReadFileTool
+        from codeagent.tools.workspace import WorkspaceGuard
+
+        answer = '{"path":"calc.py","symbol":"double","line":1,"quote":"def double(x):\\n    return x * 2"}'
+        client = SequenceClient([
+            ModelResponse(stop_reason="tool_use", content=[{
+                "type": "tool_use", "id": "read-source", "name": "read_file",
+                "input": {"file_path": "calc.py"},
+            }]),
+            ModelResponse(stop_reason="end_turn", content=[{"type": "text", "text": answer}]),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "calc.py").write_text("def double(x):\n    return x * 2\n", encoding="utf-8")
+            tools = ToolRegistry()
+            tools.register(ReadFileTool(workspace_guard=WorkspaceGuard(root)))
+            result = Agent(client=client, tools=tools, allow_subagents=False,
+                           config=AgentConfig(model="fake-model", max_iterations=4, loop_guard=None)).run(
+                               "读取 calc.py 的 double 函数，用 JSON 返回路径、函数名、行号和源码。")
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(result.final_text, answer)
+        self.assertEqual(result.stop_reason, "end_turn")
+
     def test_memory_maintenance_only_receives_messages_from_current_run(self) -> None:
         class CapturingMemoryManager:
             config = MemoryConfig(selection_mode="simple")

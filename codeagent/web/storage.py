@@ -278,6 +278,15 @@ class SQLiteRepository:
             next_event_seq INTEGER NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS subagent_runs (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS subagent_run_idx ON subagent_runs(run_id);
+
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_conversation
             ON runs(conversation_id)
             WHERE status IN ('queued', 'running');
@@ -7756,6 +7765,18 @@ class SQLiteRepository:
                     "UPDATE runs SET next_event_seq = ? WHERE id = ?",
                     (seq, row["id"]),
                 )
+                children = connection.execute(
+                    "SELECT snapshot_json FROM subagent_runs WHERE run_id = ? AND status NOT IN ('completed','failed','cancelled','interrupted')",
+                    (row["id"],),
+                ).fetchall()
+                for child in children:
+                    snapshot = _json_loads(child["snapshot_json"], {})
+                    snapshot.update(status="interrupted", result=reason)
+                    self._append_event_in_transaction(connection, RunEvent(
+                        type="subagent.interrupted", run_id=row["id"],
+                        agent_id=snapshot["subagent_id"], parent_agent_id="agent_root",
+                        payload=snapshot,
+                    ))
         if recovered:
             with self._event_condition:
                 self._event_condition.notify_all()
@@ -7935,6 +7956,24 @@ class SQLiteRepository:
 
     # Events ------------------------------------------------------------
 
+    def list_subagent_runs(self, run_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            self._ensure_open()
+            rows = self._connection.execute(
+                "SELECT snapshot_json FROM subagent_runs WHERE run_id = ? ORDER BY rowid", (run_id,),
+            ).fetchall()
+            return [_json_loads(row[0], {}) for row in rows]
+
+    def get_subagent_run(self, run_id: str, subagent_id: str) -> dict[str, Any]:
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT snapshot_json FROM subagent_runs WHERE run_id = ? AND id = ?", (run_id, subagent_id),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFoundError("Subagent not found in this run")
+            return _json_loads(row[0], {})
+
     def append_event(self, event: RunEvent) -> RunEvent:
         """Append an event and atomically assign its run-local sequence.
 
@@ -7990,6 +8029,26 @@ class SQLiteRepository:
             conversation_id=conversation_id,
             payload=redact_payload(event.payload),
         )
+        if (persisted.type.startswith("subagent.") and
+                persisted.payload.get("subagent_id") == persisted.agent_id and
+                persisted.payload.get("status") in {
+                    "queued", "running", "waiting_approval", "cancelling",
+                    "completed", "failed", "cancelled", "interrupted",
+                }):
+            existing_child = connection.execute(
+                "SELECT run_id, status FROM subagent_runs WHERE id = ?", (persisted.agent_id,),
+            ).fetchone()
+            if existing_child is not None and existing_child["run_id"] != persisted.run_id:
+                raise StorageConflictError("Subagent belongs to another run")
+            terminal = {"completed", "failed", "cancelled", "interrupted"}
+            if (existing_child is None or existing_child["status"] not in terminal or
+                    existing_child["status"] == persisted.payload["status"]):
+                connection.execute(
+                    "INSERT INTO subagent_runs(id, run_id, status, snapshot_json, updated_at) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET status=excluded.status, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at",
+                    (persisted.agent_id, persisted.run_id, persisted.payload["status"],
+                     _json_dumps(persisted.payload), persisted.occurred_at),
+                )
         connection.execute(
             """
             INSERT INTO events(

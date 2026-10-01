@@ -132,9 +132,13 @@ class ExecutionBudgetTests(unittest.TestCase):
 
     def test_unlimited_tokens_still_account_usage_and_enforce_call_limit(self):
         usage = TokenUsage(input_tokens=400_000, cache_read_input_tokens=100_000, output_tokens=4)
-        agent = self.agent(Client(final(usage=usage)), limits=LoopGuardConfig(max_total_tokens=0))
-        self.assertEqual(agent.run("start").final_text, "done")
-        self.assertEqual(agent.export_execution_state()["budget"]["total_tokens"], 500_004)
+        for limits in (LoopGuardConfig(), LoopGuardConfig(max_total_tokens=0)):
+            with self.subTest(limits=limits):
+                agent = self.agent(Client(final(usage=usage)), limits=limits)
+                result = agent.run("start")
+                self.assertEqual(result.final_text, "done")
+                self.assertEqual(result.stop_reason, "end_turn")
+                self.assertEqual(agent.export_execution_state()["budget"]["total_tokens"], 500_004)
 
         tools = ToolRegistry()
         tools.register_handler(ToolDefinition("probe", "", {}), lambda: "ok")

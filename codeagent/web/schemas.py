@@ -31,6 +31,8 @@ class CreateRunRequest(ApiModel):
     content: str = Field(min_length=1, max_length=200_000)
     useTeam: bool = False
     mode: Literal["normal", "discuss"] = "normal"
+    webSearch: bool | None = None
+    reasoningEffort: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class ApprovalDecisionRequest(ApiModel):
@@ -198,6 +200,8 @@ class RuntimeConfigResponse(ApiModel):
     workspace: str
     max_tokens: int | None = None
     max_iterations: int | None = None
+    reasoning_effort: str = "default"
+    reasoning: dict[str, Any] = Field(default_factory=dict)
     planning_backend: Literal["tasks", "todo"] = "tasks"
     features: dict[str, bool] = Field(default_factory=dict)
 

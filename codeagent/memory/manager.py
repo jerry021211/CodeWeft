@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from codeagent.events import EventEmitter
 from codeagent.memory.models import MEMORY_TYPES, MemoryConfig, MemoryRecord
 from codeagent.memory.store import MemoryStore
 from codeagent.memory.access import MemoryWriteBlocked
+from codeagent.memory.retrieval import version
 from codeagent.messages import Message, extract_text
 from codeagent.recovery import RecoveryRuntime
 from codeagent.runtime import CancellationToken
@@ -39,6 +43,8 @@ class MemoryManager:
         self.recovery_runtime = recovery_runtime
 
     def catalog_prompt(self) -> str:
+        if self.config.selection_mode == "llm":
+            return ""  # Automatic selection builds a per-task catalog, not a startup scan.
         return self.store.catalog_prompt(max_items=self.config.max_items_in_prompt)
 
     def select_context(
@@ -50,28 +56,82 @@ class MemoryManager:
         max_tokens: int,
         event_emitter: EventEmitter | None = None,
         cancellation: CancellationToken | None = None,
+        current_query: str | None = None,
+        allow_index_write: bool = True,
     ) -> str:
         if not self.config.enabled or self.config.selection_mode != "llm":
             return ""
         if client is None:
             return ""
 
-        records = self.store.list_memories()[: self.config.max_items_in_prompt]
-        if not records:
-            return ""
-
-        selected = self._select_memory_filenames(
-            records,
-            messages,
-            client=client,
-            model=model,
-            max_tokens=max_tokens,
-            event_emitter=event_emitter,
-            cancellation=cancellation,
-        )
-        if not selected:
-            return ""
-        return self._load_selected_context(selected)
+        started = time.perf_counter()
+        query, truncated = _retrieval_query(messages, current_query)
+        trace: dict[str, Any] = {
+            "selection_id": uuid4().hex, "strategy": self.config.retrieval_mode,
+            "query_hash": hashlib.sha256(query.encode()).hexdigest(),
+            "query_chars": len(query), "query_truncated": truncated,
+            "candidate_ids": [], "selected_ids": [], "injected_ids": [], "skipped": [],
+            "status": "started",
+        }
+        try:
+            if cancellation:
+                cancellation.raise_if_cancelled()
+            if self.config.max_loaded_items <= 0 or self.config.max_items_in_prompt <= 0:
+                trace["status"] = "selection_disabled"
+                return ""
+            versions = {}
+            snippets = None
+            if self.config.retrieval_mode == "legacy":
+                records = self.store.list_memories()[:self.config.max_items_in_prompt]
+                versions = {record.filename: version(record) for record in records}
+                trace["backend"] = "legacy"
+            else:
+                retrieval = self.store.retrieve(
+                    query, limit=self.config.max_items_in_prompt,
+                    allow_index_write=allow_index_write,
+                    verify_seconds=self.config.index_verify_seconds,
+                    check_cancelled=cancellation.raise_if_cancelled if cancellation else None,
+                )
+                records = [hit.record for hit in retrieval.hits]
+                versions = {hit.record.filename: hit.version for hit in retrieval.hits}
+                snippets = {hit.record.filename: hit.excerpt for hit in retrieval.hits}
+                trace.update(backend=retrieval.backend, index_revision=retrieval.revision,
+                             files_scanned=retrieval.files_scanned, files_read=retrieval.files_read,
+                             retrieval_reason=retrieval.reason, full_verification=retrieval.full_verification,
+                             candidate_scores=[hit.score for hit in retrieval.hits])
+            trace["retrieval_ms"] = round((time.perf_counter() - started) * 1000, 3)
+            trace["candidate_ids"] = [record.filename for record in records]
+            trace["candidate_versions"] = versions
+            if not records:
+                trace["status"] = "no_candidates"
+                return ""
+            selected_at = time.perf_counter()
+            selected = self._select_memory_filenames(
+                records, messages, client=client, model=model, max_tokens=max_tokens,
+                event_emitter=event_emitter, cancellation=cancellation,
+                query=query if snippets is not None else None, snippets=snippets, trace=trace,
+            )
+            trace["selection_ms"] = round((time.perf_counter() - selected_at) * 1000, 3)
+            trace["selected_ids"] = selected
+            if cancellation:
+                cancellation.raise_if_cancelled()
+            if not selected:
+                if trace["status"] == "started":
+                    trace["status"] = "selected_empty"
+                return ""
+            loaded_at = time.perf_counter()
+            context = self._load_selected_context(selected, expected_versions=versions, trace=trace)
+            trace["injection_ms"] = round((time.perf_counter() - loaded_at) * 1000, 3)
+            trace["injected_chars"] = len(context)
+            trace["status"] = "injected" if context else "injection_empty"
+            return context
+        except Exception as exc:
+            trace.update(status="error", error_type=type(exc).__name__)
+            raise
+        finally:
+            trace["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
+            if event_emitter is not None:
+                event_emitter.emit("memory.selection.completed", trace)
 
     def after_turn(
         self,
@@ -93,11 +153,14 @@ class MemoryManager:
                         model=model,
                         max_tokens=max_tokens,
                     )
-                self.consolidate_if_needed(
-                    client=_fork_client(client, "memory_consolidate"),
-                    model=model,
-                    max_tokens=max_tokens,
-                )
+                # remember() already updates the human-readable catalog. Do not
+                # re-read every body twice after each ordinary read-only turn.
+                if self.config.consolidate_mode == "model":
+                    self.consolidate_if_needed(
+                        client=_fork_client(client, "memory_consolidate"),
+                        model=model,
+                        max_tokens=max_tokens,
+                    )
         except MemoryWriteBlocked:
             return
 
@@ -242,8 +305,12 @@ class MemoryManager:
         max_tokens: int,
         event_emitter: EventEmitter | None = None,
         cancellation: CancellationToken | None = None,
+        query: str | None = None,
+        snippets: dict[str, str] | None = None,
+        trace: dict[str, Any] | None = None,
     ) -> list[str]:
-        prompt = _memory_selection_prompt(records, messages, max_items=self.config.max_loaded_items)
+        prompt = _memory_selection_prompt(records, messages, max_items=self.config.max_loaded_items,
+                                          query=query, snippets=snippets)
         side_messages = [{"role": "user", "content": prompt}]
         system = _MEMORY_SELECT_SYSTEM
         side_max_tokens = min(max_tokens, 800)
@@ -267,6 +334,8 @@ class MemoryManager:
                 cancellation=cancellation,
             )
             if result.response is None:
+                if trace is not None:
+                    trace["status"] = "model_failed"
                 return []
             response = result.response
         else:
@@ -280,6 +349,8 @@ class MemoryManager:
         payload = _parse_json_object(extract_text(response.content))
         selected = payload.get("selected_memories")
         if not isinstance(selected, list):
+            if trace is not None:
+                trace["status"] = "selection_parse_error"
             return []
 
         valid = {
@@ -290,30 +361,44 @@ class MemoryManager:
         if self.config.max_loaded_items <= 0:
             return []
         filenames: list[str] = []
-        for item in selected:
-            filename = Path(str(item or "")).name
+        for item in selected[:200]:
+            filename = item if isinstance(item, str) else ""
             if filename not in valid or filename in filenames:
+                if trace is not None:
+                    trace["skipped"].append({"id": filename[:160], "reason": "not_candidate_or_duplicate"})
                 continue
             filenames.append(filename)
             if len(filenames) >= self.config.max_loaded_items:
                 break
         return filenames
 
-    def _load_selected_context(self, filenames: list[str]) -> str:
+    def _load_selected_context(self, filenames: list[str], *,
+                               expected_versions: dict[str, str] | None = None,
+                               trace: dict[str, Any] | None = None) -> str:
         sections: list[str] = []
         prefix = "本轮选取的长期记忆：\n\n"
         remaining = self.config.session_budget_chars - len(prefix)
         for filename in filenames:
             try:
                 record = self.store.load_file(filename)
-            except KeyError:
+            except (KeyError, OSError, ValueError):
+                if trace is not None:
+                    trace["skipped"].append({"id": filename, "reason": "missing_or_invalid"})
+                continue
+            if expected_versions is not None and version(record) != expected_versions.get(filename):
+                if trace is not None:
+                    trace["skipped"].append({"id": filename, "reason": "changed_since_retrieval"})
                 continue
             body = _render_selected_memory(record)
             cost = len(body) + (2 if sections else 0)
             if cost > remaining:
+                if trace is not None:
+                    trace["skipped"].append({"id": filename, "reason": "budget"})
                 continue
             sections.append(body)
             remaining -= cost
+            if trace is not None:
+                trace["injected_ids"].append(filename)
         return prefix + "\n\n".join(sections) if sections else ""
 
 
@@ -332,14 +417,17 @@ def _memory_extraction_prompt(messages: list[Message]) -> str:
 def _memory_selection_prompt(   
     records: list[MemoryRecord],
     messages: list[Message],
-    *, max_items: int = 5,
+    *, max_items: int = 5, query: str | None = None,
+    snippets: dict[str, str] | None = None,
 ) -> str:
     memory_list = [
         {
             "filename": record.filename,
-            "name": record.name,
+            "name": record.name[:160] if snippets is not None else record.name,
             "type": record.memory_type,
-            "description": record.description,
+            "description": record.description[:400] if snippets is not None else record.description,
+            **({"evidence": snippets.get(record.filename, ""), "source": record.source[:100],
+                "updated_at": record.updated_at[:80]} if snippets is not None else {}),
         }
         for record in records
         if record.filename
@@ -350,7 +438,7 @@ def _memory_selection_prompt(
         "返回严格 JSON，格式必须是："
         "{\"selected_memories\":[\"file1.md\"]}。如果没有有用记忆，返回 "
         "{\"selected_memories\":[]}。\n\n"
-        f"当前对话/任务：\n{_recent_message_text(messages)}\n\n"
+        f"当前对话/任务：\n{query if query is not None else _recent_message_text(messages)}\n\n"
         f"长期记忆清单：\n{json.dumps(memory_list, ensure_ascii=False)}"
     )
 
@@ -363,6 +451,40 @@ def _render_selected_memory(record: MemoryRecord) -> str:
         f"{record.content}\n"
         "</memory>"
     )
+
+
+def _retrieval_query(messages: list[Message], current_query: str | None = None) -> tuple[str, bool]:
+    """Prefer the explicit user request, never retrieve from tool logs or injected memory."""
+    users = []
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, list):
+            texts = [block.get("text", "") for block in content
+                     if isinstance(block, dict) and block.get("type") == "text"]
+            content = texts[-1] if texts else ""
+        if isinstance(content, str) and content and not content.startswith(("[运行时", "<system-reminder>")):
+            users.append(content)
+    current = current_query if current_query is not None else (users[-1] if users else "")
+    prior = users[:-1] if users and users[-1] == current else users
+    followup = len(current.strip()) <= 80 and any(
+        marker in current.casefold() for marker in ("继续", "上次", "刚才", "那个", "continue", "as before", "same as")
+    )
+    query, truncated = _head_tail(current, 6000)
+    if followup and prior:
+        previous, clipped = _head_tail(prior[-1], 2000)
+        query = previous + "\n当前请求：" + query
+        truncated = truncated or clipped
+    return query, truncated
+
+
+def _head_tail(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    marker = "\n[中间省略]\n"
+    half = (limit - len(marker)) // 2
+    return text[:half] + marker + text[-half:], True
 
 
 def _fork_client(client: Any | None, call_kind: str) -> Any | None:

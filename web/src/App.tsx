@@ -51,6 +51,8 @@ export default function App() {
   });
   const sending = Boolean(selectedId && sendingConversations.includes(selectedId));
   const [modes, setModes] = useState<Record<string, ExecutionMode>>({});
+  const [webSearchChoices, setWebSearchChoices] = useState<Record<string, boolean>>({});
+  const [reasoningChoices, setReasoningChoices] = useState<Record<string, string>>({});
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [runIds, setRunIds] = useState<Record<string, string>>({});
@@ -121,6 +123,20 @@ export default function App() {
       ?? [...teams].sort((left, right) => right.team.updated_at.localeCompare(left.team.updated_at))[0];
   }, [teamsQuery.data]);
   const teamLeadActive = Boolean(team && !["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(team.team.state));
+  const webSearchAvailable = Boolean(runtimeQuery.data?.features?.web_search);
+  const webSearch = webSearchAvailable && !teamLeadActive && (webSearchChoices[selectedId ?? ""]
+    ?? lastUserMessage?.metadata?.web_search_enabled ?? runtimeQuery.data?.features?.web_search_default ?? false);
+  const selectWebSearch = (enabled: boolean) => {
+    if (selectedId) setWebSearchChoices((current) => ({ ...current, [selectedId]: enabled }));
+  };
+  const reasoningOptions = ["default", ...(runtimeQuery.data?.reasoning?.supports_disabled ? ["none"] : []),
+    ...(runtimeQuery.data?.reasoning?.supported_levels ?? [])];
+  const savedReasoning = reasoningChoices[selectedId ?? ""] ?? lastUserMessage?.metadata?.reasoning_effort
+    ?? runtimeQuery.data?.reasoning_effort ?? "default";
+  const reasoningEffort = typeof savedReasoning === "string" && reasoningOptions.includes(savedReasoning) ? savedReasoning : "default";
+  const selectReasoning = (effort: string) => {
+    if (selectedId) setReasoningChoices((current) => ({ ...current, [selectedId]: effort }));
+  };
 
   const taskListQuery = useQuery({
     queryKey: ["task-lists", taskListId],
@@ -215,6 +231,7 @@ export default function App() {
     onSuccess: (conversation) => {
       queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
       setSelectedId(conversation.id);
+      setSearch("");
       setLeftOpen(false);
       setWorkspacePickerOpen(false);
       setWorkspacePath(undefined);
@@ -268,8 +285,8 @@ export default function App() {
 
   const sendRun = useMutation({
     mutationKey: ["send-run"],
-    mutationFn: async ({ conversationId, content, mode: submittedMode }: { conversationId: string; content: string; mode: ExecutionMode }) => {
-      const result = await api.createRun(conversationId, content, false, submittedMode);
+    mutationFn: async ({ conversationId, content, mode: submittedMode, webSearch, reasoningEffort }: { conversationId: string; content: string; mode: ExecutionMode; webSearch: boolean; reasoningEffort: string }) => {
+      const result = await api.createRun(conversationId, content, false, submittedMode, webSearch, reasoningEffort);
       return { ...result, content, conversationId };
     },
     onSuccess: (result) => {
@@ -374,6 +391,8 @@ export default function App() {
       conversationId: selectedId,
       content: `继续处理 Task #${task.task.id}：${task.task.subject}。先读取 TaskGet，按 description 的完成条件执行，并及时用 TaskUpdate 更新状态。`,
       mode,
+      webSearch,
+      reasoningEffort,
     });
   };
 
@@ -393,10 +412,10 @@ export default function App() {
       content,
       created_at: new Date().toISOString(),
       status: "complete",
-      metadata: { mode },
+      metadata: { mode, web_search_enabled: webSearch, reasoning_effort: reasoningEffort },
     };
     queryClient.setQueryData<Message[]>(messagesKey(selectedId), (current = []) => [...current, optimistic]);
-    sendRun.mutate({ conversationId: selectedId, content, mode });
+    sendRun.mutate({ conversationId: selectedId, content, mode, webSearch, reasoningEffort });
   };
 
   const teamPanelProps = {
@@ -417,18 +436,18 @@ export default function App() {
     <div className="h-dvh min-h-[520px] overflow-hidden bg-canvas text-ink">
       <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[264px_minmax(0,1fr)] xl:grid-cols-[264px_minmax(0,1fr)_320px]">
         <div className="hidden min-h-0 lg:block">
-          <ConversationSidebar conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={setSelectedId} onCreate={() => setWorkspacePickerOpen(true)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} />
+          <ConversationSidebar conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={setSelectedId} onCreateProject={() => setWorkspacePickerOpen(true)} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} />
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} discussMode={mode === "discuss"} onModeChange={selectMode} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
+          <ChatWorkspace reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} discussMode={mode === "discuss"} onModeChange={selectMode} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>
       </div>
 
       <Drawer open={leftOpen} side="left" onClose={() => setLeftOpen(false)}>
-        <ConversationSidebar mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreate={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} onClose={() => setLeftOpen(false)} />
+        <ConversationSidebar mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreateProject={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} onClose={() => setLeftOpen(false)} />
       </Drawer>
       <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onClose={() => setRightOpen(false)} {...teamPanelProps} /></Drawer>
 

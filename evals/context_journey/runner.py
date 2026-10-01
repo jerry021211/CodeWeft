@@ -16,7 +16,7 @@ from evals.context_suite.cost_report import build_cost_report, cost_report_lines
 from evals.evidence import hashes, read_json, seal, snapshot, write_json
 from evals.runner import ROOT, source_metadata
 from evals.tracing import tracing_settings
-from evals.context_journey.cases import TITLES, material
+from evals.context_journey.cases import MATERIAL_VERSION, TITLES, material
 from evals.context_journey.grading import grade
 
 
@@ -37,7 +37,8 @@ def plan(*, mode="offline", cases=None, variants=("A", "D"), repeats=1, log_char
     if len(schedule) > max_trials or len(schedule) * max_api_calls > max_total_api_calls:
         raise ValueError("Matrix exceeds trial/call caps; reduce selection or explicitly raise caps")
     random.Random(order_seed).shuffle(schedule)
-    return {"version": "context-journey-v1", "mode": mode, "schedule": schedule, "trials": len(schedule),
+    return {"version": "context-journey-v1", "material_version": MATERIAL_VERSION,
+            "mode": mode, "schedule": schedule, "trials": len(schedule),
             "planned_api_call_cap": len(schedule) * max_api_calls, "planned_wall_seconds_cap": len(schedule) * timeout,
             "log_chars": log_chars, "batches": batches, "order_seed": order_seed, "quality_measurement": mode == "live",
             "limits": {"max_iterations_per_turn": max_iterations, "max_tokens_per_main_request": max_tokens,
@@ -48,6 +49,7 @@ def write_report(root, results, mode):
     tokens = build_token_report(root, results, mode)
     costs = build_cost_report(tokens)
     lines = ["# 连续任务保持评测", "", f"模式：{mode}。每场是同一 Agent/会话的多个真实用户回合。",
+             f"材料版本：{MATERIAL_VERSION}。启动背景由独立准备回合读取；不与旧版材料直接合并统计。",
              "离线响应为脚本注入，只验证执行链路；真实模式也只覆盖小型纯函数项目，不能外推大型编码任务。",
              "自动通过 = 最终功能/状态字段 + 授权操作检查通过；不等于所有自然语言和调查行为都已人工确认。",
              "压缩覆盖单独统计：完整读取固定背景批次，且 C/D 在首次交付请求前已完成至少两次摘要、一次更新，并折叠关键早期要求。",
@@ -71,6 +73,16 @@ def write_report(root, results, mode):
         lines.append(f'| {r["case_id"]}/{r["variant"]}/{r["repeat"]} | {label} | {covered} | '
                      f'{r["coverage"]["successful_summaries"]} | {r["recall_attempts"]} | {seconds:.1f} | '
                      f'[{r["trial_directory"]}]({r["trial_directory"]}/result.json) |')
+    skips = [(r, skip) for r in results for skip in r.get("compaction_preflight_skips", [])]
+    if skips:
+        lines += ["", "摘要调用前预检：以下检查未调用摘要模型，不触发失败冷却，也不计为成功摘要。",
+                  "最多可省是假设摘要和交接包装完全不占空间的乐观上限，不是实际节省量。",
+                  "| 案例/组/重复 | 阶段 | 候选切点 | 必须保留的用户消息字符 | 最多可省字符 | 最低要求字符 |",
+                  "|---|---|---:|---:|---:|---:|"]
+        for r, skip in skips:
+            lines.append(f'| {r["case_id"]}/{r["variant"]}/{r["repeat"]} | {skip.get("phase")} | '
+                         f'{skip["candidate_cut"]} | {skip["protected_user_chars"]} | '
+                         f'{skip["max_possible_saved_chars"]} | {skip["required_saved_chars"]} |')
     lines += ["", "所有场次另有 manual-review.json：重复搜索是待核查候选，不自动定罪，也不把无人审查记为无偏移。",
               "T03 须先真实修复解析器并通过测试；T04 须先完成修改；T06 须先接收事件日志。前置失败不能归为摘要遗忘。",
               "T06 若精确字段已在摘要/近期消息中，直接回答有效；否则需人工结合实际请求和归档回读核查来源，不能单凭字面命中归因。",
@@ -86,7 +98,8 @@ def write_report(root, results, mode):
         "4. 对 T03 检查旧问题是否被重新列为待办；对 T05 检查总体开发是否被当成当前交付。\n"
         "5. 对 T06 对照 model-requests.jsonl、messages.json 和归档，判断精确字段是否已可见、补查是否定向。\n"
         "6. 记录具体消息/请求编号和理由；拿不准写待定，不填已通过。\n", encoding="utf-8")
-    write_json(root / "result.json", {"version": "context-journey-v1", "mode": mode, "quality_measurement": mode == "live",
+    write_json(root / "result.json", {"version": "context-journey-v1", "material_version": MATERIAL_VERSION,
+        "mode": mode, "quality_measurement": mode == "live",
         "all_automatic_checks_passed": all(r["task_success"] for r in results), "trials": results,
         "all_coverage_sufficient": all(r["memory_evidence_eligible"] for r in results), "no_drift_verified": None,
         "token_accounting": tokens, "cost_estimates": costs})

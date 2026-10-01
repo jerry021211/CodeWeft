@@ -31,7 +31,10 @@ class SubagentTool:
                             "自包含的任务说明：动作、目标、准确范围、约束、完成条件和验证方法。"
                             "允许修改文件时需明确说明。"
                         ),
-                    }
+                    },
+                    "access": {"type": "string", "enum": ["inherit", "read_only"],
+                               "description": "read_only 为可并行调查；默认 inherit 保留前台串行行为。"},
+                    "run_in_background": {"type": "boolean", "description": "仅只读任务可后台启动，返回子任务 ID。"},
                 },
                 "required": ["description"],
             },
@@ -39,5 +42,7 @@ class SubagentTool:
         init=False,
     )
 
-    def run(self, description: str) -> str:
-        return self.spawn_fn(description)
+    def run(self, description: str, access: str = "inherit", run_in_background: bool = False) -> str:
+        if access == "inherit" and not run_in_background:
+            return self.spawn_fn(description)
+        return self.spawn_fn(description, access=access, run_in_background=run_in_background)

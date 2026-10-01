@@ -125,6 +125,9 @@ def grade(trial, execution):
     exposures = {r["path"]: r["complete"] for r in rows(trial / "exposure.jsonl")}
     complete_exposure = all(exposures.get(p["evidence_file"], False) for p in seed["phases"] if p.get("evidence_file"))
     coverage = compression_coverage(events, execution.get("anchor_indices", []), spec["variant"], complete_exposure)
+    preflight_skips = [{"phase": e.get("phase"), **e["payload"]} for e in events
+                      if e.get("type") == "context.compaction_skipped"
+                      and e.get("payload", {}).get("reason") == "insufficient_compressible_history"]
     recall = [i for i in intents if i["name"] in {"load_context_history", "load_tool_output"}]
     query_keys = [(i["name"], json.dumps(i["input"], sort_keys=True)) for i in intents if i["name"] in {"read_file", "grep", "glob"}]
     duplicates = [{"tool": key[0], "input": json.loads(key[1]), "count": count}
@@ -138,6 +141,7 @@ def grade(trial, execution):
     result = {"case_id": case, "variant": spec["variant"], "repeat": spec["repeat"], "trial_directory": trial.name,
               "task_success": all(checks.values()), "checks": checks, "failed_checks": [k for k, v in checks.items() if not v],
               "forbidden_attempts": forbidden, "forbidden_mutations": bad_changes, "coverage": coverage,
+              "compaction_preflight_skips": preflight_skips,
               "preconditions": preconditions, "quality_measurement": spec["profile"]["mode"] == "live",
               "memory_evidence_eligible": coverage["sufficient"] and all(preconditions.values()),
               "manual_review_required": True, "no_drift_verified": None, "recall_attempts": len(recall),

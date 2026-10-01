@@ -22,14 +22,19 @@ Agent 能用 `run_project_tests` 运行固定功能检查，不提供 shell。
 
 ## 2. 为什么会有足够长的历史
 
-开场有约 48,000 字符的固定历史运行背景，随后四个阶段分别要求完整读取约 48,000 字符的记录。
+材料 v2 的准备回合先完整读取 `evidence/batch-00.txt`（约 48,000 字符），简短确认后结束；下一回合才开始正式任务。
+随后四个阶段分别要求完整读取约 48,000 字符的记录。背景内容不再拼进当前任务的用户消息。
 记录是带不同订单号、状态、耗时和金额的合成日志；它们不是新的用户要求。
 
 真实任务要求只在对应的早期用户消息里给出。最后不会重复提醒 T01 的最终字段或 T02 的禁止覆盖要求。
 T03 的导出要求属于真正的新子任务，因此在后续消息中提出。
 
 使用现有 stress 配置，摘要水位为 40,000 字符，近期保留、输出预算、失败回退沿用项目规则。
-开场提供长背景是为了避免首次可压缩历史只有几条短指令，导致“节省不足”而进入冷却。没有为测试修改主程序的冷却或切点规则。
+把准备回合单独结束，是为了让背景成为可以逐渐折叠的旧历史，同时继续原样保护当前用户要求。
+主程序在调用摘要模型前，先扣除必须保留的当前用户消息、近期消息及固定请求内容，估算最多可能节省多少。
+若连“摘要和交接包装完全不占空间”的乐观情况都达不到原来的最低收益要求，则记录 `insufficient_compressible_history`，不调用摘要模型、不进入失败冷却。
+预检通过后仍需检查真实摘要收益；真正调用后的失败、截断或收益不足继续沿用原有回退和冷却。
+报告会列出预检跳过的阶段、切点和收益上限。它不是成功摘要，不能计入覆盖；旧 v1 报告保留，不与新材料直接合并统计。
 
 每场同一个 Agent 依次接收全部阶段消息，不重建模型会话、不清空历史。每阶段保存消息、摘要状态、文件哈希和 SQLite 检查点。
 保存检查点不等于已经验证重启；本套没有重启或强制终止服务器测试。
@@ -62,7 +67,7 @@ python -m evals.context_journey prepare --output eval-results/context-journey-ki
 
 - `任务说明.md`：按时间顺序列出的用户消息，先读它。
 - `workspace/`：被测 Agent 能看到的源码、输入、日志、报告。
-- `scenario.json`：完整用户阶段及启动背景，供评测控制器使用。
+- `scenario.json`：完整用户阶段及材料配方，供评测控制器使用；背景正文在 `workspace/evidence/`。
 - `evaluator-only.json`：评测答案和规则，只供人和评分程序查看，不能交给被测 Agent。
 
 这一步不调用模型。正式 run 会重新按同一配方创建独立材料，不直接使用手工修改的展示目录。
@@ -92,10 +97,10 @@ python -m evals.context_journey run --mode offline --cases T01 T02 T03 T04 T05 T
 ## 7. 付费前先只预览计划
 
 ```powershell
-python -m evals.context_journey run --mode live --cases T01 T04 T05 --variants A D --repeats 1 --max-trials 6 --max-total-api-calls 384 --preview
+python -m evals.context_journey run --mode live --cases T01 T04 --variants A D --repeats 1 --max-trials 4 --max-total-api-calls 256 --preview
 ```
 
-有 `--preview` 就只打印计划，不读模型凭据、不调用模型。共 6 场，每场最多 64 次请求，计划上限 384 次；不代表一定调用这么多，也不是费用上限。
+有 `--preview` 就只打印计划，不读模型凭据、不调用模型。共 4 场，每场最多 64 次请求，计划上限 256 次；不代表一定调用这么多，也不是费用上限。
 
 默认每个用户回合最多 8 轮，每场所有回合总计最多 600 秒。64 次请求限制由整场主模型和摘要共同使用。
 累计 token 不设上限，单次主模型输出默认 2048；摘要沿用项目现有预算。
@@ -105,7 +110,7 @@ python -m evals.context_journey run --mode live --cases T01 T04 T05 --variants A
 确认要产生模型费用后，执行与预览相同的命令，去掉 `--preview`：
 
 ```powershell
-python -m evals.context_journey run --mode live --cases T01 T04 T05 --variants A D --repeats 1 --max-trials 6 --max-total-api-calls 384
+python -m evals.context_journey run --mode live --cases T01 T04 --variants A D --repeats 1 --max-trials 4 --max-total-api-calls 256
 ```
 
 沿用当前 `.env`/环境变量中的主模型、摘要模型和 LangSmith 设置。

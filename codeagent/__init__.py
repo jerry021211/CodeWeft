@@ -33,6 +33,7 @@ from codeagent.recovery import (
     RecoveryState,
 )
 from codeagent.skills import LoadedSkill, SkillLoader, SkillMetadata
+from codeagent.runtime.parallel import ParallelConfig
 from codeagent.tools import TodoStore, ToolDefinition, ToolRegistry, create_default_registry
 
 __all__ = [
@@ -56,6 +57,7 @@ __all__ = [
     "PermissionDecision",
     "PermissionPolicy",
     "PlanningBackend",
+    "ParallelConfig",
     "PromptAssemblyResult",
     "PromptConfig",
     "PromptMode",

@@ -706,6 +706,19 @@ def create_app(
                 detail="Team 功能已关闭，此会话仍关联未结束的 Team。请新建普通会话；原 Team 记录和现场保持不变。",
             )
         options = {"use_team": body.useTeam}
+        if body.reasoningEffort is not None:
+            from codeagent.reasoning import environment_capabilities, validate_effort
+            validate_effort(body.reasoningEffort, environment_capabilities(runtime_env))
+            options["reasoning_effort"] = body.reasoningEffort
+        search_config = getattr(runtime_env, "web_search_config", None)
+        search_enabled = body.webSearch if body.webSearch is not None else bool(search_config and search_config.enabled)
+        if search_enabled:
+            if body.useTeam or repo.get_active_team_run_for_conversation(conversation_id):
+                raise HTTPException(status_code=409, detail="联网搜索目前仅支持普通会话和 Discuss 模式。")
+            if not search_config or not search_config.available:
+                raise HTTPException(status_code=422, detail="请先在服务端配置 TAVILY_API_KEY，再开启联网搜索。")
+        if body.webSearch is not None or search_enabled:
+            options["web_search_enabled"] = search_enabled
         if body.mode == "discuss":
             options["mode"] = body.mode
         run = scheduler.submit(conversation_id, content, **options)
@@ -723,6 +736,24 @@ def create_app(
     def cancel_run(run_id: str) -> RunResponse:
         _require_run(repo, run_id)
         return _run_response(repo, scheduler.cancel(run_id))
+
+    @app.get("/api/runs/{run_id}/subagents")
+    def list_subagents(run_id: str):
+        _require_run(repo, run_id)
+        return repo.list_subagent_runs(run_id)
+
+    @app.get("/api/runs/{run_id}/subagents/{subagent_id}/result")
+    def subagent_result(run_id: str, subagent_id: str, offset: int = 1, limit: int = 200):
+        record = repo.get_subagent_run(run_id, subagent_id)
+        if record.get("output_handle"):
+            from codeagent.tools.runtime_data import LoadToolOutputTool
+            handle = Path(record["output_handle"])
+            record["output"] = str(LoadToolOutputTool(handle.parent).run(str(handle), offset=offset, limit=limit))
+        return record
+
+    @app.post("/api/runs/{run_id}/subagents/{subagent_id}/cancel")
+    def cancel_subagent(run_id: str, subagent_id: str):
+        return scheduler.cancel_subagent(run_id, subagent_id)
 
     @app.get("/api/runs/{run_id}/questions", response_model=list[UserQuestionResponse])
     def list_questions(run_id: str):
@@ -805,6 +836,7 @@ def create_app(
 
     @app.get("/api/runtime-config", response_model=RuntimeConfigResponse)
     def runtime_config() -> RuntimeConfigResponse:
+        from codeagent.reasoning import environment_capabilities
         return RuntimeConfigResponse(
             model=_config_value(runtime_env, "model_id", "model"),
             workspace=str(workspace_path),
@@ -813,6 +845,8 @@ def create_app(
                 _config_value(runtime_env, "max_iterations")
             ),
             planning_backend="tasks",
+            reasoning_effort=getattr(runtime_env, "reasoning_effort", "default"),
+            reasoning=environment_capabilities(runtime_env),
             features={
                 "sse": True,
                 "approvals": True,
@@ -822,6 +856,8 @@ def create_app(
                 "workspace_browser": True,
                 "tasks": True,
                 "mcp_config": True,
+                "web_search": bool(getattr(getattr(runtime_env, "web_search_config", None), "available", False)),
+                "web_search_default": bool(getattr(getattr(runtime_env, "web_search_config", None), "enabled", False)),
                 "agent_team": bool(
                     _config_value(runtime_env, "team_runtime_enabled")
                 ),

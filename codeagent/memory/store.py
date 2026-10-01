@@ -6,6 +6,7 @@ import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Iterator
 
 from codeagent.memory.access import MemoryAccessPolicy
@@ -29,11 +30,13 @@ class MemoryStore:
         self.root = Path(root)
         self.max_memory_bytes = max_memory_bytes
         self.access_policy = access_policy
+        self._lock = RLock()
 
     @contextmanager
     def reading(self) -> Iterator[None]:
         if self.access_policy is None:
-            yield
+            with self._lock:
+                yield
             return
         with self.access_policy.reading():
             yield
@@ -41,7 +44,8 @@ class MemoryStore:
     @contextmanager
     def writing(self) -> Iterator[None]:
         if self.access_policy is None:
-            yield
+            with self._lock:
+                yield
             return
         with self.access_policy.writing():
             yield
@@ -121,7 +125,17 @@ class MemoryStore:
             raise KeyError(filename)
         return self._read_record(path)
 
+    def retrieve(self, query: str, **kwargs):
+        from codeagent.memory.retrieval import retrieve
+        return retrieve(self, query, **kwargs)
+
     def search(self, query: str, *, max_items: int = 5) -> list[MemoryRecord]:
+        # Manual search is available in Discuss; never mutate a derived cache here.
+        if not query.strip():
+            return self.list_memories()[:max(0, max_items)]
+        return [hit.record for hit in self.retrieve(query, limit=max_items, allow_index_write=False).hits]
+
+    def legacy_search(self, query: str, *, max_items: int = 5) -> list[MemoryRecord]:
         records = self.list_memories()
         if not records:
             return []

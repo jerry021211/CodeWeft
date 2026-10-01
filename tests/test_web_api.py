@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - optional dependency in core-only insta
 from codeagent.events import RunEvent
 from codeagent.web.api import create_app
 from codeagent.web.storage import SQLiteRepository
+from codeagent.tools.web_search import WebSearchConfig
 
 
 class FakeScheduler:
@@ -29,6 +30,7 @@ class FakeScheduler:
         self.submissions: list[tuple[str, str, bool]] = []
         self.mcp_reloads: list[str] = []
         self.modes: list[str] = []
+        self.web_search_choices: list[bool | None] = []
 
     def start(self) -> None:
         self.started = True
@@ -36,7 +38,8 @@ class FakeScheduler:
     def stop(self) -> None:
         self.stopped = True
 
-    def submit(self, conversation_id: str, content: str, *, use_team: bool = False, mode: str = "normal"):
+    def submit(self, conversation_id: str, content: str, *, use_team: bool = False, mode: str = "normal", web_search_enabled: bool | None = None):
+        self.web_search_choices.append(web_search_enabled)
         self.modes.append(mode)
         self.submissions.append((conversation_id, content, use_team))
         run = self.repository.create_run(conversation_id)
@@ -111,6 +114,27 @@ class WebApiTests(unittest.TestCase):
         pending = self.repository.create_user_question(run.id, "文件名？", [])
         self.repository.request_run_cancel(run.id)
         self.assertEqual(self.client.post(f"/api/runs/{run.id}/questions/{pending['id']}/answer", json={"answer": "out.json"}).status_code, 409)
+
+    def test_web_search_configuration_and_run_override(self):
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        url = f"/api/conversations/{conversation.id}/runs"
+        response = self.client.post(url, json={"content": "search", "webSearch": True})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("TAVILY_API_KEY", response.json()["detail"])
+        self.assertEqual(self.scheduler.submissions, [])
+        self.env.web_search_config = WebSearchConfig(enabled=True, api_key="never-expose-this")
+        config = self.client.get("/api/runtime-config")
+        self.assertTrue(config.json()["features"]["web_search"])
+        self.assertTrue(config.json()["features"]["web_search_default"])
+        self.assertNotIn("never-expose-this", config.text)
+        for choice in (False, True, None):
+            conversation = self.repository.create_conversation(workspace=self.workspace)
+            body = {"content": "search", "mode": "discuss"}
+            if choice is not None:
+                body["webSearch"] = choice
+            response = self.client.post(f"/api/conversations/{conversation.id}/runs", json=body)
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(self.scheduler.web_search_choices[-1], choice if choice is not None else True)
 
     def test_activity_history_is_paginated_without_text_delta_replay(self):
         conversation = self.repository.create_conversation(workspace=self.workspace)

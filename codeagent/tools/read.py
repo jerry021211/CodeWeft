@@ -15,8 +15,12 @@ class ReadFileTool:
 
     definition: ToolDefinition = ToolDefinition(
         name="read_file",
+        effect="read", reentrant=True,
         description=(
             "读取文件并返回行号；修改前读取相关上下文。用 offset/limit 限定行段，截断时按需继续读取。"
+            "引用代码时，选取能说明行为的连续原文，去掉行号前缀；报告该片段第一行实际显示的行号，"
+            "不要用函数定义行、搜索命中行或读取起点代替。提交前按末行号−首行号+1核对用户要求的引用行数上限；"
+            "若超限，选取更短且仍含关键行为的连续片段，勿拼接省略中间行。"
         ),
         input_schema={
             "type": "object",

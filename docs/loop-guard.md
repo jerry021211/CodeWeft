@@ -50,12 +50,13 @@ CLI 和 Web 通过 `EnvironmentConfig.loop_guard_config` 读取以下环境变�
 | `CODEAGENT_LOOP_RETRY_DELAY_SECONDS` | `retry_delay_seconds` | 0.25 |
 | `CODEAGENT_RUN_MAX_MODEL_CALLS` | `max_model_calls` | 80 |
 | `CODEAGENT_RUN_MAX_TOOL_CALLS` | `max_tool_calls` | 200 |
-| `CODEAGENT_RUN_MAX_TOTAL_TOKENS` | `max_total_tokens` | 300000 |
+| `CODEAGENT_RUN_MAX_TOTAL_TOKENS` | `max_total_tokens` | 0（不限） |
 | `CODEAGENT_RUN_MAX_ACTIVE_SECONDS` | `max_active_seconds` | 1800 |
 
 次数与执行时间为正值；`tool_max_retries` 和 `retry_delay_seconds` 可为 0，后者适合
-测试或离线运行时关闭退避等待；`max_total_tokens=0` 仅关闭 Token
-上限，其余兜底继续生效。这些是初始调优参数：12 条限制局部检测成本，3 次失败与
+测试或离线运行时关闭退避等待；累计 Token 上限默认关闭（`max_total_tokens=0`），
+用量仍照常累计，其余兜底继续生效。需要限制时可显式设置正整数；已有环境变量中的
+正数配置仍然有效。这些是初始调优参数：12 条限制局部检测成本，3 次失败与
 2 次参数错误给模型纠正机会；80 次模型请求、200 次工具请求和 30 分钟限制单次
 本地开发任务的消耗。它们不是经过本项目任务集验证的最佳值。
 
@@ -64,7 +65,7 @@ CLI 和 Web 通过 `EnvironmentConfig.loop_guard_config` 读取以下环境变�
 
 Token 口径是 provider 报告的普通输入、缓存创建输入、缓存读取输入与输出之和，
 不是仅新增 Token，也不是费用。缺少 usage 的调用保持未知，不按真实消耗为零解释；
-已知部分仍累计，模型请求次数和时间限制仍有效。Token 检查在响应返回后生效，
+已知部分仍累计，模型请求次数和时间限制仍有效。显式启用上限时，Token 检查在响应返回后生效，
 可能超出最多一个在途响应的消耗；不能作为预付费硬额度。
 
 工具仅在结果明确标记为临时故障且安全重放时有限重试，默认额外 2 次、共 3 次，

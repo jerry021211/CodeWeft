@@ -1,5 +1,5 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Send, Sparkles, Square, Sun, Users, Wifi, WifiOff } from "lucide-react";
+import { Bot, CircleStop, Globe, Menu, Monitor, Moon, PanelRight, Plug, Send, Sparkles, Square, Sun, Users, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Approval, ApprovalDecision, ExecutionMode, Message } from "@/types/api";
@@ -29,6 +29,13 @@ type Props = {
   runtimeModel?: string | null;
   teamLeadActive?: boolean;
   discussMode?: boolean;
+  webSearch?: boolean;
+  webSearchAvailable?: boolean;
+  reasoningEffort?: string;
+  reasoningOptions?: string[];
+  reasoningDefault?: string | null;
+  onReasoningChange?: (effort: string) => void;
+  onWebSearchChange?: (enabled: boolean) => void;
   onModeChange: (mode: ExecutionMode) => void;
   workspace?: string;
   theme: "system" | "light" | "dark";
@@ -161,8 +168,27 @@ export function ChatWorkspace(props: Props) {
             className="scrollbar-thin min-h-11 w-full resize-none bg-transparent px-2.5 py-2 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-3 px-1 pt-1">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <ModeSelector mode={props.discussMode ? "discuss" : "normal"} disabled={active || props.sending || props.loading || props.teamLeadActive} onChange={props.onModeChange} />
+              <label className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
+                推理
+                <select aria-label="推理等级" value={props.reasoningEffort ?? "default"}
+                  disabled={active || props.sending || props.loading || props.teamLeadActive || !props.reasoningOptions || props.reasoningOptions.length < 2}
+                  title={props.teamLeadActive ? "团队成员继承启动任务时的推理等级" : "按模型官方档位控制本次任务的思考强度"}
+                  onChange={(event) => props.onReasoningChange?.(event.target.value)}
+                  className="rounded-lg border border-line bg-surface px-2 py-1.5 text-xs text-ink outline-none focus:border-accent disabled:opacity-40">
+                  {(props.reasoningOptions ?? ["default"]).map((effort) => (
+                    <option key={effort} value={effort}>{effort === "default" ? `官方默认${props.reasoningDefault ? ` (${props.reasoningDefault})` : ""}`
+                      : ({ none: "关闭思考", low: "低 (low)", high: "高 (high)", max: "最大 (max)" } as Record<string, string>)[effort] ?? effort}</option>
+                  ))}
+                </select>
+              </label>
+              <button type="button" aria-pressed={Boolean(props.webSearch)} aria-label="联网搜索" disabled={active || props.sending || props.loading || props.teamLeadActive || !props.webSearchAvailable}
+                title={props.teamLeadActive ? "团队会话暂不支持联网搜索" : !props.webSearchAvailable ? "请在服务端 .env 配置 TAVILY_API_KEY 并重启" : "允许本次请求使用 Tavily 搜索网页"}
+                onClick={() => props.onWebSearchChange?.(!props.webSearch)}
+                className={cx("inline-flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-40", props.webSearch ? "border-accent/30 bg-accent/10 text-accent" : "border-line text-ink-muted hover:bg-surface-muted")}>
+                <Globe className="size-3.5" />联网搜索{props.webSearch ? "：开" : "：关"}
+              </button>
               {props.teamLeadActive && (
                 <span className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2.5 text-[10px] font-medium text-accent">
                   <Users className="size-3.5" /> Team 运行中

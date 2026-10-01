@@ -21,6 +21,7 @@ class LoadToolOutputTool:
     definition: ToolDefinition = field(
         default=ToolDefinition(
             name="load_tool_output",
+            effect="read", reentrant=True,
             description=(
                 "只读访问当前执行者私有目录中已保存的大型工具结果。"
                 "仅在预览缺少必要信息时读取；offset 从1开始、limit限制行数。"
@@ -159,6 +160,7 @@ class LoadContextHistoryTool:
     definition: ToolDefinition = field(
         default=ToolDefinition(
             name="load_context_history",
+            effect="read", reentrant=True,
             description=(
                 "只读访问当前执行者的上下文 JSONL 存档，恢复摘要省略的精确历史。"
                 "file_path 必须来自摘要提供的真实 transcript 路径。"

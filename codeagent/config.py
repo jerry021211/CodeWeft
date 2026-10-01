@@ -17,6 +17,8 @@ from codeagent.planning import PlanningBackend
 from codeagent.prompts import PromptConfig
 from codeagent.recovery import RecoveryConfig
 from codeagent.runtime.data_paths import default_runtime_data_dir
+from codeagent.runtime.parallel import ParallelConfig
+from codeagent.tools.web_search import WebSearchConfig
 
 
 def _load_dotenv() -> None:
@@ -64,6 +66,7 @@ class EnvironmentConfig:
     api_key: str | None = None
     base_url: str | None = None
     max_tokens: int = 8000
+    reasoning_effort: str = "default"
     max_iterations: int = 50
     stream: bool = False
     enable_skills: bool = True
@@ -82,6 +85,8 @@ class EnvironmentConfig:
     team_model_response_timeout: float = 300.0
     team_model_call_timeout: float = 600.0
     web_max_concurrent_runs: int = 4
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    web_search_config: WebSearchConfig = field(default_factory=WebSearchConfig)
 
     def __post_init__(self) -> None:
         if type(self.web_max_concurrent_runs) is not int or self.web_max_concurrent_runs < 1:
@@ -99,9 +104,15 @@ class EnvironmentConfig:
         )
         return cls(
             model_id=model_id,
+            web_search_config=WebSearchConfig(
+                enabled=_bool_env("CODEAGENT_WEB_SEARCH_ENABLED", False),
+                api_key=_optional_env("TAVILY_API_KEY"),
+                timeout_seconds=_float_env("CODEAGENT_WEB_SEARCH_TIMEOUT", 20.0),
+            ),
             api_key=_first_optional_env("API_KEY", "ANTHROPIC_API_KEY"),
             base_url=_first_optional_env("BASE_URL", "ANTHROPIC_BASE_URL"),
             max_tokens=_int_env("MAX_TOKENS", 8000),
+            reasoning_effort=_optional_env("REASONING_EFFORT") or "default",
             max_iterations=_int_env("MAX_ITERATIONS", 50),
             stream=_bool_env("STREAMING", False),
             enable_skills=_bool_env("ENABLE_SKILLS", True),
@@ -167,6 +178,8 @@ class EnvironmentConfig:
                 consolidate_threshold=_int_env("MEMORY_CONSOLIDATE_THRESHOLD", 30),
                 consolidate_mode=os.getenv("MEMORY_CONSOLIDATE_MODE", "simple"),
                 allow_subagent_write=_bool_env("MEMORY_ALLOW_SUBAGENT_WRITE", False),
+                retrieval_mode=os.getenv("MEMORY_RETRIEVAL_MODE", "indexed"),
+                index_verify_seconds=_float_env("MEMORY_INDEX_VERIFY_SECONDS", 60.0),
             ),
             prompt_config=PromptConfig(
                 template_dir=_optional_path_env("PROMPT_TEMPLATE_DIR"),
@@ -207,7 +220,7 @@ class EnvironmentConfig:
                 empty_response_limit=_int_env("CODEAGENT_LOOP_EMPTY_RESPONSE_LIMIT", 2),
                 max_model_calls=_int_env("CODEAGENT_RUN_MAX_MODEL_CALLS", 80),
                 max_tool_calls=_int_env("CODEAGENT_RUN_MAX_TOOL_CALLS", 200),
-                max_total_tokens=_int_env("CODEAGENT_RUN_MAX_TOTAL_TOKENS", 300_000),
+                max_total_tokens=_int_env("CODEAGENT_RUN_MAX_TOTAL_TOKENS", 0),
                 max_active_seconds=_float_env("CODEAGENT_RUN_MAX_ACTIVE_SECONDS", 1800.0),
                 tool_max_retries=_int_env("CODEAGENT_LOOP_TOOL_MAX_RETRIES", 2),
                 retry_delay_seconds=_float_env("CODEAGENT_LOOP_RETRY_DELAY_SECONDS", 0.25),
@@ -220,6 +233,12 @@ class EnvironmentConfig:
             team_runtime_enabled=_bool_env("TEAM_RUNTIME_ENABLED", False),
             team_write_enabled=_bool_env("TEAM_WRITE_ENABLED", False),
             web_max_concurrent_runs=_int_env("CODEAGENT_WEB_MAX_CONCURRENT_RUNS", 4),
+            parallel_config=ParallelConfig(
+                enabled=_bool_env("CODEAGENT_PARALLEL_ENABLED", True),
+                max_tools=_int_env("CODEAGENT_PARALLEL_TOOLS", 4),
+                max_subagents=_int_env("CODEAGENT_PARALLEL_SUBAGENTS", 3),
+                max_pending_subagents=_int_env("CODEAGENT_SUBAGENT_QUEUE_LIMIT", 16),
+            ),
             team_model_response_timeout=_float_env("TEAM_MODEL_RESPONSE_TIMEOUT", 300.0),
             team_model_call_timeout=_float_env("TEAM_MODEL_CALL_TIMEOUT", 600.0),
             team_worktree_root=Path(
@@ -238,6 +257,7 @@ class EnvironmentConfig:
             max_iterations=self.max_iterations,
             planning_backend=planning_backend or self.planning_mode,
             loop_guard=self.loop_guard_config,
+            parallel=self.parallel_config,
         )
 
     def create_anthropic_client(
@@ -248,6 +268,7 @@ class EnvironmentConfig:
         event_emitter: Any | None = None,
         usage_tracker: Any | None = None,
         call_kind: str = "main",
+        reasoning_effort: str | None = None,
     ) -> AnthropicModelClient:
         return AnthropicModelClient(
             api_key=self.api_key,
@@ -257,6 +278,8 @@ class EnvironmentConfig:
             event_emitter=event_emitter,
             usage_tracker=usage_tracker,
             call_kind=call_kind,
+            reasoning_effort=(reasoning_effort if reasoning_effort is not None else self.reasoning_effort)
+            if call_kind in {"main", "subagent"} else "default",
         )
 
 

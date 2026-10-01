@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
+from codeagent.tools.search_files import (
+    PAGE_PROPERTIES, matches_path, page_footer, search_files, validate_page, validate_pattern,
+)
 from codeagent.tools.workspace import WorkspaceGuard
 
 
@@ -15,8 +18,11 @@ class GlobTool:
 
     definition: ToolDefinition = ToolDefinition(
         name="glob",
+        effect="read", reentrant=True,
         description=(
-            "按 glob 模式定位路径，支持 ** 递归匹配，例如 **/*.py。未知文件路径时先定位，避免连续猜测不存在的文件。"
+            "按 glob 模式定位路径，支持 ** 递归匹配，例如 **/*.py。默认遵守 Git 忽略规则（含未提交的新文件）。"
+            "每页默认 100 条，按路径稳定排序；has_more 时用 next_offset 继续，文件变化后从 offset=0 重搜。"
+            "查旧副本设 include_ignored=true。scan_complete=false 表示有目录未搜到。未知路径时先定位，避免连续猜测。"
         ),
         input_schema={
             "type": "object",
@@ -29,14 +35,20 @@ class GlobTool:
                     "type": "string",
                     "description": "搜索目录，默认当前目录",
                 },
+                **PAGE_PROPERTIES,
             },
             "required": ["pattern"],
         },
     )
     workspace_guard: WorkspaceGuard | None = None
 
-    def run(self, pattern: str, path: str = ".") -> str:
+    def run(
+        self, pattern: str, path: str = ".", offset: int = 0,
+        limit: int = 100, include_ignored: bool = False,
+    ) -> str:
         try:
+            validate_page(offset, limit)
+            validate_pattern(pattern)
             if self.workspace_guard is not None:
                 base = self.workspace_guard.resolve(path)
                 pattern = self.workspace_guard.validate_pattern(pattern)
@@ -45,22 +57,23 @@ class GlobTool:
             if not base.is_dir():
                 return f"Error: {path} is not a directory"
 
-            hits = list(base.glob(pattern))
-            if self.workspace_guard is not None:
-                hits = [hit for hit in hits if self.workspace_guard.allows(hit)]
-            hits.sort(
-                key=lambda candidate: (
-                    candidate.stat().st_mtime if candidate.exists() else 0
-                ),
-                reverse=True,
+            inventory = search_files(base, self.workspace_guard, include_ignored=include_ignored)
+            candidates = set(inventory.paths) | inventory.directories
+            directories_only = pattern.endswith(("/", "\\"))
+            hits = sorted(
+                (candidate for candidate in candidates
+                 if (not directories_only or candidate in inventory.directories)
+                 and matches_path(candidate.relative_to(base), pattern)),
+                key=lambda p: (str(p).casefold(), str(p)),
             )
-
             total = len(hits)
-            shown = hits[:100]
-            result = "\n".join(str(hit) for hit in shown)
-
-            if total > 100:
-                result += f"\n... ({total} matches, showing first 100)"
-            return result or "No files matched."
+            shown = hits[offset:offset + limit]
+            output = [str(hit) for hit in shown] or ["No files matched on this page."]
+            output.append(page_footer(
+                offset=offset, count=len(shown), has_more=total > offset + len(shown),
+                complete=not inventory.incomplete,
+            ))
+            output.extend(inventory.notes)
+            return "\n".join(output)
         except Exception as exc:
             return f"Error: {exc}"

@@ -34,7 +34,7 @@ TABLE_SCOPES = {
     "user_questions": ("run", "run_id"),
     "messages": ("conversation", "conversation_id"),
     **{name: ("run", "run_id") for name in (
-        "events", "approvals", "model_calls", "checkpoints",
+        "events", "approvals", "model_calls", "checkpoints", "subagent_runs",
     )},
 }
 

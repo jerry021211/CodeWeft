@@ -17,7 +17,7 @@
 
 固定历史评测现在默认不设置“每场累计 token 上限”，A/B/C/D 一样；之前隐含的 30 万 token 上限已取消。这样不会因为多次请求累计用量超过 30 万，就在答案返回时中断。累计 token 仍照常记录并计算费用。
 
-这不改变触发摘要的字符阈值，也不改变单次输出长度。请求次数、迭代次数和超时限制仍然生效。报告开头会显示“每场累计 token 预算：不设上限”，每场的 `manifest.json` 和 `effective-loop-guard.json` 会记录 `max_total_tokens: 0`。这项默认值只改了固定历史评测，日常 Web/CLI 的默认设置不变。
+这不改变触发摘要的字符阈值，也不改变单次输出长度。请求次数、迭代次数和超时限制仍然生效。报告开头会显示“每场累计 token 预算：不设上限”，每场的 `manifest.json` 和 `effective-loop-guard.json` 会记录 `max_total_tokens: 0`。日常 Web/CLI 现在也默认关闭累计 Token 上限，需要时可通过 `CODEAGENT_RUN_MAX_TOTAL_TOKENS` 显式设置正整数。
 
 继续执行下面的 `step` 命令即可使用新设置。若需要专门对比旧的 30 万预算，用 `run` 命令显式指定（会调用真实模型）：
 

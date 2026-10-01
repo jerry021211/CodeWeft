@@ -17,6 +17,7 @@ from codeagent.context.models import ContextConfig, RuntimeState
 from codeagent.context.budget import RequestBudget, RequestBudgetError, enforce_request, inspect_request, validate_budget
 from codeagent.context.history import conversation_view, history_hash, is_user_turn, serializable, user_content
 from codeagent.context.projection import build_tool_projection
+from codeagent.context.telemetry import tool_projection_metrics
 from codeagent.context.summary_source import bounded_summary_messages, summary_source_messages
 from codeagent.context.summary_prompt import SUMMARIZATION_SYSTEM_PROMPT, summary_handoff, summary_user_prompt
 from codeagent.events import EventEmitter
@@ -86,27 +87,32 @@ class ContextManager:
         validate_tool_history(messages)
         self._validate_summary(messages)
         start = self.state.compacted_message_count if self.state.summary_text else 0
-        turn_start = self._turn_start(messages)
-        tail = messages[start:] if start else messages
-        projected = conversation_view(tail, max(0, turn_start - start))
+        projected = self._retained_messages(messages, start)
         if self.state.summary_text:
             # Anthropic history starts with user. Summary remains explicitly untrusted data.
-            prefix: list[Message] = [{"role": "user", "content": summary_handoff(
+            projected = [{"role": "user", "content": summary_handoff(
                 summary=self.state.summary_text, revision=self.state.summary_revision,
                 transcript=self.state.summary_transcript,
-            )}]
-            # The active task and any steering within folded rounds remain verbatim.
-            for message in messages[turn_start:start]:
-                user = user_content(message)
-                if user is not None and message.get("_context_source") != "runtime":
-                    prefix.append(user)
-            projected = prefix + projected
-        if any("_context_source" in message for message in projected):
-            projected = [{key: value for key, value in message.items() if key != "_context_source"}
-                         for message in projected]
+            )}] + projected
         if clean_tools:
             projected = self._project_tools(projected)
         validate_tool_history(projected)
+        return projected
+
+    def _retained_messages(self, messages: list[Message], start: int) -> list[Message]:
+        """Shared retained view for actual requests and the optimistic savings bound."""
+        turn_start = self._turn_start(messages)
+        tail = messages[start:] if start else messages
+        projected = conversation_view(tail, max(0, turn_start - start))
+        # The active task and any steering within folded rounds remain verbatim.
+        protected = [user for message in messages[turn_start:start]
+                     if message.get("_context_source") != "runtime"
+                     and (user := user_content(message)) is not None]
+        if protected:
+            projected = protected + projected
+        if any("_context_source" in message for message in projected):
+            projected = [{key: value for key, value in message.items() if key != "_context_source"}
+                         for message in projected]
         return projected
 
     def _project_tools(self, messages: list[Message]) -> list[Message]:
@@ -133,11 +139,14 @@ class ContextManager:
         tools: list[dict[str, Any]] | None = None,
         model: str = "",
         max_tokens: int = 0,
+        model_window: dict[str, Any] | None = None,
     ) -> list[Message]:
         projected = self.project_messages(messages)
         params = dict(model=model, system=system, messages=projected, tools=tools or [], max_tokens=max_tokens)
         budget = inspect_request(**params)
-        window = self.config.window_for_model(model)
+        # Production clients use discovery exclusively, including when unknown.
+        # Keep explicit limits for SDK clients that do not implement discovery.
+        window = model_window["context_window_tokens"] if model_window is not None else self.config.window_for_model(model)
         if self._under_pressure(budget, window):
             # Only inspect the irreducible portion when it could block compaction.
             enforce_request(**{**params, "messages": []}, max_request_chars=self.config.max_request_chars,
@@ -164,21 +173,34 @@ class ContextManager:
             budget = inspect_request(**params)
             if not self._eligible_cuts(messages):
                 break
+        telemetry = {
+            "model": model,
+            "context_window_tokens": window,
+            "context_window_source": model_window["context_window_source"] if model_window is not None else "configuration",
+            "context_window_reason": model_window.get("context_window_reason") if model_window is not None else None,
+            "context_window_model": model_window.get("context_window_model") if model_window is not None else model,
+            "near_context_ratio": self.config.near_context_ratio,
+            "max_request_chars": self.config.max_request_chars,
+            "compact_threshold_chars": min(self.config.compact_threshold_chars, self.config.max_request_chars),
+            "canonical_messages": len(messages),
+            "projected_messages": len(projected),
+            "summary_revision": self.state.summary_revision,
+            "compacted_message_count": self.state.compacted_message_count,
+            **(tool_projection_metrics(messages, projected) if event_emitter is not None else {}),
+        }
         try:
             validate_budget(budget, max_request_chars=self.config.max_request_chars,
                             context_window_tokens=window)
         except RequestBudgetError as exc:
             if event_emitter is not None:
                 event_emitter.emit("context.request_blocked", {
-                    **exc.budget.to_dict(), "reason": exc.reason,
+                    **telemetry, **exc.budget.to_dict(), "reason": exc.reason,
                     "last_compaction": self.last_compaction,
                 })
             raise
         if event_emitter is not None:
             event_emitter.emit("context.request_projected", {
-                **budget.to_dict(), "canonical_messages": len(messages),
-                "projected_messages": len(projected), "summary_revision": self.state.summary_revision,
-                "compacted_message_count": self.state.compacted_message_count,
+                **telemetry, **budget.to_dict(),
                 "last_compaction_status": self.last_compaction["status"],
             })
         return projected
@@ -292,6 +314,37 @@ class ContextManager:
             if not cuts:
                 self.last_compaction = {"status": "no_work", "reason": "insufficient_complete_history"}
                 return self.project_messages(messages)
+            before = request or dict(model="", system="", messages=self.project_messages(messages), tools=[], max_tokens=0)
+            before_budget = request_budget or inspect_request(**before)
+            required_savings = max(256, int(before_budget.request_chars * 0.05))
+            # Omit the entire future summary envelope. Even this optimistic bound
+            # must save enough; never charge the model for a provably useless cut.
+            preflights = {}
+            for cut in cuts:
+                retained = self._retained_messages(messages, cut)
+                if request is not None:
+                    retained = self._project_tools(retained)
+                floor = inspect_request(**{**before, "messages": retained})
+                protected = [user for message in messages[self._turn_start(messages):cut]
+                             if message.get("_context_source") != "runtime"
+                             and (user := user_content(message)) is not None]
+                preflights[cut] = {
+                    "candidate_cut": cut,
+                    "before_request_chars": before_budget.request_chars,
+                    "retained_request_chars": floor.request_chars,
+                    "protected_user_chars": sum(len(json.dumps(serializable(m), ensure_ascii=False,
+                                                               separators=(",", ":"))) for m in protected),
+                    "max_possible_saved_chars": before_budget.request_chars - floor.request_chars,
+                    "required_saved_chars": required_savings,
+                }
+            viable = [cut for cut in cuts if preflights[cut]["max_possible_saved_chars"] >= required_savings]
+            if not viable:
+                best = max(preflights.values(), key=lambda entry: entry["max_possible_saved_chars"])
+                self.last_compaction = {"status": "no_work", "reason": "insufficient_compressible_history",
+                                        "summary_called": False, "candidate_count": len(cuts), **best}
+                if event_emitter is not None:
+                    event_emitter.emit("context.compaction_skipped", dict(self.last_compaction))
+                return before["messages"]
             # Shrink only at legal boundaries, counting the complete summary request.
             params = None
             bounded_source = False
@@ -299,7 +352,7 @@ class ContextManager:
                 # Prefer complete source data. If even the smallest batch is too
                 # large, use field-level excerpts of the ORIGINAL canonical source.
                 for bounded_source in (False, True):
-                    for end in reversed(cuts):
+                    for end in reversed(viable):
                         candidate = self._summary_params(messages[start:end], bounded=bounded_source)
                         try:
                             enforce_request(**candidate, max_request_chars=self.config.summary_input_max_chars,
@@ -321,8 +374,6 @@ class ContextManager:
             revision = self.state.summary_revision
             started = time.monotonic()
             try:
-                before = request or dict(model="", system="", messages=self.project_messages(messages), tools=[], max_tokens=0)
-                before_budget = request_budget or inspect_request(**before)
                 self._check_cancelled()
                 summary = self._model_summary(messages[start:end], client=client, params=params)
                 self._check_cancelled()
@@ -341,11 +392,13 @@ class ContextManager:
                 )
                 after_budget = inspect_request(**{**before, "messages": candidate_view})
                 saved = before_budget.request_chars - after_budget.request_chars
-                if (saved < max(256, int(before_budget.request_chars * 0.05))
+                if (saved < required_savings
                         or after_budget.estimated_prompt_tokens >= before_budget.estimated_prompt_tokens):
                     self._start_cooldown()
                     self.last_compaction = {"status": "skipped", "reason": "insufficient_savings",
-                                            "saved_chars": saved}
+                                            "saved_chars": saved, "summary_called": True,
+                                            "after_request_chars": after_budget.request_chars,
+                                            "preflight": preflights[end]}
                     return before["messages"]
                 # Immutable linked segments keep old checkpoint references stable,
                 # without rewriting every previously archived message each time.
@@ -382,6 +435,7 @@ class ContextManager:
                 "covered_cursor": end, "folded_messages": end - start,
                 "retained_messages": len(messages) - end, "summary_chars": len(summary),
                 "summary_revision": self.state.summary_revision,
+                "summary_called": True, "preflight": preflights[end],
                 "source_previews_used": bounded_source,
                 "duration_ms": round((time.monotonic() - started) * 1000),
             }

@@ -27,7 +27,7 @@ class LoopGuardConfig:
     empty_response_limit: int = 2
     max_model_calls: int = 80
     max_tool_calls: int = 200
-    max_total_tokens: int = 300_000
+    max_total_tokens: int = 0
     max_active_seconds: float = 1800.0
     tool_max_retries: int = 2
     retry_delay_seconds: float = 0.25

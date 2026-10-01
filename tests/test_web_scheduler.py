@@ -48,6 +48,7 @@ class _FakeFactory:
     def __init__(self, gate=None):
         self.gate = gate
         self.prompt_modes = []
+        self.web_search_choices = []
 
     def create(
         self,
@@ -57,9 +58,11 @@ class _FakeFactory:
         permission_broker,
         checkpoint=None,
         root_prompt_mode=None,
+        web_search_enabled=False,
     ):
         del permission_broker, checkpoint
         self.prompt_modes.append(root_prompt_mode)
+        self.web_search_choices.append(web_search_enabled)
         return _FakeAgent(event_emitter, cancellation, self.gate)
 
 
@@ -201,6 +204,26 @@ class SchedulerTests(unittest.TestCase):
             users = [m for m in self.repository.list_messages(self.conversation.id) if m.role == "user"]
             self.assertEqual([m.metadata["mode"] for m in users], ["discuss", "normal"])
             self.assertEqual(factory.prompt_modes, [PromptMode.DISCUSS, None])
+        finally:
+            scheduler.stop()
+
+    def test_web_search_choice_is_snapshotted_per_run(self):
+        factory = _FakeFactory()
+        scheduler = RunScheduler(self.repository, factory)
+        try:
+            for enabled in (True, False):
+                run = scheduler.submit(self.conversation.id, "search", web_search_enabled=enabled)
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    current = self.repository.get_run(run.id)
+                    if current.status in {"completed", "failed"}:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(current.status, "completed", current.error)
+                self.assertEqual(current.metadata["web_search_enabled"], enabled)
+            users = [m for m in self.repository.list_messages(self.conversation.id) if m.role == "user"]
+            self.assertEqual([m.metadata["web_search_enabled"] for m in users], [True, False])
+            self.assertEqual(factory.web_search_choices, [True, False])
         finally:
             scheduler.stop()
 

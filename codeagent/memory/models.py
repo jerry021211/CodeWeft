@@ -25,6 +25,15 @@ class MemoryConfig:
     consolidate_threshold: int = 30
     consolidate_mode: str = "simple"
     allow_subagent_write: bool = False
+    retrieval_mode: str = "indexed"
+    index_verify_seconds: float = 60.0
+
+    def __post_init__(self) -> None:
+        import math
+        if self.retrieval_mode not in {"indexed", "legacy"}:
+            raise ValueError("Memory retrieval_mode must be indexed or legacy")
+        if not math.isfinite(self.index_verify_seconds) or self.index_verify_seconds < 0:
+            raise ValueError("Memory index_verify_seconds must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)

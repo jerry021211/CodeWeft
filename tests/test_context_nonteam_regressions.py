@@ -260,7 +260,7 @@ class NonTeamContextRegressions(unittest.TestCase):
     def test_agent_memory_selection_obeys_same_side_request_budget(self):
         store = MemoryStore(self.root / "memory")
         store.remember(name="fact", description="d" * 12000, content="stable fact")
-        memory = MemoryManager(store, MemoryConfig())
+        memory = MemoryManager(store, MemoryConfig(retrieval_mode="legacy"))
         client = Client([_response("main still proceeds")])
         context = self.context(max_request_chars=5000)
         agent = self.agent(client, context=context)

@@ -36,6 +36,7 @@ from codeagent.runtime import RuntimeDataPaths
 from codeagent.runtime.execution import is_execution_failure
 from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool
 from codeagent.tools.ask_user import terminal_ask_user
+from codeagent.tools.search_code import SearchCodeTool
 from codeagent.web.storage import SQLiteRepository
 
 
@@ -64,9 +65,29 @@ def main(argv: list[str] | None = None) -> int:
         "--discuss", action="store_true",
         help="Start in read-only discussion mode; no edits or planning required.",
     )
+    parser.add_argument(
+        "--web-search", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable Tavily web search (--no-web-search disables it); requires TAVILY_API_KEY.",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        help="Reasoning effort: default, none, or an official level supported by the model.",
+    )
     args = parser.parse_args(argv)
 
     env = EnvironmentConfig.from_env()
+    if args.reasoning_effort is not None:
+        env = replace(env, reasoning_effort=args.reasoning_effort)
+    if env.reasoning_effort != "default":
+        from codeagent.reasoning import environment_capabilities, validate_effort
+        try:
+            validate_effort(env.reasoning_effort, environment_capabilities(env))
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.web_search is not None:
+        env = replace(env, web_search_config=replace(env.web_search_config, enabled=args.web_search))
+    if env.web_search_config.enabled and not env.web_search_config.available:
+        parser.error("联网搜索需要配置 TAVILY_API_KEY；也可使用 --no-web-search 关闭。")
     stream = env.stream and not args.no_stream
     workspace = Path.cwd()
     data_paths = RuntimeDataPaths(env.data_dir)
@@ -160,7 +181,14 @@ def main(argv: list[str] | None = None) -> int:
         task_state_provider=task_state_provider,
     )
     prompt_runtime = PromptRuntime(workspace=workspace, config=env.prompt_config)
+    client = env.create_anthropic_client(
+        stream=stream, on_text=print_stream_token if stream else None,
+    )
     tools = create_default_registry(
+        web_search_config=env.web_search_config,
+        code_search_tool=SearchCodeTool(
+            workspace, data_paths.code_index_dir(workspace), client=client, model=env.model_id,
+        ),
         ask_user_fn=terminal_ask_user,
         todo_store=todo_store,
         todo_log=print,
@@ -183,10 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     permission_broker = CliPermissionBroker()
 
     agent = Agent(
-        client=env.create_anthropic_client(
-            stream=stream,
-            on_text=print_stream_token if stream else None,
-        ),
+        client=client,
         tools=tools,
         config=env.to_agent_config(planning_backend=planning_backend),
         prompt_mode=PromptMode.DISCUSS if args.discuss else PromptMode.NORMAL,
@@ -316,6 +341,7 @@ def create_default_subagent_environment(
         tool_output_dir=subagent_root / "tool-results",
     )
     tools = create_default_registry(
+        web_search_config=env.web_search_config,
         todo_store=todo_store,
         todo_log=print,
         skill_loader=skill_loader,

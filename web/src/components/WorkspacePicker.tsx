@@ -49,8 +49,8 @@ export function WorkspacePicker(props: Props) {
         <header className="flex items-start gap-3 border-b border-line px-5 py-4">
           <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"><FolderGit2 className="size-5" /></div>
           <div className="min-w-0 flex-1">
-            <h2 id="workspace-picker-title" className="text-sm font-semibold text-ink">打开项目工作区</h2>
-            <p className="mt-1 text-[11px] leading-5 text-ink-muted">为新对话选择一个已有目录。Agent 的读取、写入和命令执行都会限制在该目录中。</p>
+            <h2 id="workspace-picker-title" className="text-sm font-semibold text-ink">新建项目</h2>
+            <p className="mt-1 text-[11px] leading-5 text-ink-muted">选择已有目录作为项目工作区，并创建首个会话。选择已添加的目录会在原项目下新建会话。</p>
           </div>
           <IconButton label="关闭工作区选择" onClick={props.onClose}><X className="size-4" /></IconButton>
         </header>
@@ -83,7 +83,7 @@ export function WorkspacePicker(props: Props) {
             <div className="text-[10px] font-medium text-ink-muted">将要打开</div>
             <div className="mt-0.5 truncate font-mono text-[10px] text-ink" title={editing ? undefined : props.listing?.current}>{editing ? "请从匹配结果中选择目录" : props.listing?.current ?? "尚未选择目录"}</div>
           </div>
-          <button type="button" onClick={() => props.listing?.current && props.onConfirm(props.listing.current)} disabled={editing || !props.listing?.current || props.loading || Boolean(props.error)} className="h-10 rounded-xl bg-accent px-5 text-xs font-semibold text-white shadow-md shadow-accent/20 transition hover:bg-accent-strong disabled:opacity-50">在此目录新建对话</button>
+          <button type="button" onClick={() => props.listing?.current && props.onConfirm(props.listing.current)} disabled={editing || !props.listing?.current || props.loading || Boolean(props.error)} className="h-10 rounded-xl bg-accent px-5 text-xs font-semibold text-white shadow-md shadow-accent/20 transition hover:bg-accent-strong disabled:opacity-50">添加项目并开始会话</button>
         </footer>
       </section>
     </div>

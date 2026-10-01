@@ -8,8 +8,8 @@ import unittest
 from evals.context_journey.cases import TITLES, material, incident_record
 from evals.context_journey.checker import check, pure_module
 from evals.context_journey.grading import answer, compression_coverage, grade
-from evals.context_journey.offline import EXPORTER, PARSER, TOTALS
-from evals.context_journey.runner import plan
+from evals.context_journey.offline import EXPORTER, PARSER, TOTALS, OfflineSDK
+from evals.context_journey.runner import plan, write_report
 from evals.evidence import hashes, write_json
 from evals.agent_adapter import append_record
 
@@ -52,7 +52,13 @@ class JourneyTests(unittest.TestCase):
             self.assertNotIn("gold", seed)
             self.assertNotIn("final_fields", seed)
             self.assertTrue(any(p.get("anchor") for p in seed["phases"]))
-            self.assertEqual(len([p for p in seed["phases"] if p.get("evidence_file")]), 4)
+            self.assertEqual(len([p for p in seed["phases"] if p.get("evidence_file")]), 5)
+            self.assertEqual(seed["version"], "context-journey-v2")
+            self.assertEqual(seed["phases"][0]["id"], "background")
+            self.assertEqual(seed["phases"][0]["evidence_file"], "evidence/batch-00.txt")
+            self.assertNotIn("anchor", seed["phases"][0])
+            self.assertTrue(all(len(p["prompt"]) < 1000 for p in seed["phases"]))
+            self.assertIn('"batch": 0', seed["workspace_files"]["evidence/batch-00.txt"])
             self.assertNotIn("evaluator-only.json", seed["workspace_files"])
             self.assertEqual(gold["case_id"], case)
         self.assertGreater(incident_record().index("RCPT-7Q4M-5821"), 80000)
@@ -75,9 +81,53 @@ class JourneyTests(unittest.TestCase):
             (workspace / "src" / f"{suite}.py").write_text(source, encoding="utf-8")
             self.assertTrue(check(workspace, suite)["passed"])
         for source in ["import os\ndef export(rows): return os.listdir('.')", "def export(rows): return rows.__class__",
-                       "open('file','w')", "import json as _j\ndef export(rows): return 0"]:
+                       "open('file','w')", "import json as _j\ndef export(rows): return 0",
+                       "def export(rows): return __builtins__", "def _helper(): return 1\ndef export(rows): return _helper.__globals__",
+                       "import json\ndef export(rows): return json._default_encoder"]:
             with self.assertRaises(ValueError):
                 pure_module(source)
+
+    def test_private_helper_is_valid_but_wrong_implementation_still_fails(self):
+        _, workspace = self.trial("T04")
+        source = ('def _to_number(value):\n'
+                  '    if isinstance(value, str):\n        return float(value)\n'
+                  '    return value\n'
+                  'def total_amount(rows):\n'
+                  '    return sum(_to_number(row["amount"]) for row in rows)\n')
+        path = workspace / "src/totals.py"
+        path.write_text(source, encoding="utf-8")
+        self.assertTrue(check(workspace, "totals")["passed"])
+        path.write_text(source.replace('return float(value)', 'return 0'), encoding="utf-8")
+        self.assertFalse(check(workspace, "totals")["passed"])
+
+    def test_background_read_is_required_and_is_not_a_task_anchor(self):
+        trial, _ = self.trial("T02")
+        events = trial / "exposure.jsonl"
+        entries = [json.loads(line) for line in events.read_text("utf-8").splitlines()]
+        events.write_text("\n".join(json.dumps(e) for e in entries if e["path"] != "evidence/batch-00.txt"), encoding="utf-8")
+        result = self.grade(trial)
+        self.assertTrue(result["task_success"])
+        self.assertFalse(result["memory_evidence_eligible"])
+
+    def test_background_offline_turn_reads_the_material(self):
+        seed, gold = material("T01")
+        client = OfflineSDK(seed, gold)
+        client.begin(seed["phases"][0])
+        self.assertEqual(client.queue, [("read_file", {"file_path": "evidence/batch-00.txt"})])
+
+    def test_preflight_skips_are_reported_without_counting_successful_summaries(self):
+        trial, _ = self.trial("T02")
+        append_record(trial / "events.jsonl", {"type": "context.compaction_skipped", "phase": "initial", "seq": 1,
+            "payload": {"reason": "insufficient_compressible_history", "summary_called": False,
+                        "candidate_cut": 5, "protected_user_chars": 58000,
+                        "max_possible_saved_chars": 2000, "required_saved_chars": 3000}})
+        result = self.grade(trial)
+        self.assertEqual(len(result["compaction_preflight_skips"]), 1)
+        self.assertEqual(result["coverage"]["successful_summaries"], 0)
+        write_report(self.root, [result], "offline")
+        report = (self.root / "report.md").read_text("utf-8")
+        self.assertIn("未调用摘要模型", report)
+        self.assertIn("| initial | 5 | 58000 | 2000 | 3000 |", report)
 
     def test_forbidden_overwrite_and_restore_is_not_a_pass(self):
         trial, _ = self.trial("T02")

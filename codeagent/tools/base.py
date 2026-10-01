@@ -22,6 +22,9 @@ class ToolDefinition:
     name: str
     description: str
     input_schema: dict[str, Any]
+    # Harness metadata, deliberately excluded from the provider schema.
+    effect: str = "exclusive"
+    reentrant: bool = False
 
     def to_schema(self) -> dict[str, Any]:
         return {

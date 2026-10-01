@@ -24,9 +24,40 @@ const { useRunStore, createRunEventBuffer } = createRequire(import.meta.url)(bun
 after(() => { unlinkSync(bundle); rmdirSync(directory); });
 beforeEach(() => useRunStore.setState({ runs: {} }));
 
+test("parallel children keep independent status, results and reused tool ids through replay", () => {
+  const child = (seq, agent, type, payload) => ({ ...event(seq, type, payload), agent_id: agent, parent_agent_id: "root" });
+  const events = [
+    child(1, "a", "subagent.queued", { subagent_id: "a", status: "queued", description: "read A" }),
+    child(2, "b", "subagent.running", { subagent_id: "b", status: "running", description: "read B" }),
+    child(3, "a", "tool.started", { tool_use_id: "same", name: "read_file" }),
+    child(4, "b", "tool.started", { tool_use_id: "same", name: "read_file" }),
+    child(5, "b", "tool.completed", { tool_use_id: "same", output: "B" }),
+    child(6, "a", "subagent.cancelling", { subagent_id: "a", status: "cancelling" }),
+    child(7, "b", "subagent.completed", { subagent_id: "b", status: "completed", result: "report B", duration_ms: 200 }),
+    child(8, "b", "subagent.delivered", { subagent_id: "b", status: "completed", result: "report B", duration_ms: 200 }),
+  ];
+  useRunStore.getState().mergeEvents([...events].reverse());
+  useRunStore.getState().mergeEvents(events);
+  const run = useRunStore.getState().runs["run-a"];
+  assert.equal(run.agents.a.runtime_status, "cancelling");
+  assert.equal(run.agents.a.status, "waiting");
+  assert.equal(run.agents.b.status, "completed");
+  assert.equal(run.agents.b.result, "report B");
+  assert.equal(run.actions["a::same"].status, "running");
+  assert.equal(run.actions["b::same"].output, "B");
+  assert.equal(run.events.length, 8);
+});
+
 function event(seq, type = "model.text.delta", payload = { delta: "x" }, runId = "run-a") {
   return { id: `${runId}:${seq}`, seq, type, payload, run_id: runId, conversation_id: `conversation-${runId}`, agent_id: "root", occurred_at: "2026-09-17T00:00:00Z" };
 }
+
+test("context snapshots remain available without creating phantom running actions", () => {
+  useRunStore.getState().mergeEvents([event(1, "context.request_projected", { estimated_total_tokens: 100 }), event(2, "context.request_blocked", { estimated_total_tokens: 200 })]);
+  const run = useRunStore.getState().runs["run-a"];
+  assert.equal(run.events.length, 2);
+  assert.equal(run.actionOrder.length, 0);
+});
 
 test("large replay publishes once while retaining text, actions, usage and final status", () => {
   let updates = 0;

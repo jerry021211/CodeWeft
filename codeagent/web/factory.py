@@ -35,6 +35,7 @@ from codeagent.runtime import CancellationToken, RuntimeDataPaths
 from codeagent.runtime.activity import ExecutionActivity
 from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool, ToolRegistry, WorkspaceGuard
 from codeagent.web.questions import WebUserQuestions
+from codeagent.tools.search_code import SearchCodeTool
 from codeagent.teams import (
     ActiveTeamRootToolExecutionGate,
     AgentSessionRecord,
@@ -91,6 +92,8 @@ class WebAgentFactory:
         team_attempt: TaskAttemptRecord | None = None,
         worktree_manager: WorktreeManager | None = None,
         root_prompt_mode: PromptMode | None = None,
+        web_search_enabled: bool = False,
+        reasoning_effort: str | None = None,
     ) -> Agent:
         if team_attempt is not None and team_session is None:
             raise ValueError(
@@ -103,6 +106,10 @@ class WebAgentFactory:
         if team_session is not None and root_prompt_mode is not None:
             raise ValueError("root_prompt_mode is only valid for a Root Agent")
         root_mode = root_prompt_mode or PromptMode.NORMAL
+        web_search_config = replace(
+            self.env.web_search_config,
+            enabled=web_search_enabled and team_session is None and root_mode is not PromptMode.TEAM_PLANNER,
+        )
         team_agent = None
         team = None
         if team_session is not None:
@@ -181,6 +188,11 @@ class WebAgentFactory:
 
         def tools_for():
             registry = create_default_registry(
+                web_search_config=web_search_config,
+                code_search_tool=(SearchCodeTool(
+                    self.workspace, self.data_paths.code_index_dir(self.workspace),
+                    client=client, model=self.env.model_id, event_emitter=event_emitter,
+                ) if team_session is None and not team_planner else None),
                 ask_user_fn=(
                     WebUserQuestions(self.task_service, event_emitter, cancellation).ask
                     if team_session is None and not team_planner else None
@@ -249,10 +261,19 @@ class WebAgentFactory:
                 task_state if team_session is None and not team_planner else None
             ),
         )
+        if reasoning_effort is None and team_session is not None:
+            # A foreground Lead turn uses its own submitted settings. Background
+            # members use the durable root Run, including after a restart.
+            reasoning_run = self.task_service.get_run(execution.run_id)
+            if reasoning_run is None:
+                reasoning_run = self.task_service.get_run(team.root_run_id)
+            if reasoning_run is not None:
+                reasoning_effort = reasoning_run.metadata.get("reasoning_effort")
         client = self.env.create_anthropic_client(
             stream=self.env.stream,
             event_emitter=event_emitter,
             usage_tracker=usage_tracker,
+            reasoning_effort=reasoning_effort,
         )
 
         def subagent_environment():
@@ -264,6 +285,7 @@ class WebAgentFactory:
                 tool_output_dir=subagent_root / "tool-results",
             )
             subagent_tools = create_default_registry(
+                web_search_config=web_search_config,
                 todo_store=sub_todos,
                 skill_loader=skill_loader,
                 memory_store=memory_store,
@@ -293,7 +315,8 @@ class WebAgentFactory:
 
         agent_config = self.env.to_agent_config(planning_backend=PlanningBackend.TASKS)
         if team_session is not None or team_planner:
-            agent_config = replace(agent_config, loop_guard=None)
+            agent_config = replace(agent_config, loop_guard=None,
+                                   parallel=replace(agent_config.parallel, enabled=False))
         agent = Agent(
             client=client,
             tools=tools_for(),

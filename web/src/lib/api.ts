@@ -54,6 +54,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  cancelSubagent(runId: string, subagentId: string) {
+    return request(`/runs/${encodeURIComponent(runId)}/subagents/${encodeURIComponent(subagentId)}/cancel`, { method: "POST" });
+  },
+  getSubagentResult(runId: string, subagentId: string) {
+    return request<{ status: string; result?: string; output?: string }>(`/runs/${encodeURIComponent(runId)}/subagents/${encodeURIComponent(subagentId)}/result`);
+  },
   async getRunActivity(runId: string) {
     const events: RunEvent[] = [];
     let after = 0;
@@ -134,10 +140,10 @@ export const api = {
     });
   },
 
-  createRun(conversationId: string, content: string, useTeam = false, mode: ExecutionMode = "normal") {
+  createRun(conversationId: string, content: string, useTeam = false, mode: ExecutionMode = "normal", webSearch = false, reasoningEffort?: string) {
     return request<CreateRunResponse>(`/conversations/${encodeURIComponent(conversationId)}/runs`, {
       method: "POST",
-      body: JSON.stringify({ content, useTeam, mode }),
+      body: JSON.stringify({ content, useTeam, mode, webSearch, reasoningEffort }),
     });
   },
 

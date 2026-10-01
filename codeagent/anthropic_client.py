@@ -11,9 +11,12 @@ from uuid import uuid4
 from codeagent.events import EventEmitter, TokenUsage, UsageTracker
 from codeagent.messages import Message
 from codeagent.models import ModelResponse
+from codeagent.model_metadata import model_windows
+from codeagent.reasoning import reasoning_capabilities, reasoning_parameters
 from codeagent.tracing import trace_run
 from codeagent.runtime.activity import ExecutionActivity
 from codeagent.runtime.cancellation import CancelledError
+from codeagent.runtime.parallel import admission
 
 
 @dataclass(slots=True)
@@ -30,6 +33,7 @@ class AnthropicModelClient:
     sdk_client: Any | None = None
     activity: ExecutionActivity | None = None
     request_timeout: float | None = None
+    reasoning_effort: str = "default"
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -52,7 +56,22 @@ class AnthropicModelClient:
             kwargs["base_url"] = self.base_url
         self._client = Anthropic(**kwargs)
 
+    def get_model_window(self, model: str) -> dict:
+        """Discover limits using this client's actual endpoint and credentials."""
+        return model_windows.resolve(
+            base_url=str(getattr(self._client, "base_url", self.base_url) or "https://api.anthropic.com"),
+            api_key=getattr(self._client, "api_key", self.api_key) or "",
+            model=model,
+        )
+
     def create_message(
+        self, **kwargs: Any,
+    ) -> ModelResponse:
+        check = self.activity.check if self.activity is not None else lambda: None
+        with admission("models").enter(check):
+            return self._create_message(**kwargs)
+
+    def _create_message(
         self,
         *,
         model: str,
@@ -71,6 +90,13 @@ class AnthropicModelClient:
         }
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
+        reasoning = {}
+        if self.reasoning_effort != "default":
+            capabilities = reasoning_capabilities(
+                base_url=str(getattr(self._client, "base_url", self.base_url) or ""),
+                api_key=getattr(self._client, "api_key", self.api_key), model=model,
+            )
+            reasoning = reasoning_parameters(self.reasoning_effort, capabilities)
         self._emit(
             "model.started",
             {
@@ -78,6 +104,7 @@ class AnthropicModelClient:
                 "model": model,
                 "call_kind": self.call_kind,
                 "max_tokens": max_tokens,
+                "reasoning_effort": self.reasoning_effort,
                 "message_count": len(messages),
                 "tool_count": len(tools),
                 "streaming": self.stream,
@@ -86,7 +113,7 @@ class AnthropicModelClient:
         with trace_run(
             "llm.anthropic.create_message",
             run_type="llm",
-            inputs={**params, "stream": self.stream},
+            inputs={**params, **reasoning, "stream": self.stream},
             metadata={
                 "model": model,
                 "call_kind": self.call_kind,
@@ -107,7 +134,8 @@ class AnthropicModelClient:
                 elif self.request_timeout is not None:
                     client = client.with_options(max_retries=0, timeout=self.request_timeout)
                 if self.stream:
-                    response = self._create_streaming_message(params, call_id=call_id, client=client)
+                    stream_params = {**params, "extra_body": reasoning} if reasoning else params
+                    response = self._create_streaming_message(stream_params, call_id=call_id, client=client)
                 else:
                     if max_tokens is None:
                         # messages.create requires max_tokens in the Python SDK.
@@ -115,9 +143,10 @@ class AnthropicModelClient:
                         # post preserves SDK auth, transport, timeout and parsing
                         # without sending a fabricated token cap (or JSON null).
                         from anthropic.types import Message as AnthropicMessage
-                        raw_response = client.post("/v1/messages", body=params, cast_to=AnthropicMessage)
+                        raw_response = client.post("/v1/messages", body={**params, **reasoning}, cast_to=AnthropicMessage)
                     else:
-                        raw_response = client.messages.create(**params)
+                        sdk_params = {**params, "extra_body": reasoning} if reasoning else params
+                        raw_response = client.messages.create(**sdk_params)
                     response = self._message_to_response(
                         raw_response,
                         model=model,
@@ -186,6 +215,7 @@ class AnthropicModelClient:
         """Create another wrapper around the same SDK client."""
 
         return AnthropicModelClient(
+            base_url=self.base_url,
             stream=self.stream if stream is None else stream,
             on_text=on_text,
             event_emitter=(
@@ -198,6 +228,7 @@ class AnthropicModelClient:
             sdk_client=self._client,
             activity=self.activity,
             request_timeout=self.request_timeout,
+            reasoning_effort=self.reasoning_effort if (call_kind or self.call_kind) in {"main", "subagent"} else "default",
         )
 
     def _create_streaming_message(

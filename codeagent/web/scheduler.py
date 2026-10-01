@@ -18,6 +18,7 @@ from codeagent.events import (
 )
 from codeagent.permissions import PermissionRequest, WaitingPermissionBroker
 from codeagent.prompts import PromptMode
+from codeagent.reasoning import environment_capabilities, validate_effort
 from codeagent.runtime import CancellationToken, CancelledError
 from codeagent.runtime.activity import ExecutionActivity
 from codeagent.runtime.cancellation import ModelCallTimeout
@@ -51,6 +52,8 @@ class AgentFactory(Protocol):
         permission_broker: WaitingPermissionBroker,
         checkpoint: Any | None = None,
         root_prompt_mode: PromptMode | None = None,
+        web_search_enabled: bool = False,
+        reasoning_effort: str | None = None,
     ) -> Any: ...
 
 
@@ -65,6 +68,9 @@ class _RunJob:
     emitter: EventEmitter
     cancellation: CancellationToken
     broker: WaitingPermissionBroker
+    web_search_enabled: bool = False
+    reasoning_effort: str | None = None
+    agent: Any = None
 
 
 class RunScheduler:
@@ -95,6 +101,18 @@ class RunScheduler:
         self._stopping = threading.Event()
         self._stop_lock = threading.Lock()
         self._closed = False
+
+    def cancel_subagent(self, run_id: str, subagent_id: str) -> dict[str, Any]:
+        record = self.repository.get_subagent_run(run_id, subagent_id)
+        with self._lock:
+            job = self._controls.get(run_id)
+            runtime = getattr(job.agent, "_subagent_runtime", None) if job else None
+        if runtime is not None:
+            runtime.cancel(subagent_id)
+            return self.repository.get_subagent_run(run_id, subagent_id)
+        if record["status"] not in {"completed", "failed", "cancelled", "interrupted"}:
+            raise StorageConflictError("Subagent worker is not available")
+        return record
 
     def start(self) -> None:
         with self._lock:
@@ -136,16 +154,32 @@ class RunScheduler:
     def submit(
         self, conversation_id: str, content: str, *, use_team: bool = False,
         mode: str = "normal",
+        web_search_enabled: bool | None = None,
+        reasoning_effort: str | None = None,
     ) -> RunRecord:
         # Admission, queue order and shutdown share one short critical section.
         with self._lock:
             self.start()
-            return self._submit(conversation_id, content, use_team=use_team, mode=mode)
+            return self._submit(conversation_id, content, use_team=use_team, mode=mode,
+                                web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort)
 
     def _submit(
         self, conversation_id: str, content: str, *, use_team: bool,
         mode: str,
+        web_search_enabled: bool | None = None,
+        reasoning_effort: str | None = None,
     ) -> RunRecord:
+        env = getattr(self.agent_factory, "env", None)
+        if reasoning_effort is None:
+            reasoning_effort = getattr(env, "reasoning_effort", None)
+        if reasoning_effort not in {None, "default"}:
+            validate_effort(reasoning_effort, environment_capabilities(env))
+        search_config = getattr(getattr(self.agent_factory, "env", None), "web_search_config", None)
+        if web_search_enabled is None:
+            web_search_enabled = bool(search_config and search_config.enabled)
+        if use_team or self.repository.get_active_team_run_for_conversation(conversation_id):
+            if web_search_enabled:
+                raise ValueError("联网搜索目前仅支持普通会话和 Discuss 模式。")
         if mode not in {"normal", "discuss"}:
             raise ValueError("Unknown execution mode")
         if mode == "discuss" and (
@@ -168,6 +202,8 @@ class RunScheduler:
             conversation_id,
             metadata={
                 "requested_mode": requested_mode,
+                "web_search_enabled": web_search_enabled,
+                "reasoning_effort": reasoning_effort or "default",
                 "agent_profile": (
                     PromptMode.TEAM_PLANNER.value
                     if use_team
@@ -180,7 +216,8 @@ class RunScheduler:
             role="user",
             content=prompt,
             run_id=run.id,
-            metadata={"status": "complete", "mode": mode},
+            metadata={"status": "complete", "mode": mode, "web_search_enabled": web_search_enabled,
+                      "reasoning_effort": reasoning_effort or "default"},
         )
         emitter = EventEmitter(
             RecordingEventSink(self.repository),
@@ -202,10 +239,14 @@ class RunScheduler:
                 reason=request.reason,
                 expires_at=_approval_expiry(request.timeout),
             )
-            emitter.emit(
+            approval_emitter = emitter.with_agent(agent_id=request.agent_id,
+                parent_agent_id=emitter.context.agent_id if request.agent_id != emitter.context.agent_id else None) if request.agent_id else emitter
+            approval_emitter.emit(
                 "approval.requested",
                 {
                     "approval_id": persisted.id,
+                    "agent_id": request.agent_id,
+                    "tool_use_id": request.tool_use_id,
                     "tool_name": persisted.tool_name,
                     "input": public_input,
                     "reason": persisted.reason,
@@ -241,6 +282,8 @@ class RunScheduler:
             emitter=emitter,
             cancellation=cancellation,
             broker=broker,
+            web_search_enabled=web_search_enabled,
+            reasoning_effort=reasoning_effort,
         )
         with self._lock:
             self._controls[run.id] = job
@@ -739,7 +782,13 @@ class RunScheduler:
             }
             if job.use_team or job.mode == "discuss":
                 create_kwargs["root_prompt_mode"] = profile
+            if job.web_search_enabled:
+                create_kwargs["web_search_enabled"] = True
+            if job.reasoning_effort is not None:
+                create_kwargs["reasoning_effort"] = job.reasoning_effort
             agent = workspace_factory.create(**create_kwargs)
+            with self._lock:
+                job.agent = agent
             if not job.use_team:
                 with self._lock:
                     job.cancellation.raise_if_cancelled()

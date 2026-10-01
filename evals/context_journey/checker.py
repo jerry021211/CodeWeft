@@ -29,8 +29,11 @@ def pure_module(source):
     for node in ast.walk(tree):
         if isinstance(node, (ast.ClassDef, ast.Global, ast.Nonlocal, ast.With, ast.AsyncFunctionDef)):
             raise ValueError("Unsupported construct for pure-function exercise")
-        if isinstance(node, (ast.Name, ast.Attribute)) and (node.id if isinstance(node, ast.Name) else node.attr).startswith("_"):
-            raise ValueError("Private names are not part of the exercise API")
+        # Ordinary local helpers such as _to_number are valid pure functions.
+        # Keep introspection/namespace escape routes inaccessible.
+        if ((isinstance(node, ast.Name) and node.id.startswith("__"))
+                or (isinstance(node, ast.Attribute) and node.attr.startswith("_"))):
+            raise ValueError("Dunder names and private attributes are not part of the exercise API")
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             modules = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module]
             if any(m not in {"json", "decimal"} for m in modules) or getattr(node, "level", 0):

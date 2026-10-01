@@ -52,7 +52,7 @@ class LoopGuardConfigTests(unittest.TestCase):
             "CODEAGENT_LOOP_RETRY_DELAY_SECONDS": "0.5",
             "CODEAGENT_RUN_MAX_MODEL_CALLS": "90",
             "CODEAGENT_RUN_MAX_TOOL_CALLS": "250",
-            "CODEAGENT_RUN_MAX_TOTAL_TOKENS": "0",
+            "CODEAGENT_RUN_MAX_TOTAL_TOKENS": "123456",
             "CODEAGENT_RUN_MAX_ACTIVE_SECONDS": "600",
         }
         with patch.dict(os.environ, settings, clear=True), patch("codeagent.config._load_dotenv"):
@@ -61,7 +61,7 @@ class LoopGuardConfigTests(unittest.TestCase):
             window_size=16, repeat_failure_limit=4, parameter_error_limit=3,
             blocked_attempt_limit=5, empty_response_limit=3, tool_max_retries=0,
             retry_delay_seconds=0.5, max_model_calls=90, max_tool_calls=250,
-            max_total_tokens=0, max_active_seconds=600,
+            max_total_tokens=123456, max_active_seconds=600,
         ))
         self.assertIs(env.to_agent_config().loop_guard, env.loop_guard_config)
 
@@ -70,6 +70,7 @@ class LoopGuardConfigTests(unittest.TestCase):
             with patch("codeagent.config._load_dotenv"):
                 env = EnvironmentConfig.from_env()
         self.assertEqual(env.loop_guard_config, LoopGuardConfig())
+        self.assertEqual(env.to_agent_config().loop_guard.max_total_tokens, 0)
 
     def test_invalid_environment_budget_is_rejected(self):
         for name, value in (
@@ -238,6 +239,10 @@ class LoopGuardWebTests(unittest.TestCase):
                         root_prompt_mode=mode,
                     )
                     self.assertEqual(agent.config.loop_guard is None, mode is PromptMode.TEAM_PLANNER)
+                    self.assertEqual('search_code' in {s['name'] for s in agent.tools.schemas()}, mode is not PromptMode.TEAM_PLANNER)
+                    if agent.subagent_environment_factory is not None:
+                        sub_tools, _, _ = agent.subagent_environment_factory()
+                        self.assertNotIn('search_code', {s['name'] for s in sub_tools.schemas()})
 
     def test_scheduler_classifies_failures_and_accepts_agents_without_export(self):
         for reason in (

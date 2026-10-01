@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { api } from "@/lib/api";
+import type { AgentNode } from "@/types/api";
 import {
   Activity,
   Bot,
@@ -22,6 +24,7 @@ import { cx, formatDuration, formatNumber, formatTime, isRunActive, prettyJson, 
 import { EmptyPanel, IconButton, StatusDot } from "@/components/ui";
 import { TaskPlan } from "@/components/TaskPlan";
 import { TeamPanel } from "@/components/TeamPanel";
+import { ContextMetricsPanel, RunMetricsPanel } from "@/components/RunMetricsPanel";
 
 type Props = {
   run?: RunViewState;
@@ -48,7 +51,7 @@ type Props = {
 };
 
 export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onCleanupWorktree }: Props) {
-  const [tab, setTab] = useState<"run" | "tasks" | "team" | "debug">("tasks");
+  const [tab, setTab] = useState<"run" | "tasks" | "team" | "debug">("run");
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-line bg-surface">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-line px-4">
@@ -88,12 +91,20 @@ function RunInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeC
         </div>
       </Section>
 
-      <Section title="Token" icon={<Coins className="size-3.5" />}>
+      <Section title="本轮统计" icon={<Clock3 className="size-3.5" />}>
+        <RunMetricsPanel run={run} workspace={runtime?.workspace} />
+      </Section>
+
+      <Section title="上下文用量" icon={<Hash className="size-3.5" />}>
+        <ContextMetricsPanel run={run} />
+      </Section>
+
+      <Section title="累计 Token 消耗" icon={<Coins className="size-3.5" />}>
         <TokenPanel run={run} model={runtime?.model} />
       </Section>
 
       <Section title="Agent" icon={<GitBranch className="size-3.5" />} count={agents.length}>
-        {agents.length ? <div className="space-y-1.5">{agents.map((agent) => <div key={agent.id} className={cx("rounded-xl border border-line px-3 py-2.5", agent.parent_id && "ml-3 border-violet-500/20")}><div className="flex items-center gap-2"><Bot className={cx("size-3.5", agent.parent_id ? "text-violet-500" : "text-accent")} /><span className="min-w-0 flex-1 truncate text-[11px] font-medium text-ink">{agent.label}</span><StatusDot status={agent.status === "running" ? "running" : agent.status === "failed" ? "error" : agent.status === "completed" ? "success" : "idle"} pulse={agent.status === "running"} /></div>{agent.task && <p className="mt-1.5 line-clamp-2 text-[10px] leading-4 text-ink-muted">{agent.task}</p>}</div>)}</div> : <MutedEmpty text="没有子 Agent 活动" />}
+        {agents.length ? <div className="space-y-1.5">{agents.map((agent) => <SubagentCard key={agent.id} agent={agent} runId={run.runId} />)}</div> : <MutedEmpty text="没有子 Agent 活动" />}
       </Section>
 
       <Section title="修改文件" icon={<FileCode2 className="size-3.5" />} count={run.modifiedFiles.length}>
@@ -127,3 +138,34 @@ function DebugInspector({ run, runtime }: { run?: RunViewState; runtime?: Runtim
 function DebugRows({ rows }: { rows: Array<{ label: string; value: string }> }) { return <div className="divide-y divide-line overflow-hidden rounded-xl border border-line">{rows.map((row) => <div key={row.label} className="grid grid-cols-[88px_1fr] gap-2 px-3 py-2 text-[9px]"><span className="text-ink-faint">{row.label}</span><span className="truncate font-mono text-ink-muted" title={row.value}>{row.value}</span></div>)}</div>; }
 function Section({ title, icon, count, children }: { title: string; icon: React.ReactNode; count?: number; children: React.ReactNode }) { return <section><div className="mb-2.5 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.13em] text-ink-muted">{icon}<span>{title}</span>{count != null && <span className="ml-auto rounded-full bg-surface-strong px-1.5 py-0.5 font-mono text-[8px] text-ink-faint">{count}</span>}</div>{children}</section>; }
 function MutedEmpty({ text }: { text: string }) { return <div className="rounded-xl border border-dashed border-line px-3 py-4 text-center text-[10px] text-ink-faint">{text}</div>; }
+
+function SubagentCard({ agent, runId }: { agent: AgentNode; runId: string }) {
+  const [output, setOutput] = useState<string>();
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const active = ["queued", "running", "waiting_approval", "cancelling"].includes(agent.runtime_status ?? "");
+  const operate = async (cancel: boolean) => {
+    setBusy(true); setError(undefined);
+    try {
+      if (cancel) await api.cancelSubagent(runId, agent.id);
+      else {
+        const result = await api.getSubagentResult(runId, agent.id);
+        setOutput(result.output || result.result || "暂无结果");
+      }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  };
+  return <div className={cx("rounded-xl border border-line px-3 py-2.5", agent.parent_id && "ml-3 border-violet-500/20")}>
+    <div className="flex items-center gap-2"><Bot className="size-3.5 text-violet-500" /><span className="flex-1 text-[11px] font-medium">{agent.label}</span>
+      <span className="text-[9px] text-ink-muted">{agent.runtime_status === "cancelling" ? "正在停止" : ({ queued: "排队", running: "运行中", waiting: "等待", completed: "完成", failed: "失败", cancelled: "已停止", unknown: "已中断", blocked: "受阻" })[agent.status]}</span>
+      {agent.duration_ms != null && <span className="text-[9px] text-ink-muted">{formatDuration(agent.duration_ms)}</span>}
+    </div>
+    {agent.task && <p className="mt-1.5 text-[10px] leading-4 text-ink-muted">{agent.task}</p>}
+    {agent.managed && <div className="mt-2 flex gap-3 text-[10px]">
+      <button disabled={busy} onClick={() => void operate(false)}>查看结果</button>
+      {active && <button disabled={busy || agent.runtime_status === "cancelling"} onClick={() => void operate(true)}>停止子任务</button>}
+    </div>}
+    {output && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-[10px]">{output}</pre>}
+    {error && <p role="alert" className="mt-2 text-[10px] text-danger">{error}</p>}
+  </div>;
+}

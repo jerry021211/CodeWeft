@@ -75,7 +75,7 @@ export type Message = {
   created_at: string;
   run_id?: Identifier | null;
   status?: "streaming" | "complete" | "failed";
-  metadata?: { mode?: ExecutionMode; [key: string]: unknown };
+  metadata?: { mode?: ExecutionMode; web_search_enabled?: boolean; [key: string]: unknown };
 };
 
 export type TokenUsage = {
@@ -127,6 +127,13 @@ export type RuntimeConfig = {
   max_iterations?: number | null;
   planning_backend?: "tasks" | "todo";
   features?: Record<string, boolean>;
+  reasoning_effort?: string;
+  reasoning?: {
+    supported_levels: string[];
+    default_level: string | null;
+    supports_disabled: boolean;
+    source: string;
+  };
 };
 
 export type TeamRun = {
@@ -400,6 +407,7 @@ export type ActionStatus = "queued" | "waiting" | "running" | "completed" | "fai
 
 export type RunAction = {
   id: string;
+  call_id?: string;
   kind: ActionKind;
   title: string;
   subtitle?: string;
@@ -421,6 +429,10 @@ export type AgentNode = {
   label: string;
   status: ActionStatus;
   task?: string;
+  runtime_status?: string;
+  managed?: boolean;
+  duration_ms?: number;
+  result?: string;
 };
 
 export type RecoveryRecord = {

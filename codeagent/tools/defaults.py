@@ -22,6 +22,7 @@ from codeagent.tools.tasks import TaskService, create_task_tools
 from codeagent.tools.todo import TodoStore, TodoWriteTool
 from codeagent.tools.write import WriteFileTool
 from codeagent.tools.workspace import WorkspaceGuard
+from codeagent.tools.web_search import WebSearchConfig, WebSearchTool
 
 
 def default_tools(
@@ -42,6 +43,8 @@ def default_tools(
     conversation_id: str | None = None,
     run_id: str | None = None,
     agent_id: str = "agent_root",
+    code_search_tool: Tool | None = None,
+    web_search_config: WebSearchConfig | None = None,
 ) -> list[Tool]:
     backend = PlanningBackend.parse(planning_backend)
     if backend is PlanningBackend.AUTO:
@@ -61,6 +64,10 @@ def default_tools(
         GlobTool(workspace_guard=workspace_guard),
         GrepTool(workspace_guard=workspace_guard),
     ]
+    if code_search_tool is not None:
+        tools.append(code_search_tool)
+    if web_search_config is not None and web_search_config.enabled:
+        tools.append(WebSearchTool(web_search_config))
     if ask_user_fn is not None:
         tools.append(AskUserTool(ask_user_fn))
     if backend is PlanningBackend.TODO:
@@ -107,6 +114,8 @@ def create_default_registry(
     conversation_id: str | None = None,
     run_id: str | None = None,
     agent_id: str = "agent_root",
+    code_search_tool: Tool | None = None,
+    web_search_config: WebSearchConfig | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in default_tools(
@@ -126,6 +135,8 @@ def create_default_registry(
         conversation_id=conversation_id,
         run_id=run_id,
         agent_id=agent_id,
+        code_search_tool=code_search_tool,
+        web_search_config=web_search_config,
     ):
         registry.register(tool)
     return registry

@@ -14,7 +14,10 @@ const EVENT_NAMES = [
   "approval_requested", "approval_allowed", "approval_denied", "approval_expired",
   "question_requested", "question_answered",
   "todo_updated", "subagent_started", "subagent_completed", "subagent_failed",
+  "subagent_queued", "subagent_running", "subagent_cancelling", "subagent_cancelled",
+  "subagent_interrupted", "subagent_delivered", "subagent_waiting_approval",
   "recovery_retrying", "recovery_completed", "recovery_failed", "context_compacted", "history_rewritten", "prompt_assembled",
+  "context_request_projected", "context_request_blocked", "context_compaction_failed", "context_compaction_skipped",
 ].flatMap((name) => [name, name.replace("_", "."), name.replaceAll("_", ".")]);
 
 export function useRunEvents(runId?: string | null) {

@@ -67,6 +67,9 @@ class RuntimeDataPaths:
     def memory_dir(self, workspace: str | Path) -> Path:
         return self.workspace_dir(workspace) / "memory"
 
+    def code_index_dir(self, workspace: str | Path) -> Path:
+        return self.workspace_dir(workspace) / "code-search"
+
     def context_dir(
         self,
         workspace: str | Path,

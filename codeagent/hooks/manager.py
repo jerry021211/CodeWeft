@@ -29,6 +29,10 @@ class HookManager:
         else:
             self._handlers[event].append(handler)
 
+    @property
+    def has_handlers(self) -> bool:
+        return any(self._handlers.values())
+
     def copy(
         self, *, rebind: Callable[[HookHandler], HookHandler] | None = None,
         exclude_owner: Any = None,

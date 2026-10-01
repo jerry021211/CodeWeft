@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from threading import RLock
+from threading import RLock, get_ident
 from typing import Any, Callable, Iterator
 
 
@@ -42,11 +42,12 @@ class RunBudget:
         self._lock = RLock()
         self._running = 0
         self._paused = 0
+        self._branches: dict[int, list[int]] = {}
         self._last_tick = clock()
 
     def _tick(self) -> None:
         now = self.clock()
-        if self._running and not self._paused:
+        if any(running and not paused for running, paused in self._branches.values()):
             self.state.active_seconds += max(0.0, now - self._last_tick)
         self._last_tick = now
 
@@ -60,24 +61,34 @@ class RunBudget:
         with self._lock:
             self._tick()
             self._running += 1
+            branch = self._branches.setdefault(get_ident(), [0, 0])
+            branch[0] += 1
         try:
             yield
         finally:
             with self._lock:
                 self._tick()
                 self._running -= 1
+                branch[0] -= 1
+                if branch == [0, 0]:
+                    self._branches.pop(get_ident(), None)
 
     @contextmanager
     def paused(self) -> Iterator[None]:
         with self._lock:
             self._tick()
             self._paused += 1
+            branch = self._branches.setdefault(get_ident(), [0, 0])
+            branch[1] += 1
         try:
             yield
         finally:
             with self._lock:
                 self._tick()
                 self._paused -= 1
+                branch[1] -= 1
+                if branch == [0, 0]:
+                    self._branches.pop(get_ident(), None)
 
     def check(self) -> None:
         with self._lock:

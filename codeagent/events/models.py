@@ -160,13 +160,16 @@ class TokenTotals:
 class UsageTracker:
     """Thread-safe aggregate shared by parent, child, and side-query clients."""
 
-    def __init__(self) -> None:
+    def __init__(self, parent: UsageTracker | None = None) -> None:
         self._lock = Lock()
         self._totals = TokenTotals()
+        self._parent = parent
 
     def record(self, usage: TokenUsage | None) -> None:
         if usage is None:
             return
+        if self._parent is not None:
+            self._parent.record(usage)
         with self._lock:
             current = self._totals
             if not usage.available:

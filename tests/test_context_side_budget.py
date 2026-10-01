@@ -84,7 +84,7 @@ class ContextSideBudgetTests(unittest.TestCase):
             store = MemoryStore(Path(temp))
             store.remember(name="fact", description="d" * 10000, content="body")
             runtime = RecoveryRuntime(RecoveryConfig(sleep_enabled=False))
-            memory = MemoryManager(store, MemoryConfig(), recovery_runtime=runtime)
+            memory = MemoryManager(store, MemoryConfig(retrieval_mode="legacy"), recovery_runtime=runtime)
             client = RecordingClient()
             bounded = BoundModelClient(client, max_request_chars=5000)
             result = memory.select_context(self.request["messages"], client=bounded, model="primary", max_tokens=100)

@@ -5,7 +5,8 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
+from contextvars import ContextVar
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,27 @@ from codeagent.runtime.cancellation import CancellationToken
 from codeagent.runtime.activity import ExecutionActivity
 
 PermissionPrompt = Callable[[str, dict[str, Any], str], bool]
+_execution = ContextVar("permission_execution", default=None)
+_tool_id = ContextVar("permission_tool_id", default="")
+_stdin_lock = threading.RLock()
+
+
+@contextmanager
+def permission_execution(activity, cancellation, agent_id):
+    token = _execution.set((activity, cancellation, agent_id))
+    try:
+        yield
+    finally:
+        _execution.reset(token)
+
+
+@contextmanager
+def permission_tool(tool_id):
+    token = _tool_id.set(tool_id)
+    try:
+        yield
+    finally:
+        _tool_id.reset(token)
 
 
 class PermissionBroker(Protocol):
@@ -42,6 +64,8 @@ class PermissionRequest:
     reason: str
     created_at: datetime
     timeout: float | None
+    agent_id: str = ""
+    tool_use_id: str = ""
 
 
 def terminal_prompt(tool_name: str, tool_input: dict[str, Any], reason: str) -> bool:
@@ -73,13 +97,19 @@ class CliPermissionBroker:
         # A terminal input call cannot be interrupted portably. Cancellation is
         # still honored immediately before and after the user interaction.
         del timeout
+        binding = _execution.get()
+        activity = binding[0] if binding else self.execution_activity
+        cancellation = binding[1] if binding else cancellation
         if cancellation is not None:
             cancellation.raise_if_cancelled()
         with (
-            self.execution_activity.operation("approval", float("inf"))
-            if self.execution_activity is not None else nullcontext()
+            activity.operation("approval", float("inf"))
+            if activity is not None else nullcontext()
         ):
-            allowed = bool(self.prompt(tool_name, dict(tool_input), reason))
+            with _stdin_lock:
+                if cancellation is not None:
+                    cancellation.raise_if_cancelled()
+                allowed = bool(self.prompt(tool_name, dict(tool_input), reason))
         if cancellation is not None:
             cancellation.raise_if_cancelled()
         return allowed
@@ -132,10 +162,12 @@ class WaitingPermissionBroker:
         timeout: float | None = None,
     ) -> bool:
         """Publish a request and block until allow, deny, timeout, or cancellation."""
-
+        binding = _execution.get()
+        activity = binding[0] if binding else self.execution_activity
+        cancellation = binding[1] if binding else cancellation
         with (
-            self.execution_activity.operation("approval", float("inf"))
-            if self.execution_activity is not None else nullcontext()
+            activity.operation("approval", float("inf"))
+            if activity is not None else nullcontext()
         ):
             return self._request(
                 tool_name, tool_input, reason,
@@ -165,6 +197,8 @@ class WaitingPermissionBroker:
             reason=str(reason),
             created_at=datetime.now(timezone.utc),
             timeout=effective_timeout,
+            agent_id=_execution.get()[2] if _execution.get() else "",
+            tool_use_id=_tool_id.get(),
         )
         pending = _PendingRequest(request=request)
         with self._lock:

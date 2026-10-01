@@ -114,10 +114,13 @@ function runStatusFromType(type: string, payload: Record<string, unknown>, curre
 }
 
 function actionIdentity(event: RunEvent, payload: Record<string, unknown>, kind: ActionKind) {
-  return stringFrom(payload, "action_id", "tool_call_id", "tool_use_id", "model_call_id", "call_id", "subagent_id") ?? `${kind}:${event.agent_id}:${event.iteration ?? 0}:${event.seq}`;
+  const raw = stringFrom(payload, "action_id", "tool_call_id", "tool_use_id", "model_call_id", "call_id", "subagent_id") ?? `${kind}:${event.agent_id}:${event.iteration ?? 0}:${event.seq}`;
+  return event.parent_agent_id ? `${event.agent_id}::${raw}` : raw;
 }
 
 function actionKind(type: string): ActionKind | undefined {
+  // Request snapshots are telemetry, not long-running context actions.
+  if (type === "context_request_projected" || type === "context_request_blocked" || type === "context_compaction_skipped") return undefined;
   if (type.includes("tool")) return "tool";
   if (type.includes("model")) return "model";
   if (type.includes("subagent") || type === "agent_spawned" || type === "agent_completed") return "subagent";
@@ -127,6 +130,7 @@ function actionKind(type: string): ActionKind | undefined {
 }
 
 function actionStatus(type: string, payload: Record<string, unknown>): ActionStatus {
+  if (type.includes("cancelling")) return "waiting";
   if (type.includes("interrupted")) return "unknown";
   if (type.includes("waiting") || type.includes("approval_requested")) return "waiting";
   if (type.includes("request") || type.includes("queued")) return "queued";
@@ -301,6 +305,10 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
         label: stringFrom(payload, "label", "name") ?? (event.parent_agent_id ? "子 Agent" : "主 Agent"),
         task: stringFrom(payload, "task", "description") ?? existing?.task,
         status: agentStatus,
+        runtime_status: stringFrom(payload, "status") ?? existing?.runtime_status,
+        managed: Boolean(payload.subagent_id) || existing?.managed,
+        duration_ms: asNumber(payload.duration_ms) ?? existing?.duration_ms,
+        result: stringFrom(payload, "result") ?? existing?.result,
       },
     };
   }
@@ -333,6 +341,7 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
       [id]: {
         id,
         kind,
+        call_id: stringFrom(payload, "action_id", "tool_call_id", "tool_use_id", "model_call_id", "call_id", "subagent_id"),
         title: name || existing?.title || defaultTitle[kind],
         subtitle: stringFrom(payload, "summary", "description", "task") ?? existing?.subtitle,
         status,
@@ -417,7 +426,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       let runs = store.runs;
       for (const [runId, batch] of grouped) {
         const previous = runs[runId] ?? blankRun(runId);
-        const next = reduceEvents(previous, batch);
+        const next = reduceEvents(previous, [...batch].sort((a, b) => a.seq - b.seq));
         if (next === previous) continue;
         if (runs === store.runs) runs = { ...runs };
         runs[runId] = next;

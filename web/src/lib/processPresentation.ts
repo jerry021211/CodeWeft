@@ -46,6 +46,7 @@ type EventInfo = { seq: number; type: string; reason?: string; callKind?: string
 type Narration = { key: string; callId: string; agentId: string; parentAgentId?: string | null; seq: number; chunks: string[]; callKind?: string };
 
 const toolLabels: Record<string, string> = {
+  web_search: "联网搜索",
   read_file: "读取文件", read: "读取文件", write_file: "写入文件", write: "写入文件",
   edit_file: "修改文件", edit: "修改文件", apply_patch: "应用修改", bash: "运行命令",
   shell: "运行命令", exec_command: "运行命令", glob: "查找文件", grep: "搜索内容",
@@ -88,7 +89,7 @@ function toolCategory(action: RunAction): Category {
   if (action.kind !== "tool") return "other";
   const name = action.title.toLowerCase();
   if (["read", "read_file"].includes(name)) return "read";
-  if (["grep", "search"].includes(name)) return "search";
+  if (["grep", "search", "web_search"].includes(name)) return "search";
   if (["glob", "list_files", "list_directory", "ls"].includes(name)) return "list";
   if (["write", "write_file", "edit", "edit_file", "apply_patch"].includes(name)) return "edit";
   if (["bash", "shell", "exec_command"].includes(name)) return "command";
@@ -208,7 +209,7 @@ export function buildProcessPresentation(run: RunViewState, options: { finalAnsw
   for (const [index, id] of run.actionOrder.entries()) {
     const action = run.actions[id];
     if (!action) continue;
-    const key = callKey(action.agent_id ?? "root", id);
+    const key = callKey(action.agent_id ?? "root", action.call_id ?? id);
     const info = infos.get(key);
     const seq = info?.seq ?? run.events.length + index;
     if (action.kind === "subagent") {
@@ -233,7 +234,7 @@ export function buildProcessPresentation(run: RunViewState, options: { finalAnsw
 
   for (const { action, seq, info } of activities) {
     const id = action.id;
-    const key = callKey(action.agent_id ?? "root", id);
+    const key = callKey(action.agent_id ?? "root", action.call_id ?? id);
     actionIndexes.set(key, seq);
     const actionStart = stamp(action.started_at);
     const actionEnd = stamp(action.completed_at);
