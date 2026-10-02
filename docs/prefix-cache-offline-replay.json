@@ -1,0 +1,52 @@
+{
+  "mode": "offline_path_replay",
+  "paid_model_calls": 0,
+  "controlled": [
+    "model",
+    "tool outputs",
+    "feedback timeline",
+    "max_tokens",
+    "system rules"
+  ],
+  "not_measured": [
+    "task completion quality",
+    "provider caching",
+    "API latency",
+    "actual cost"
+  ],
+  "elapsed_local_seconds": 0.0977,
+  "before": {
+    "requests": 24,
+    "history_rewrites": 16,
+    "earliest_changed_message": 2,
+    "system_changes": 3,
+    "append_only_transitions": 6,
+    "total_serialized_request_chars": 715919,
+    "provider_cache_hit_input": null,
+    "provider_cache_miss_input": null,
+    "provider_output_tokens": null,
+    "main_cost": null,
+    "auxiliary_cost": null,
+    "total_cost": null,
+    "quality_measured": false,
+    "compactions": 0
+  },
+  "after": {
+    "requests": 24,
+    "history_rewrites": 2,
+    "earliest_changed_message": 2,
+    "system_changes": 0,
+    "append_only_transitions": 21,
+    "total_serialized_request_chars": 1505903,
+    "provider_cache_hit_input": null,
+    "provider_cache_miss_input": null,
+    "provider_output_tokens": null,
+    "main_cost": null,
+    "auxiliary_cost": null,
+    "total_cost": null,
+    "quality_measured": false,
+    "compactions": 0
+  },
+  "cleanup_boundaries_after": 2,
+  "canonical_tool_results_preserved": true
+}

@@ -164,6 +164,9 @@ class EnvironmentConfig:
                 summary_argument_preview_chars=_int_env("CONTEXT_SUMMARY_ARGUMENT_PREVIEW_CHARS", 2_000),
                 model_context_windows=_model_windows_env(),
                 near_context_ratio=_float_env("CONTEXT_NEAR_CONTEXT_RATIO", 0.8),
+                cache_policy=os.getenv("CONTEXT_CACHE_POLICY", "auto"),
+                cache_soft_ratio=_float_env("CONTEXT_CACHE_SOFT_RATIO", 0.8),
+                cache_boundary_growth_ratio=_float_env("CONTEXT_CACHE_BOUNDARY_GROWTH_RATIO", 0.1),
             ),
             memory_config=MemoryConfig(
                 enabled=_bool_env("ENABLE_MEMORY", True),

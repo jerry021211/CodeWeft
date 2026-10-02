@@ -93,7 +93,6 @@ class PromptRuntime:
             PromptMode.TEAMMATE_WORK: "teammate_work",
             PromptMode.TEAMMATE_ANALYSIS: "teammate_analysis",
             PromptMode.SUBAGENT: "subagent",
-            PromptMode.DISCUSS: "discuss",
         }.get(mode, "identity")
         self._add(
             fragments,
@@ -103,13 +102,16 @@ class PromptRuntime:
             source=self._template_source(identity_template),
             required=single_agent,
         )
-        if mode is PromptMode.NORMAL:
+        if single_agent:
+            self._add_template(fragments, "base.modes", "modes", section="static", required=True)
+            self._add_template(fragments, "base.discuss", "discuss", section="static", required=True)
             self._add_template(
                 fragments,
                 "base.execution",
                 "execution",
                 section="static",
                 required=True,
+                code_only=True,
             )
 
         project_instructions = self._project_instructions()
@@ -129,12 +131,12 @@ class PromptRuntime:
                 "tool_change",
                 required=single_agent,
             )
-        if "TaskCreate" in tools and mode not in {PromptMode.TEAM_PLANNER, PromptMode.DISCUSS}:
-            self._add_template(fragments, "tools.tasks", "tasks")
-        if "todo_write" in tools and "TaskCreate" not in tools and mode is not PromptMode.DISCUSS:
-            self._add_template(fragments, "tools.todo", "todo")
-        if mode == PromptMode.NORMAL and SUBAGENT_TOOL_NAME in tools:
-            self._add_template(fragments, "tools.subagent", "subagent_tool")
+        if "TaskCreate" in tools and mode is not PromptMode.TEAM_PLANNER:
+            self._add_template(fragments, "tools.tasks", "tasks", code_only=single_agent)
+        if "todo_write" in tools and "TaskCreate" not in tools:
+            self._add_template(fragments, "tools.todo", "todo", code_only=single_agent)
+        if single_agent and SUBAGENT_TOOL_NAME in tools:
+            self._add_template(fragments, "tools.subagent", "subagent_tool", code_only=True)
 
         if skill_catalog and "load_skill" in tools:
             self._add_template(fragments, "skills.guidance", "skill")
@@ -154,8 +156,8 @@ class PromptRuntime:
         }
         if tools & memory_tools:
             self._add_template(fragments, "memory.guidance", "memory")
-        if REMEMBER_TOOL_NAME in tools and mode is not PromptMode.DISCUSS:
-            self._add_template(fragments, "memory.write", "memory_write")
+        if REMEMBER_TOOL_NAME in tools:
+            self._add_template(fragments, "memory.write", "memory_write", code_only=single_agent)
         if memory_catalog and not selected_memory_context:
             self._add(
                 fragments,
@@ -179,23 +181,8 @@ class PromptRuntime:
         ]
         if "bash" in tools:
             runtime_facts.append(self.runtime_platform.prompt_reminder())
-        runtime_facts.append(
-            self._load_template("date_reminder").format(
-                current_date=date.today().isoformat()
-            )
-        )
+        runtime_facts.append(self.date_turn_context())
 
-        if single_agent:
-            runtime_facts.append(
-                self._load_template("mode_reminder").format(
-                    mode_label="Discuss · 只读讨论" if mode is PromptMode.DISCUSS else "Code · 编码",
-                    mode_rules=(
-                        "当前仅允许只读探索和讨论，不执行写入。"
-                        if mode is PromptMode.DISCUSS
-                        else "当前未启用 Discuss 只读限制；用户要求实现或修复时，可在授权范围内执行修改，无需再次要求用户退出 Discuss。"
-                    ),
-                )
-            )
         self._add(
             fragments,
             "runtime.reminder",
@@ -204,6 +191,16 @@ class PromptRuntime:
             required=single_agent,
         )
         return fragments
+
+    def date_turn_context(self) -> str:
+        return self._load_template("date_reminder").format(current_date=date.today().isoformat())
+
+    def rules_fingerprint(self) -> str:
+        """Security-sensitive rules are checked even while an assembly is reused."""
+        from codeagent.context.observation import fingerprint
+        templates = {path.stem for path in self.builtin_template_dir.glob("*.md")}
+        return fingerprint({"project": self._project_instructions(),
+                            "templates": {name: self._load_template(name) for name in sorted(templates)}})["hash"]
 
     def mode_turn_context(self, mode: PromptMode) -> str:
         """Record an actual runtime mode change next to the new user turn."""
@@ -226,11 +223,15 @@ class PromptRuntime:
         *,
         section: PromptSection = "dynamic",
         required: bool = False,
+        code_only: bool = False,
     ) -> None:
+        content = self._load_template(template_name)
+        if code_only:
+            content = f"<code_mode_only>\n以下规则仅在 Code 模式适用，Discuss 模式不执行这些操作。\n{content}\n</code_mode_only>"
         self._add(
             fragments,
             fragment_id,
-            self._load_template(template_name),
+            content,
             section=section,
             source=self._template_source(template_name),
             required=required,

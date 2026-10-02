@@ -45,6 +45,13 @@ def failure(**overrides):
     return ToolOutput("FAILED test_example::test_value - AssertionError: expected 2", **facts)
 
 
+def runtime_feedback(request):
+    reminders = [message["content"] for message in request["messages"]
+                 if isinstance(message.get("content"), str)
+                 and message["content"].startswith("[运行时提醒：执行纠偏；")]
+    return reminders[-1] if reminders else ""
+
+
 class ScriptedClient:
     """No network or provider: every request must match the finite script."""
 
@@ -142,7 +149,8 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         self.assertTrue(results["blocked"]["is_error"])
         self.assertIn("未执行", results["blocked"]["content"])
         self.assertIn("其他诊断", results["blocked"]["content"])
-        self.assertIn("相同输入状态", client.calls[3]["system"])
+        self.assertIn("相同输入状态", runtime_feedback(client.calls[3]))
+        self.assertEqual(client.calls[0]["system"], client.calls[3]["system"])
         self.assertEqual(len(agent._loop_guard.state.recent), 3)
         self.assertEqual(agent._loop_guard.state.blocked_attempts, 1)
         self.assertEqual(agent._loop_guard.budget.state.tool_calls, 4)
@@ -267,8 +275,8 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         self.assertIn("运行时纠正", results["trusted-2"]["content"])
         self.assertNotIn("未执行", results["trusted-3"]["content"])
         self.assertIn("未执行", results["blocked"]["content"])
-        self.assertIn("仅提醒", client.calls[3]["system"])
-        self.assertIn("相同输入状态下", client.calls[4]["system"])
+        self.assertIn("仅提醒", runtime_feedback(client.calls[3]))
+        self.assertIn("相同输入状态下", runtime_feedback(client.calls[4]))
 
     def test_successful_rereads_and_paging_remain_available(self):
         self.register_read()
@@ -366,7 +374,7 @@ class LoopGuardIntegrationTests(unittest.TestCase):
                 self.assertEqual(len(client.calls), 2)
                 self.assertEqual(agent._loop_guard.state.empty_responses, 2)
                 self.assertFalse(self.events_of("agent.completed"))
-                self.assertIn("上一轮未返回", client.calls[1]["system"])
+                self.assertIn("上一轮未返回", runtime_feedback(client.calls[1]))
 
     def test_two_empty_max_tokens_responses_stop_before_recovery_can_continue(self):
         agent, client = self.make_agent([ModelResponse("max_tokens", []) for _ in range(2)])
@@ -393,8 +401,9 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 4)
         self.assertGreater(client.calls[1]["max_tokens"], client.calls[0]["max_tokens"])
         self.assertIn(partial, repr(client.calls[2]["messages"]))
-        self.assertNotIn("上一轮未返回有效正文", client.calls[2]["system"])
-        self.assertIn("上一轮未返回有效正文", client.calls[3]["system"])
+        self.assertNotIn("上一轮未返回有效正文", runtime_feedback(client.calls[2]))
+        self.assertIn("已解除", runtime_feedback(client.calls[2]))
+        self.assertIn("上一轮未返回有效正文", runtime_feedback(client.calls[3]))
         self.assertEqual(agent._loop_guard.state.response_seq, 4)
         self.assertEqual(agent._loop_guard.state.empty_responses, 0)
         self.assertFalse(self.events_of("agent.loop_stopped"))
@@ -488,7 +497,7 @@ class LoopGuardIntegrationTests(unittest.TestCase):
                 self.assertEqual(resumed._loop_guard.state.scope_id, "same")
                 self.assertEqual(resumed._loop_guard.budget.state.model_calls, checkpoint["budget"]["model_calls"] + 2)
                 self.assertEqual(resumed._loop_guard.budget.state.tool_calls, checkpoint["budget"]["tool_calls"] + 1)
-                self.assertIn("相同输入状态", client.calls[0]["system"])
+                self.assertIn("相同输入状态", runtime_feedback(client.calls[0]))
                 self.assertIn("未执行", self.results(resumed)["blocked"]["content"])
 
     def test_run_none_retains_explicit_execution_id_despite_different_event_run_id(self):
@@ -506,7 +515,7 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         self.assertEqual(agent._loop_guard.budget.state.model_calls, before["budget"]["model_calls"] + 2)
         self.assertEqual(agent._loop_guard.budget.state.tool_calls, before["budget"]["tool_calls"] + 1)
         self.assertEqual(agent._loop_guard.state.blocked_attempts, 1)
-        self.assertIn("相同输入状态", client.calls[4]["system"])
+        self.assertIn("相同输入状态", runtime_feedback(client.calls[4]))
         self.assertIn("未执行", self.results(agent)["blocked"]["content"])
 
     def test_pending_process_checkpoint_blocks_same_command_cwd_but_allows_query(self):
@@ -597,7 +606,7 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         resumed.restore_execution_state(checkpoint)
         resumed.run(None)
         self.assertEqual(len(self.executed), 3)
-        self.assertIn("相同输入状态", client.calls[0]["system"])
+        self.assertIn("相同输入状态", runtime_feedback(client.calls[0]))
         self.assertIn("未执行", self.results(resumed)["blocked"]["content"])
         self.assertEqual(resumed._loop_guard.budget.state.tool_calls, 4)
 
@@ -640,7 +649,7 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         self.assertEqual(before["state"], after["state"])
         self.assertEqual(after["budget"]["model_calls"], before["budget"]["model_calls"] + 1)
         self.assertIn("context_summary", repr(client.calls[3]["messages"]))
-        self.assertIn("相同输入状态", client.calls[3]["system"])
+        self.assertIn("相同输入状态", runtime_feedback(client.calls[3]))
         self.assertEqual(len(self.executed), 3)
         self.assertIn("未执行", self.results(agent)["blocked"]["content"])
 
@@ -664,7 +673,7 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         resumed.run(None)
         self.assertEqual(resumed._loop_guard.state.scope_id, snapshot["state"]["scope_id"])
         self.assertEqual(resumed._loop_guard.budget.state.model_calls, 5)
-        self.assertIn("相同输入状态", client.calls[0]["system"])
+        self.assertIn("相同输入状态", runtime_feedback(client.calls[0]))
         self.assertEqual(len(self.executed), 3)
         self.assertIn("未执行", self.results(resumed)["blocked"]["content"])
 

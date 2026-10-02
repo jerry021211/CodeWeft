@@ -54,6 +54,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getTeamIntegrationDiff(teamRunId: string) {
+    return request<{ integration_head: string; diff: string; truncated: boolean }>(`/teams/${encodeURIComponent(teamRunId)}/integration-diff`);
+  },
+  resolveTeamIntegration(teamRunId: string, integrationId: string, action: "retry" | "repair" | "resume", reason: string) {
+    return request<TeamSnapshot>(`/teams/${encodeURIComponent(teamRunId)}/integrations/${encodeURIComponent(integrationId)}/resolve`, {
+      method: "POST", body: JSON.stringify({ action, reason, acknowledgeUnknownResult: action === "resume" }),
+    });
+  },
   cancelSubagent(runId: string, subagentId: string) {
     return request(`/runs/${encodeURIComponent(runId)}/subagents/${encodeURIComponent(subagentId)}/cancel`, { method: "POST" });
   },

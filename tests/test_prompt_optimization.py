@@ -84,13 +84,14 @@ class PromptBudgetTests(unittest.TestCase):
         self.assertNotIn("skills.catalog", included)
         self.assertNotIn("不可调用技能", result.system_prompt)
 
-    def test_discuss_receives_core_without_execution(self):
+    def test_discuss_receives_shared_rules_with_code_only_execution(self):
         result = PromptRuntime(workspace=Path.cwd()).assemble(
             mode=PromptMode.DISCUSS, tool_schemas=[{"name": "write_file"}, {"name": "remember"}])
         ids = {x.id for x in result.trace if x.included}
         self.assertIn("base.core", ids)
-        self.assertNotIn("base.execution", ids)
-        self.assertNotIn("memory.write", ids)
+        self.assertIn("base.execution", ids)
+        self.assertIn("memory.write", ids)
+        self.assertIn("以下规则仅在 Code 模式适用", result.system_prompt)
         self.assertIn("出现不代表获准执行", result.system_prompt)
 
 

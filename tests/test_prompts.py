@@ -8,6 +8,19 @@ from codeagent.prompts import PromptConfig, PromptMode, PromptRuntime
 
 
 class PromptRuntimeTests(unittest.TestCase):
+    def test_ordinary_modes_share_system_for_each_planning_backend(self):
+        runtime = PromptRuntime(workspace=Path.cwd())
+        for planner in ([], ["todo_write"], ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"]):
+            with self.subTest(planner=planner):
+                tools = [{"name": name} for name in [*planner, "bash", "subagent", "remember", "load_skill"]]
+                options = dict(tool_schemas=tools, skill_catalog="skill catalog", memory_catalog="memory catalog")
+                normal = runtime.assemble(mode=PromptMode.NORMAL, **options)
+                discuss = runtime.assemble(mode=PromptMode.DISCUSS, **options)
+                self.assertEqual(normal.system_prompt, discuss.system_prompt)
+                self.assertEqual(normal.prompt_hash, discuss.prompt_hash)
+                self.assertNotIn("本轮当前执行模式", normal.system_prompt)
+                self.assertIn("<code_mode_only>", normal.system_prompt)
+
     def test_read_only_memory_tools_do_not_advertise_remember(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
         for mode in (PromptMode.TEAM_LEAD, PromptMode.TEAMMATE_ANALYSIS, PromptMode.TEAMMATE_WORK):
@@ -61,6 +74,8 @@ class PromptRuntimeTests(unittest.TestCase):
             [
                 "base.core",
                 "base.identity",
+                "base.modes",
+                "base.discuss",
                 "base.execution",
                 "tools.todo",
                 "tools.subagent",
@@ -157,8 +172,8 @@ class PromptRuntimeTests(unittest.TestCase):
         self.assertIn("Keep every Team Task pending and unowned", result.system_prompt)
         self.assertIn("a rejected revision", result.system_prompt.lower())
         self.assertIn("immutable; create a new revision", result.system_prompt.lower())
-        self.assertIn("manual", result.system_prompt.lower())
-        self.assertIn("integration only", result.system_prompt.lower())
+        self.assertIn("automatically integrates", result.system_prompt.lower())
+        self.assertIn("never pushes to github", result.system_prompt.lower())
         self.assertNotIn("Perform the work directly", result.system_prompt)
         self.assertEqual(result.trace[0].source, "templates/team_planner.md")
 
@@ -172,7 +187,7 @@ class PromptRuntimeTests(unittest.TestCase):
         self.assertIn("one Teammate is valid", first.system_prompt)
         self.assertIn("not to fill roles", first.system_prompt.replace("\n", " "))
         self.assertIn("already sufficient specification", first.system_prompt)
-        self.assertIn("another Task's changed files are not", first.system_prompt)
+        self.assertIn("code dependencies wait", first.system_prompt)
         self.assertIn("JSON boolean", first.system_prompt)
         self.assertIn("short work brief", first.system_prompt)
         self.assertIn("do not repeat it in Task descriptions", first.system_prompt)

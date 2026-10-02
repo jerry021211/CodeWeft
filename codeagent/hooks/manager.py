@@ -54,3 +54,7 @@ class HookManager:
             if result is not None:
                 return result
         return None
+
+    def permission_snapshot(self) -> list[Any]:
+        return [snapshot() for handler in self._handlers["PreToolUse"]
+                if callable(snapshot := getattr(handler, "permission_snapshot", None))]

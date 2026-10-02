@@ -142,8 +142,15 @@ class NonTeamContextRegressions(unittest.TestCase):
         before = asdict(context.state)
         with self.assertRaises(CancelledError):
             agent.run()
-        self.assertEqual(asdict(context.state), before)
-        self.assertEqual(agent.messages, original)
+        after = asdict(context.state)
+        # Prompt preparation is reusable even when the subsequent summary is
+        # cancelled. Neither summary/task state nor sent-request baselines commit.
+        for key in ("prompt_snapshot", "prompt_revision", "runtime_reminders", "last_prompt_mode"):
+            after.pop(key)
+            before.pop(key)
+        self.assertEqual(after, before)
+        self.assertEqual(agent.messages[:len(original)], original)
+        self.assertIn("[运行时模式更新]", agent.messages[-1]["content"])
         self.assertEqual([call[1]["model"] for call in client.calls], ["summary"])
         self.assertEqual(list(context.config.transcript_dir.glob("*.jsonl")), [])
 
@@ -262,13 +269,13 @@ class NonTeamContextRegressions(unittest.TestCase):
         store.remember(name="fact", description="d" * 12000, content="stable fact")
         memory = MemoryManager(store, MemoryConfig(retrieval_mode="legacy"))
         client = Client([_response("main still proceeds")])
-        context = self.context(max_request_chars=5000)
+        context = self.context(max_request_chars=7000)
         agent = self.agent(client, context=context)
         agent.memory_manager = memory
         result = agent.run("small task")
         self.assertEqual(result.final_text, "main still proceeds")
         self.assertEqual([kind for kind, _ in client.calls], ["main"])
-        self.assertLessEqual(inspect_request(**client.calls[0][1]).request_chars, 5000)
+        self.assertLessEqual(inspect_request(**client.calls[0][1]).request_chars, 7000)
 
     def test_45_round_task_rolls_summaries_and_resumes_checkpoint_without_duplicate_work(self):
         prompt = "EXACT 用户目标：修改 /project/真实文件.py，保留 public_api；不要重新执行已有成功操作。"

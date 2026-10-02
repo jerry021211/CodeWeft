@@ -153,13 +153,14 @@ class TeamApiTests(unittest.TestCase):
         )
         return result.stdout.strip()
 
-    def _create_team(self) -> dict[str, object]:
+    def _create_team(self, integration_mode="managed") -> dict[str, object]:
         response = self.client.post(
             "/api/teams",
             json={
                 "rootRunId": self.run.id,
                 "taskListId": self.task_list_id,
                 "baseCommit": self.base_commit,
+                "integrationMode": integration_mode,
                 "teammateCount": 1,
                 "maxTeammates": 2,
                 "plan": {
@@ -175,6 +176,30 @@ class TeamApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
+    def test_explicit_manual_team_keeps_existing_integration_flow(self):
+        snapshot = self._create_team("manual")
+        self.assertEqual(snapshot["team"]["integration_mode"], "manual")
+        self.assertEqual(snapshot["team"]["base_commit"], self.base_commit)
+        self.assertTrue(snapshot["manual_integration"]["required"])
+        self.assertFalse(snapshot["manual_integration"]["automatic_merge"])
+        self.assertEqual(snapshot["integrations"], [])
+
+    def test_managed_team_does_not_accept_manual_integration_verification(self):
+        snapshot = self._create_team()
+        response = self.client.post(f"/api/teams/{snapshot['team']['id']}/manual-integration",
+            json={"targetRef": "HEAD", "commandId": "manual-check"})
+        self.assertEqual(response.status_code, 409, response.text)
+
+    def test_cumulative_diff_uses_frozen_team_version(self):
+        snapshot = self._create_team()
+        team_id = snapshot["team"]["id"]
+        (self.workspace / "codeagent" / "base.py").write_text("new user edit")
+        result = self.client.get(f"/api/teams/{team_id}/integration-diff")
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["diff"], "")
+        self.assertEqual(result.json()["integration_head"], snapshot["team"]["base_commit"])
+        self.assertFalse(result.json()["truncated"])
+
     def test_create_reject_revise_and_approve_team_plan(self) -> None:
         snapshot = self._create_team()
         team = snapshot["team"]
@@ -189,7 +214,8 @@ class TeamApiTests(unittest.TestCase):
         ]
         self.assertEqual(len(lead_sessions), 1)
         self.assertEqual(lead_sessions[0]["state"], "idle")
-        self.assertEqual(snapshot["manual_integration"]["automatic_merge"], False)
+        self.assertEqual(snapshot["manual_integration"]["automatic_merge"], True)
+        self.assertEqual(team["integration_mode"], "managed")
         self.assertEqual(self.repository.list_task_attempts(team_id), [])
 
         rejection = {

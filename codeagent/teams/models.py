@@ -14,6 +14,15 @@ from typing import Any
 JsonObject = dict[str, Any]
 
 
+def integration_summary(record: JsonObject) -> JsonObject:
+    """Keep full recovery manifests out of polling responses and model context."""
+    value = dict(record)
+    result = record.get("result", {})
+    value["result"] = {"changed_files": [f["path"] for f in result.get("files", [])],
+                       "source_head": result.get("source_head")}
+    return value
+
+
 class TeamRunState(str, Enum):
     PLANNING = "planning"
     WAITING_APPROVAL = "waiting_approval"
@@ -105,6 +114,9 @@ class TeamRunRecord:
     model_call_budget: int | None = None
     deadline_at: str | None = None
     metadata: JsonObject = field(default_factory=dict)
+    integration_mode: str = "manual"
+    integration_head: str | None = None
+    integration_revision: int = 0
 
     def to_dict(self) -> JsonObject:
         result = asdict(self)
@@ -208,6 +220,7 @@ class TaskAttemptRecord:
     cancel_requested_at: str | None = None
     worker_exited_at: str | None = None
     error: JsonObject | None = None
+    base_integration_revision: int = 0
 
     def to_dict(self) -> JsonObject:
         result = asdict(self)
@@ -397,6 +410,8 @@ class CandidateRecord:
     committed_at: str | None = None
     integrated_commit: str | None = None
     integrated_at: str | None = None
+    team_integrated_revision: int | None = None
+    superseded_at: str | None = None
 
     def to_dict(self) -> JsonObject:
         result = asdict(self)

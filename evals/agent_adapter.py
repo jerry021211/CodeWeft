@@ -174,7 +174,8 @@ def build_agent(profile: dict, workspace: Path, trial: Path, repository, emitter
         summary_recorder = recorder.for_client(Anthropic(api_key=summary_key, base_url=env.base_url, max_retries=0, timeout=60.0))
     # Keep config.summarization_api_key unset so Agent forks this recorded client
     # instead of constructing an unrecorded SDK with an independent call counter.
-    agent.client = EvaluationModelClient(sdk_client=recorder, summary_sdk_client=summary_recorder,
+    agent.client = EvaluationModelClient(api_key=env.api_key if profile["mode"] == "live" else None,
+                                        sdk_client=recorder, summary_sdk_client=summary_recorder,
                                         base_url=env.base_url, event_emitter=emitter, usage_tracker=agent.usage_tracker, stream=False)
     agent.context.summary_credentials_scope = hashlib.sha256(json.dumps([env.base_url, summary_key or env.api_key]).encode()).hexdigest()
     agent.allow_subagents = False

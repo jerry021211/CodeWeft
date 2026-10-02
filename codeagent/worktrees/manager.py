@@ -50,8 +50,8 @@ class RuntimeCommitResult:
 class WorktreeManager:
     """Create and validate one retained Git Worktree per code Attempt.
 
-    This class deliberately has no merge, rebase, cherry-pick, cleanup, or push
-    methods.  Those operations are outside the first delivery.
+    Candidate Worktrees remain member-owned. Managed integration uses separate
+    Runtime-owned trials and never pushes to a remote.
     """
 
     def __init__(
@@ -110,7 +110,7 @@ class WorktreeManager:
         if team is None:
             raise WorktreeError(f"TeamRun not found: {team_run_id}")
         inspection = self.inspect_baseline(team.base_commit)
-        if inspection.source_dirty and not allow_dirty:
+        if inspection.source_dirty and not allow_dirty and team.integration_mode != "managed":
             raise DirtyWorkspaceConfirmationRequired(
                 "Source workspace has uncommitted changes; they will not be copied "
                 "into Team Worktrees"
@@ -135,6 +135,8 @@ class WorktreeManager:
         except WorktreeError:
             return False
         confirmation = self.repository.get_team_base_confirmation(team_run_id)
+        if team.integration_mode == "managed":
+            return bool(confirmation and confirmation["base_commit"] == team.base_commit)
         return bool(
             confirmation
             and confirmation["base_commit"] == inspection.base_commit
@@ -150,6 +152,11 @@ class WorktreeManager:
         if team is None:
             raise WorktreeError(f"TeamRun not found: {team_run_id}")
         inspection = self.inspect_baseline(team.base_commit)
+        if team.integration_mode == "managed":
+            if not self.baseline_is_confirmed(team.id):
+                return self.confirm_baseline(team.id, confirmed_by="runtime", allow_dirty=True,
+                    command_id=f"confirm-snapshot:{team.id}:{team.base_commit}")
+            return inspection
         if self.baseline_is_confirmed(team_run_id):
             return inspection
         if inspection.source_dirty:
@@ -163,6 +170,14 @@ class WorktreeManager:
             command_id=f"confirm-clean-base:{team_run_id}:{inspection.status_hash}",
         )
 
+    def snapshot_local(self, base_commit: str = "HEAD") -> dict[str, Any]:
+        from codeagent.worktrees.snapshots import LocalGit
+        return LocalGit(self.source_workspace, self.managed_root).snapshot(base_commit)
+
+    def read_view(self, commit: str) -> str:
+        from codeagent.worktrees.snapshots import LocalGit
+        return LocalGit(self.source_workspace, self.managed_root).read_view(commit)
+
     def create_for_attempt(self, attempt: TaskAttemptRecord) -> WorktreeBindingRecord:
         existing = self.repository.get_attempt_worktree_binding(attempt.id)
         if existing is not None:
@@ -171,6 +186,10 @@ class WorktreeManager:
         if team is None:
             raise WorktreeError(f"TeamRun not found: {attempt.team_run_id}")
         inspection = self.inspect_baseline(attempt.attempt_base_commit)
+        if team.integration_mode == "managed":
+            allowed = {team.base_commit} | {r["trial_commit"] for r in self.repository.list_team_integrations(team.id) if r["status"] == "published"}
+            if attempt.attempt_base_commit not in allowed:
+                raise WorktreeError("Attempt baseline is not a published Team snapshot")
         self.ensure_baseline_ready(team.id)
         if not self.baseline_is_confirmed(team.id):
             raise DirtyWorkspaceConfirmationRequired(
@@ -393,6 +412,10 @@ class WorktreeManager:
             "user.name=CodeAgent Runtime",
             "-c",
             "user.email=runtime@codeagent.invalid",
+            "-c",
+            "core.hooksPath=" + str(self.managed_root / "no-hooks"),
+            "-c",
+            "commit.gpgSign=false",
             "commit",
             "-m",
             message,
@@ -603,6 +626,9 @@ class WorktreeManagerRegistry:
 
     def ensure_baseline_ready(self, team_run_id: str) -> GitBaselineInspection:
         return self.for_team(team_run_id).ensure_baseline_ready(team_run_id)
+
+    def read_view(self, team_run_id: str, commit: str) -> str:
+        return self.for_team(team_run_id).read_view(commit)
 
     def confirm_baseline(self, team_run_id: str, **kwargs: Any) -> GitBaselineInspection:
         return self.for_team(team_run_id).confirm_baseline(team_run_id, **kwargs)

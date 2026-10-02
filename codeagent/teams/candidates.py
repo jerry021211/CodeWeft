@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import os
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -245,30 +247,34 @@ class CandidateService:
             if command == "git diff --check HEAD"
             else current_runtime_platform().command_argv(command)
         )
-        try:
-            proc = subprocess.run(
+        from codeagent.tools.bash import BashTool
+        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+        # Files avoid waiting forever for inherited stdout pipes when a timed
+        # out shell leaves children behind. Cleanup is bounded and PID-scoped.
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            proc = subprocess.Popen(
                 argv,
                 cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.validation_timeout,
+                stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                **options,
             )
-        except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + (exc.stderr or "")
-            return (
-                "timed_out",
-                124,
-                output or f"Timed out after {self.validation_timeout}s",
-                round((time.monotonic() - started) * 1000),
-            )
-        output = proc.stdout
-        if proc.stderr:
-            output += f"\n[stderr]\n{proc.stderr}"
+            timed_out = False
+            try:
+                proc.wait(timeout=self.validation_timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                cleaned = BashTool._stop_process(proc)
+            stdout.seek(0)
+            stderr.seek(0)
+            output = stdout.read().decode("utf-8", "replace")
+            errors = stderr.read().decode("utf-8", "replace")
+            if errors:
+                output += f"\n[stderr]\n{errors}"
+            if timed_out:
+                output += f"\nTimed out after {self.validation_timeout}s; process cleanup confirmed={cleaned}"
         return (
-            "passed" if proc.returncode == 0 else "failed",
-            proc.returncode,
+            "timed_out" if timed_out else "passed" if proc.returncode == 0 else "failed",
+            124 if timed_out else proc.returncode,
             output or "(no output)",
             round((time.monotonic() - started) * 1000),
         )

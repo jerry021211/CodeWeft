@@ -196,6 +196,11 @@ CODEAGENT_WEB_SEARCH_TIMEOUT=20
 
 ## Discuss：只读讨论模式
 
+Code / Discuss 共用稳定的系统提示词和工具定义，两种模式的规则固定存在并按当前模式
+生效。首次请求、切换模式时只在历史尾部追加运行时通知；压缩折叠通知后会补回，普通
+同模式回合不重复注入。仅切换模式不再重写 system 或旧消息，有利于保留前缀缓存。
+旧版提示词快照升级会重建一次；其他规则变更、压缩及服务端缓存状态仍会影响实际命中。
+
 用于代码阅读、审查和架构讨论，不要求先建计划。通过 `PreToolUse` hook 强制限制
 工具执行；即使模型要求写入，也会返回 `tool.blocked`，不会进入审批或执行写工具。
 
@@ -746,17 +751,21 @@ MCP_CONFIG=config/mcp.json
 
 ## Agent Team（第一阶段）
 
-当前 Web 已隐藏 `Agent Team` 开关，聊天提交固定使用普通 Agent 模式，不根据用户文字
-自动组队。本机关闭 Team 时使用以下配置，修改后需要重启后端：
+Web 输入框提供 `Agent Team` 开关。先在本地 `.env` 启用团队功能，修改后重启后端：
 
 ```bash
-TEAM_RUNTIME_ENABLED=false
-TEAM_WRITE_ENABLED=false
+TEAM_RUNTIME_ENABLED=true
+TEAM_WRITE_ENABLED=true
 ```
 
-关闭后不启动 Team Supervisor，并拒绝显式 Team 请求及旧活跃 Team 会话的继续执行。
-已有 Team 数据和 Worktree 不会删除或自动取消；请在新会话使用普通 Agent。同一项目
-仍有未结束 Team 时，Memory 的只读保护继续保留。以下为保留的 Team 实现说明。
+在编码模式下打开 `Agent Team` 再发送需求，Lead 会提交团队方案；在右侧「团队」页批准
+方案后开始执行。开关按会话独立选择，普通消息不会根据文字自动组队。Discuss 模式不能
+启动团队；团队模式暂不支持联网搜索。已有活跃团队的会话会继续向 Root / Lead 发送指令。
+
+配置示例默认关闭 Team；只有 `TEAM_RUNTIME_ENABLED=true` 时才启动 Supervisor，
+`TEAM_WRITE_ENABLED=true` 进一步允许代码任务。将两项改回 false 并重启即可关闭入口。
+关闭后拒绝显式 Team 请求及旧活跃 Team 会话的继续执行，但已有 Team 数据和 Worktree
+不会删除或自动取消。同一项目仍有未结束 Team 时，Memory 的只读保护继续保留。
 
 显式 Team 请求首先进入只读 `team_planner`：Root 创建或复用普通 Task DAG，并必须调用
 `TeamPlanSubmit`。如果模型只输出文字方案却没有提交工具调用，Runtime 会把本次 Run

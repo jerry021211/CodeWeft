@@ -11,6 +11,83 @@ from typing import Any
 from codeagent.messages import Message
 
 
+def fingerprint(value: Any) -> dict[str, Any]:
+    """Canonical client JSON: sorted object keys, ordered arrays, no body logs."""
+    from codeagent.context.history import serializable
+    body = json.dumps(serializable(value), ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
+    return {"hash": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "chars": len(body), "bytes": len(body.encode("utf-8"))}
+
+
+def observe_request(params: dict[str, Any], baselines: dict[str, Any], *,
+                    call_kind: str, metadata: dict[str, Any] | None = None,
+                    boundary: str = "sdk_parameters") -> dict[str, Any]:
+    """Hash the final client parameters; these are NOT provider cache keys.
+
+    Baselines contain only fingerprints and belong to one client/session. Forks
+    must get independent baselines even when their call_kind is identical.
+    """
+    current = {key: fingerprint(params.get(key)) for key in ("system", "tools")}
+    current["messages"] = [fingerprint(message) for message in params.get("messages", [])]
+    current["configuration"] = fingerprint({key: value for key, value in params.items()
+                                             if key not in {"system", "tools", "messages"}})
+    previous = baselines.get(call_kind)
+    baseline_reset = previous is not None and (not isinstance(previous, dict)
+        or previous.get("version") != 1 or not isinstance(previous.get("messages"), list)
+        or any(key not in previous for key in ("configuration", "system", "tools")))
+    if baseline_reset:
+        previous = None
+    current["version"] = 1
+    common = 0
+    first = None
+    if previous:
+        for old, new in zip(previous["messages"], current["messages"]):
+            if old != new:
+                break
+            common += 1
+        for key in ("configuration", "system", "tools"):
+            if previous[key] != current[key]:
+                first = key
+                break
+        if first is None and (common < len(previous["messages"]) or common < len(current["messages"])):
+            first = f"messages[{common}]"
+    append_only = bool(previous and all(previous[k] == current[k] for k in
+                       ("configuration", "system", "tools")) and common == len(previous["messages"]))
+    baselines[call_kind] = current
+    changed_components = [key for key in ("configuration", "system", "tools")
+                          if previous and previous[key] != current[key]]
+    reasons = list((metadata or {}).get("rewrite_reasons", []))
+    reasons.extend(f"request_{key}_changed" for key in changed_components)
+    if previous and common < len(previous["messages"]) and not reasons:
+        reasons.append("unexpected_message_prefix_change")
+    return {"summary_revision": None, "history_generation": None, "prompt_revision": None,
+            **(metadata or {}), "rewrite_reasons": list(dict.fromkeys(reasons)),
+            "changed_components": changed_components,
+            "observation_version": 1, "observation_boundary": boundary,
+            "provider_cache_key": False, "model": params.get("model"), "call_kind": call_kind,
+            "baseline_reset_reason": "incompatible_snapshot" if baseline_reset else None,
+            "request": fingerprint(params), **current,
+            "baseline_available": previous is not None, "first_difference": first,
+            "common_prefix_messages": common, "append_only": append_only,
+            "unchanged": bool(previous == current),
+            "history_rewritten": bool(previous and common < len(previous["messages"])),
+            "first_changed_message": common if previous and common < len(previous["messages"]) else None}
+
+
+def emit_request_observation(emit: Any, payload: dict[str, Any]) -> None:
+    """Chunk fingerprints below the existing redaction event/array limits."""
+    messages = payload["messages"]
+    emit("request.observed", {**payload, "messages": messages[:100],
+                              "message_count": len(messages), "message_offset": 0})
+    for offset in range(100, len(messages), 100):
+        emit("request.messages_observed", {
+            "call_id": payload.get("call_id"), "request_hash": payload["request"]["hash"],
+            "call_kind": payload["call_kind"], "message_offset": offset,
+            "messages": messages[offset:offset + 100],
+        })
+
+
 @dataclass(frozen=True, slots=True)
 class HistoryObservation:
     generation: int

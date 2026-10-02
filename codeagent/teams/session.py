@@ -202,6 +202,10 @@ def _task_assignment_context(message: TeamMessageRecord) -> str:
         sections.append(
             f"## 前置任务 #{result['task_id']} 的分析结果\n{result['summary']}"
         )
+    if payload.get("integration_repair"):
+        sections.append("## 集成修复\n原候选未能通过团队集成。基于当前基线重新实现原任务并修复冲突或失败；"
+                        "可以用 git show 阅读旧提交，不能自行 cherry-pick、merge 或扩大写入范围。\n"
+                        + json.dumps(payload["integration_repair"], ensure_ascii=False))
     if message.artifact_refs:
         sections.append(
             "## 参考产物\n" + "\n".join(f"- {ref}" for ref in message.artifact_refs)

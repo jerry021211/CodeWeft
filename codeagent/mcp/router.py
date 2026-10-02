@@ -86,12 +86,13 @@ class McpRouter:
 
     def register_tools(self, registry: ToolRegistry) -> None:
         self.start()
-        for tool in self._tools:
+        # Remote discovery/page order is not a stable registration contract.
+        for tool in sorted(self._tools, key=lambda item: item.definition.name):
             registry.register(tool)
 
     def list_tools(self) -> list[str]:
         self.start()
-        return [tool.definition.name for tool in self._tools]
+        return sorted(tool.definition.name for tool in self._tools)
 
     def call_tool(self, server: str, name: str, arguments: dict[str, Any]) -> str:
         if self._loop is None:

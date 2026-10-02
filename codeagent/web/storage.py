@@ -68,6 +68,7 @@ from codeagent.web.models import (
     RunRecord,
 )
 from codeagent.web.team_observation import install_observation, read_changes
+from codeagent.web.team_integration_storage import INTEGRATION_SCHEMA, TeamIntegrationStorage
 
 
 ACTIVE_RUN_STATUSES = frozenset({"queued", "running"})
@@ -183,7 +184,7 @@ class Repository(Protocol):
     ) -> JsonObject: ...
 
 
-class SQLiteRepository:
+class SQLiteRepository(TeamIntegrationStorage):
     """A single-process, thread-safe SQLite repository.
 
     One connection is protected by a re-entrant lock.  This deliberately
@@ -812,6 +813,18 @@ class SQLiteRepository:
         with self._lock:
             self._ensure_open()
             self._connection.executescript(schema)
+            self._connection.executescript(INTEGRATION_SCHEMA)
+            for table, additions in {
+                "team_runs": (("integration_mode", "TEXT NOT NULL DEFAULT 'manual'"),
+                              ("integration_head", "TEXT"),
+                              ("integration_revision", "INTEGER NOT NULL DEFAULT 0")),
+                "candidates": (("team_integrated_revision", "INTEGER"), ("superseded_at", "TEXT")),
+                "task_attempts": (("base_integration_revision", "INTEGER NOT NULL DEFAULT 0"),),
+            }.items():
+                existing = {r["name"] for r in self._connection.execute(f"PRAGMA table_info({table})")}
+                for name, definition in additions:
+                    if name not in existing:
+                        self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
             columns = {
                 str(row["name"])
                 for row in self._connection.execute(
@@ -1868,6 +1881,7 @@ class SQLiteRepository:
         deadline_at: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         team_run_id: str | None = None,
+        integration_mode: str = "manual",
     ) -> TeamRunRecord:
         """Create a TeamRun, its stable Lead identity, and Lead Session atomically."""
 
@@ -1879,6 +1893,8 @@ class SQLiteRepository:
             raise ValueError("Team base_commit is required")
         if max_teammates < 1:
             raise ValueError("max_teammates must be at least 1")
+        if integration_mode not in {"manual", "managed"}:
+            raise ValueError("Unknown Team integration mode")
         now = utc_now_iso()
         lead_session_id = _new_id("session")
         try:
@@ -1920,8 +1936,8 @@ class SQLiteRepository:
                         id, conversation_id, root_run_id, task_list_id,
                         lead_agent_id, base_commit, state, max_teammates,
                         token_budget, model_call_budget, deadline_at,
-                        metadata_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'planning', ?, ?, ?, ?, ?, ?, ?)
+                        metadata_json, created_at, updated_at, integration_mode, integration_head
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'planning', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identifier,
@@ -1937,6 +1953,8 @@ class SQLiteRepository:
                         _json_dumps(dict(metadata or {})),
                         now,
                         now,
+                        integration_mode,
+                        clean_base if integration_mode == "managed" else None,
                     ),
                 )
                 connection.execute(
@@ -2700,35 +2718,13 @@ class SQLiteRepository:
                 raise StorageConflictError("Task revision conflict")
             if str(task["status"]) != TaskStatus.PENDING.value:
                 raise StorageConflictError("Only a pending Task can be claimed")
-            blockers = connection.execute(
-                """
-                SELECT d.dependency_requirement, d.blocker_id, t.status
-                FROM task_dependencies d
-                JOIN tasks t
-                  ON t.task_list_id = d.task_list_id AND t.id = d.blocker_id
-                WHERE d.task_list_id = ? AND d.blocked_id = ?
-                """,
-                (str(team["task_list_id"]), str(task_id)),
-            ).fetchall()
-            for blocker in blockers:
-                requirement = str(blocker["dependency_requirement"])
-                if requirement == DependencyRequirement.CANDIDATE_INTEGRATED.value:
-                    integrated = connection.execute(
-                        """
-                        SELECT 1 FROM candidates
-                        WHERE team_run_id = ? AND task_id = ?
-                          AND status = 'committed' AND integrated_at IS NOT NULL
-                        LIMIT 1
-                        """,
-                        (team_run_id, str(blocker["blocker_id"])),
-                    ).fetchone()
-                    if integrated is None:
-                        raise StorageConflictError(
-                            "Task requires a candidate integration that is not verified"
-                        )
-                    continue
-                if str(blocker["status"]) != TaskStatus.COMPLETED.value:
-                    raise StorageConflictError("Task dependencies are not complete")
+            dependency_reasons = self._dependency_reasons(connection, team, str(task_id))
+            if dependency_reasons:
+                raise StorageConflictError("Task dependencies are not complete: " + ", ".join(dependency_reasons))
+            if team["integration_mode"] == "managed":
+                if attempt_base_commit and attempt_base_commit != team["integration_head"]:
+                    raise StorageConflictError("New Attempt must use the current published integration version")
+                attempt_base_commit = str(team["integration_head"])
             task_metadata = _json_loads(task["metadata_json"], {})
             required = requires_attempt_plan(task_metadata)
             # Callers may assert the expected mode, but cannot grant or bypass approval.
@@ -2767,8 +2763,8 @@ class SQLiteRepository:
                         id, team_run_id, task_list_id, task_id, agent_id,
                         session_id, ordinal, state, team_plan_revision,
                         attempt_base_commit, lease_token, write_enabled,
-                        started_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                        started_at, created_at, updated_at, base_integration_revision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                     """,
                     (
                         attempt_id,
@@ -2785,6 +2781,7 @@ class SQLiteRepository:
                         now,
                         now,
                         now,
+                        int(team["integration_revision"]),
                     ),
                 )
                 for resource_kind, resource_key in resource_keys:
@@ -2863,6 +2860,23 @@ class SQLiteRepository:
                     "dependency_results": self._analysis_dependency_results(
                         connection, team, str(task_id)
                     ),
+                    "integration_revision": int(team["integration_revision"]),
+                    "dependency_candidates": [dict(r) for r in connection.execute(
+                        "SELECT c.id AS candidate_id,c.task_id,c.commit_hash,c.team_integrated_revision "
+                        "FROM task_dependencies d JOIN candidates c ON c.task_id=d.blocker_id AND c.team_run_id=? "
+                        "WHERE d.task_list_id=? AND d.blocked_id=? AND c.team_integrated_revision IS NOT NULL AND c.superseded_at IS NULL",
+                        (team_run_id, str(team["task_list_id"]), str(task_id)),
+                    ).fetchall()],
+                    "integration_repair": [
+                        {"candidate_id": r["id"], "commit_hash": r["commit_hash"], "diff_ref": r["diff_ref"],
+                         "summary": r["summary"], "repair_reason": r["repair_reason"]}
+                        for r in connection.execute(
+                            "SELECT c.id,c.commit_hash,c.diff_ref,c.summary,i.error AS repair_reason "
+                            "FROM candidates c LEFT JOIN team_integrations i ON i.candidate_id=c.id AND i.status='superseded' "
+                            "WHERE c.team_run_id=? AND c.task_id=? AND c.superseded_at IS NOT NULL ORDER BY c.submitted_at DESC,i.updated_at DESC LIMIT 1",
+                            (team_run_id, str(task_id)),
+                        ).fetchall()
+                    ],
                     "task_kind": str(task_metadata.get("kind") or "analysis"),
                     "acceptance_criteria": task_metadata.get(
                         "acceptance_criteria", []
@@ -4791,7 +4805,7 @@ class SQLiteRepository:
                     "candidate_id": candidate_id,
                     "attempt_id": str(attempt["id"]),
                     "commit_hash": str(commit_hash),
-                    "manual_integration_required": True,
+                    "manual_integration_required": team["integration_mode"] != "managed",
                 },
                 agent_id=str(attempt["agent_id"]),
             )
@@ -5416,7 +5430,7 @@ class SQLiteRepository:
             active_revision = int(team["active_plan_revision"])
             if active_revision != int(attempt["team_plan_revision"]):
                 raise StorageConflictError("Attempt Team Plan revision is no longer active")
-            if str(attempt["attempt_base_commit"]) != str(team["base_commit"]):
+            if not self._attempt_base_allowed(connection, team, attempt):
                 raise StorageConflictError("Attempt base commit no longer matches TeamRun")
             plan = self._team_plan_row(connection, team_run_id, active_revision)
             if str(plan["status"]) != TeamPlanStatus.APPROVED.value:
@@ -6320,35 +6334,7 @@ class SQLiteRepository:
                             planned_task_ids = structured_task_ids
             results: list[TaskSchedulingRecord] = []
             for task in tasks:
-                dependency_reasons: list[str] = []
-                blockers = self._connection.execute(
-                    """
-                    SELECT d.dependency_requirement, d.blocker_id, t.status
-                    FROM task_dependencies d
-                    JOIN tasks t
-                      ON t.task_list_id = d.task_list_id AND t.id = d.blocker_id
-                    WHERE d.task_list_id = ? AND d.blocked_id = ?
-                    """,
-                    (str(team["task_list_id"]), str(task["id"])),
-                ).fetchall()
-                for blocker in blockers:
-                    if (
-                        str(blocker["dependency_requirement"])
-                        == DependencyRequirement.CANDIDATE_INTEGRATED.value
-                    ):
-                        integrated = self._connection.execute(
-                            """
-                            SELECT 1 FROM candidates
-                            WHERE team_run_id = ? AND task_id = ?
-                              AND status = 'committed' AND integrated_at IS NOT NULL
-                            LIMIT 1
-                            """,
-                            (team_run_id, str(blocker["blocker_id"])),
-                        ).fetchone()
-                        if integrated is None:
-                            dependency_reasons.append("candidate_not_integrated")
-                    elif str(blocker["status"]) != TaskStatus.COMPLETED.value:
-                        dependency_reasons.append("dependency_not_completed")
+                dependency_reasons = self._dependency_reasons(self._connection, team, str(task["id"]))
                 reasons = list(dict.fromkeys(dependency_reasons))
                 try:
                     validate_task_execution(_json_loads(task["metadata_json"], {}))
@@ -6768,7 +6754,7 @@ class SQLiteRepository:
                 or attempt["cancel_requested_at"] or attempt["result_unknown"]):
             raise StorageConflictError("An answer cannot resume a frozen, cancelled or finished Attempt")
         if (team["state"] != "running" or team["active_plan_revision"] != attempt["team_plan_revision"]
-                or team["base_commit"] != attempt["attempt_base_commit"]):
+                or not self._attempt_base_allowed(connection, team, attempt)):
             raise StorageConflictError("Question Team Plan or base commit is no longer active")
         plan = self._team_plan_row(connection, str(team["id"]), int(attempt["team_plan_revision"]))
         if plan["status"] != "approved":
@@ -7101,6 +7087,9 @@ class SQLiteRepository:
         # Old plans contain descriptive strings, not task references. Their actual
         # Task metadata is still checked at claim time; never infer write permission.
         shared_context = plan.get("shared_context", "")
+        commands = plan.get("integration_validation_commands", [])
+        if not isinstance(commands, list) or any(not isinstance(c, str) or not c.strip() for c in commands):
+            raise ValueError("integration_validation_commands must be an array of non-empty command strings")
         if not isinstance(shared_context, str) or len(shared_context) > 8000:
             raise ValueError("Team shared_context must be text of at most 8000 characters")
         for item in plan.get("tasks", []):
@@ -7162,6 +7151,9 @@ class SQLiteRepository:
             ).fetchone()["value"]
         )
         if remaining:
+            return
+        # Managed Teams stay running until verified integration and local delivery.
+        if team["integration_mode"] == "managed":
             return
         candidate_count = int(
             connection.execute(
@@ -9022,6 +9014,9 @@ def _row_to_team_run(row: sqlite3.Row) -> TeamRunRecord:
         metadata=_json_loads(row["metadata_json"], {}),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
+        integration_mode=str(row["integration_mode"]),
+        integration_head=row["integration_head"],
+        integration_revision=int(row["integration_revision"]),
     )
 
 
@@ -9100,6 +9095,7 @@ def _row_to_task_attempt(row: sqlite3.Row) -> TaskAttemptRecord:
         state=TaskAttemptState(str(row["state"])),
         team_plan_revision=int(row["team_plan_revision"]),
         attempt_base_commit=str(row["attempt_base_commit"]),
+        base_integration_revision=int(row["base_integration_revision"]),
         lease_token=str(row["lease_token"]),
         write_enabled=bool(row["write_enabled"]),
         result_unknown=bool(row["result_unknown"]),
@@ -9279,6 +9275,8 @@ def _row_to_candidate(row: sqlite3.Row) -> CandidateRecord:
         committed_at=row["committed_at"],
         integrated_commit=row["integrated_commit"],
         integrated_at=row["integrated_at"],
+        team_integrated_revision=row["team_integrated_revision"],
+        superseded_at=row["superseded_at"],
     )
 
 

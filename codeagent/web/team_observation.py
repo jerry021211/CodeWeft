@@ -21,7 +21,7 @@ TABLE_SCOPES = {
         "team_plan_revisions", "team_agents", "agent_sessions", "task_attempts",
         "resource_leases", "team_messages", "team_commands", "team_base_confirmations",
         "worktree_bindings", "tool_executions", "attempt_plans", "candidates",
-        "validation_runs", "manual_integration_checks",
+        "validation_runs", "manual_integration_checks", "team_integrations",
     )},
     "agent_session_checkpoints": ("session", "session_id"),
     "team_message_consumptions": ("message", "message_id"),

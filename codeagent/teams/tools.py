@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from codeagent.teams.bus import MessageBus
 from codeagent.teams.candidates import CandidateService
-from codeagent.teams.models import TaskAttemptRecord
+from codeagent.teams.models import TaskAttemptRecord, integration_summary
 from codeagent.tools.base import ToolDefinition
 from codeagent.worktrees import WorktreeManager
 
@@ -259,6 +259,7 @@ class TeamStatusTool:
         attempts = self.repository.list_task_attempts(team.id)
         payload = {
             "team": team.to_dict(),
+            "integrations": [integration_summary(r) for r in self.repository.list_team_integrations(team.id)],
             "plans": [
                 item.to_dict()
                 for item in self.repository.list_team_plan_revisions(team.id)
@@ -458,6 +459,43 @@ class TeamCandidateReviewTool:
 
 
 @dataclass(slots=True)
+class TeamIntegrationTool:
+    repository: Any
+    worktrees: Any
+    team_run_id: str
+    lead_agent_id: str
+    definition: ToolDefinition = ToolDefinition(
+        name="team_resolve_integration",
+        description="Inspect a failed Team integration and its logs; request retry or a replacement same-scope code Attempt. Never edits user files or expands the approved plan.",
+        input_schema={"type": "object", "properties": {
+            "integration_id": {"type": "string"},
+            "action": {"type": "string", "enum": ["inspect", "retry", "repair"]},
+            "reason": {"type": "string"}}, "required": ["integration_id", "action"]},
+    )
+
+    def run(self, integration_id: str, action: str, reason: str = "") -> str:
+        op = integration_summary(self.repository.get_team_integration(integration_id))
+        if op["team_run_id"] != self.team_run_id:
+            return "Error: Integration does not belong to this Team"
+        if action == "inspect":
+            manager = self.worktrees.for_team(self.team_run_id) if hasattr(self.worktrees, "for_team") else self.worktrees
+            for validation in op["validations"]:
+                path = Path(validation["output_ref"]).resolve()
+                path.relative_to(manager.managed_root.resolve())
+                validation["output"] = path.read_text(encoding="utf-8")[-16000:]
+            return json.dumps(op, ensure_ascii=False)
+        if action not in {"retry", "repair"}:
+            return "Error: Unsupported integration action"
+        # Local delivery conflicts involve concurrent user edits, not a failed
+        # Candidate. A Lead cannot silently discard or change those edits.
+        if op["kind"] == "delivery" and op["status"] == "conflicted":
+            return "Error: Explain the local delivery conflict to the user; preserve both versions."
+        result = self.repository.retry_team_integration(integration_id,
+            actor=self.lead_agent_id, reason=reason, repair=action == "repair")
+        return json.dumps(result, ensure_ascii=False)
+
+
+@dataclass(slots=True)
 class TeamWaitTool:
     yield_callback: Callable[[str], None]
     definition: ToolDefinition = ToolDefinition(
@@ -519,6 +557,7 @@ def create_lead_tools(
             repository, worktrees, team_run_id, lead_agent_id
         ),
         TeamCandidateReviewTool(repository, worktrees, team_run_id, lead_agent_id),
+        TeamIntegrationTool(repository, worktrees, team_run_id, lead_agent_id),
         TeamWaitTool(yield_callback),
     ]
 

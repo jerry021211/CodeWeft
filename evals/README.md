@@ -71,3 +71,35 @@ python -m unittest discover -s tests -p test_evals.py
 ```
 
 覆盖 seed/gold、候选语法失败、用量去重、用量缺失、校验和、离线执行/验收导入隔离、超时留证。
+
+**长任务前缀缓存成本对照**
+
+`prefix_cache_live` 复用连续任务的真实 Agent、文件工具、SQLite checkpoint 和独立验收。
+两组都从空历史开始，默认运行 T01（需求变更后编码）和 T06（长日志精确回读），
+每场读取九批、每批约六万字符的固定材料。每类重复两次并交换新旧先后顺序。
+模型会自主选择工具，因此相同材料不代表生成文本或工具轨迹逐字相同。
+
+```powershell
+python -m evals.prefix_cache_live prepare eval-results/cache-offline --mode offline --repeats 1
+python -m evals.prefix_cache_live run eval-results/cache-offline
+python -m evals.prefix_cache_live prepare eval-results/cache-live --mode live --baseline 512b627
+python -m evals.prefix_cache_live run eval-results/cache-live
+python -m evals.prefix_cache_live seal eval-results/cache-live
+```
+
+live 使用本地已配置的官方 DeepSeek Flash 凭据并产生实际 API 费用。
+所有时段统一按用户给定闲时价格折算：普通输入 ¥1、缓存读取 ¥0.02、输出 ¥4／百万 tokens；
+不等同于读取账户扣款。未知 usage、缓存创建费用或非 Flash 模型不能套此价格。
+每场最多 48 次请求、每轮最多 8 次 Agent 迭代、主模型输出上限 8000、900 秒总超时。
+实验设有 ¥15 闲时折算预算，并在请求前保守预留费用；没有正文但返回 usage 的失败响应也计费。
+发现缺失 usage 时停止矩阵，保留证据，不能把未知成本计为零。
+
+源码在准备阶段冻结：after 是当前工作区；before 仅将 Agent、ContextManager、PromptRuntime
+三个文件恢复为指定提交的版本，其余源码一致，不修改实际工作区。差异与各文件 hash
+见 source-manifest.json。这是请求与上下文实现版本的对照，若上述三个文件还包含其他
+提示词变化，不能把结果全部归因于缓存机制。主模型 system 有会话内固定的随机标记，
+用于减轻不同试验之间的预热；辅助摘要保留其自然请求，服务端缓存状态不受客户端保证。
+
+report.json 分列普通/命中输入、输出、主调用/摘要费用、输入总量加权命中率、改写位置、
+压缩次数、耗时和质量验收。失败场次不剔除；费用下降而质量验收失败不能算等质节省。
+完整合成任务请求/响应证据仅存于本地评测目录，禁用外部 tracing，不改变产品的 hash 观测日志。

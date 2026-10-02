@@ -7,6 +7,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
+from urllib.parse import urlsplit
+from codeagent.context.observation import emit_request_observation, observe_request
 
 from codeagent.events import EventEmitter, TokenUsage, UsageTracker
 from codeagent.messages import Message
@@ -35,6 +37,24 @@ class AnthropicModelClient:
     request_timeout: float | None = None
     reasoning_effort: str = "default"
     _client: Any = field(init=False, repr=False)
+    _request_baselines: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _request_metadata: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+
+    def bind_request_observation(self, baselines: dict[str, Any], metadata: dict[str, Any]) -> None:
+        self._request_baselines = baselines
+        self._request_metadata = metadata
+
+    def get_cache_capabilities(self, model: str) -> dict[str, bool]:
+        # Exact official endpoint + supported model IDs, never a substring guess.
+        endpoint = str(getattr(self._client, "base_url", self.base_url) or "")
+        return {"cheap_prefix_reads": urlsplit(endpoint).hostname == "api.deepseek.com" and model in {
+            "deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp",
+        }}
+
+    def _observe_request(self, params: dict[str, Any], call_id: str) -> None:
+        payload = observe_request(params, self._request_baselines, call_kind=self.call_kind,
+                                  metadata=self._request_metadata)
+        emit_request_observation(self._emit, {**payload, "call_id": call_id})
 
     def __post_init__(self) -> None:
         if self.sdk_client is not None:
@@ -135,6 +155,7 @@ class AnthropicModelClient:
                     client = client.with_options(max_retries=0, timeout=self.request_timeout)
                 if self.stream:
                     stream_params = {**params, "extra_body": reasoning} if reasoning else params
+                    self._observe_request(stream_params, call_id)
                     response = self._create_streaming_message(stream_params, call_id=call_id, client=client)
                 else:
                     if max_tokens is None:
@@ -143,9 +164,11 @@ class AnthropicModelClient:
                         # post preserves SDK auth, transport, timeout and parsing
                         # without sending a fabricated token cap (or JSON null).
                         from anthropic.types import Message as AnthropicMessage
+                        self._observe_request({**params, **reasoning}, call_id)
                         raw_response = client.post("/v1/messages", body={**params, **reasoning}, cast_to=AnthropicMessage)
                     else:
                         sdk_params = {**params, "extra_body": reasoning} if reasoning else params
+                        self._observe_request(sdk_params, call_id)
                         raw_response = client.messages.create(**sdk_params)
                     response = self._message_to_response(
                         raw_response,

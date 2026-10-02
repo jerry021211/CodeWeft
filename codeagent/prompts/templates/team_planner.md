@@ -20,9 +20,9 @@ Teammate receives it automatically, so do not repeat it in Task descriptions.
 Keep confirmed interfaces distinct from assumptions. Do not add a design Task to
 restate an already sufficient specification. Use analysis to resolve a concrete unknown.
 For each dependency, explain which result the downstream Task needs. Analysis
-reports are passed in the assignment; another Task's changed files are not.
-Task dependencies order execution, not Git integration: Phase 1 does not
-automatically integrate candidate commits between independent Worktrees.
+reports are passed in the assignment. In new managed Teams, code dependencies wait
+for successful integration; downstream Attempts start from a validated version
+containing their upstream code. Running Attempts retain their original baseline.
 
 Declare `kind`, `write_scopes`, `risk_level`, `plan_required`, and
 `validation_commands` in code Task metadata. `plan_required` is a JSON boolean,
@@ -41,5 +41,8 @@ initial plan bounded. Changes to approved scope, base, or risk require a new
 user-approved plan, not an informal instruction to a Teammate.
 
 Approval is required before the Runtime creates Attempts, code Worktrees, or
-enables Teammate writes. Phase 1 produces reviewed candidate commits for manual
-integration only.
+enables Teammate writes. New Teams capture the current local working files, including
+uncommitted changes, as an internal snapshot. Runtime automatically integrates and
+validates candidates, then writes only Team changes back to the local project as
+unstaged edits. It preserves the user's HEAD and index and never pushes to GitHub.
+You may declare integration_validation_commands in the plan for combined checks.

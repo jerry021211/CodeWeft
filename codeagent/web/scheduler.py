@@ -386,6 +386,9 @@ class RunScheduler:
             if binding is not None:
                 raise RuntimeError("Analysis Teammate must not have a Worktree binding")
             execution_workspace = conversation.workspace
+            if team.integration_mode == "managed":
+                manager = worktree_manager.for_team(team.id) if hasattr(worktree_manager, "for_team") else worktree_manager
+                execution_workspace = manager.read_view(attempt.attempt_base_commit)
         emitter = EventEmitter(
             RecordingEventSink(self.repository),
             context=ExecutionContext(
@@ -546,11 +549,19 @@ class RunScheduler:
                 ),
             )
             factory_method = getattr(self.agent_factory, "for_workspace", None)
+            lead_workspace = conversation.workspace
+            team = self.repository.get_team_run(team.id)
+            if team.integration_mode == "managed":
+                manager = self._team_worktrees.for_team(team.id)
+                lead_workspace = manager.read_view(team.integration_head)
             workspace_factory = (
-                factory_method(conversation.workspace)
+                factory_method(lead_workspace)
                 if callable(factory_method)
                 else self.agent_factory
             )
+            team_factory_method = getattr(self.agent_factory, "for_team_workspace", None)
+            if team.integration_mode == "managed" and callable(team_factory_method):
+                workspace_factory = team_factory_method(lead_workspace, project_workspace=conversation.workspace)
             agent = workspace_factory.create(
                 event_emitter=emitter,
                 cancellation=token,
@@ -568,6 +579,9 @@ class RunScheduler:
             try:
                 result = AgentSessionRunner(self.repository).run(
                     agent, session.id,
+                    prompt=(f"本轮只读代码目录固定在团队版本 C{team.integration_revision}，commit {team.integration_head}。"
+                            "审查候选时使用对应候选快照；运行中的集成不会改变本轮目录。"
+                            if team.integration_mode == "managed" else None),
                     included_message_ids=frozenset(message.id for message in pending),
                 )
             except ModelCallTimeout as exc:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -558,6 +559,8 @@ class TeamWorktreeTests(unittest.TestCase):
         self._confirm()
         attempt = self._attempt("resume-scope")
         binding = self.manager.create_for_attempt(attempt)
+        outside_path = Path(binding.path) / "outside.txt"
+        original_outside = outside_path.read_bytes()
         registry = ToolRegistry()
         registry.register(BashTool(workspace_guard=WorkspaceGuard(Path(binding.path))))
         gate = TeamToolExecutionGate(
@@ -592,9 +595,9 @@ class TeamWorktreeTests(unittest.TestCase):
                 TaskAttemptState.WAITING,
             )
 
-            (Path(binding.path) / "outside.txt").write_text(
-                "outside\n", encoding="utf-8"
-            )
+            # Restore the exact checkout bytes, independent of Windows newline
+            # conversion and the user's Git core.autocrlf setting.
+            outside_path.write_bytes(original_outside)
             resumed = supervisor.resume_attempt(
                 attempt.id,
                 resumed_by="user",
@@ -1060,10 +1063,14 @@ class TeamWorktreeTests(unittest.TestCase):
         )
         try:
             self.assertEqual(supervisor.dispatch_once(self.team.id), 1)
-            for _ in range(100):
+            # Request snapshot preparation adds real I/O before the fake model.
+            # Wait for worker completion instead of racing 100 database polls.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
                 supervisor.dispatch_once(self.team.id)
                 if not supervisor.active_attempt_ids():
                     break
+                time.sleep(0.01)
             self.assertEqual(built, [attempt.id, attempt.id])
             self.assertEqual(len(self.repository.list_task_attempts(self.team.id)), 1)
             self.assertEqual(

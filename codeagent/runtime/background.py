@@ -24,6 +24,7 @@ from codeagent.teams import (
 )
 from codeagent.worktrees import WorktreeError, WorktreeManager
 from codeagent.teams.tasks import validate_task_execution
+from codeagent.teams.managed_integration import IntegrationService
 
 
 class TeamAgentBuilder(Protocol):
@@ -114,6 +115,7 @@ class TeamSupervisor:
         self._jobs: dict[str, _WorkerJob] = {}
         self._lead_jobs: dict[str, _LeadJob] = {}
         self._validation_jobs: dict[str, _ValidationJob] = {}
+        self._integration_jobs: dict[str, Future[Any]] = {}
         self._lock = threading.RLock()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
@@ -166,11 +168,12 @@ class TeamSupervisor:
             return 0
         self._reap_finished()
         self._mark_stale_workers()
+        self._schedule_integrations()
         self._schedule_candidate_validations()
         self._schedule_lead_wakes()
         with self._lock:
             available_slots = self.max_workers - (
-                len(self._jobs) + len(self._lead_jobs) + len(self._validation_jobs)
+                len(self._jobs) + len(self._lead_jobs) + len(self._validation_jobs) + len(self._integration_jobs)
             )
         if available_slots <= 0:
             return 0
@@ -520,6 +523,18 @@ class TeamSupervisor:
 
     def _reap_finished(self) -> None:
         with self._lock:
+            integrations = [(team_id, future) for team_id, future in self._integration_jobs.items() if future.done()]
+        for team_id, future in integrations:
+            try:
+                future.result()
+            except Exception:
+                # Durable operation state is reconciled under the OS lock on the
+                # next tick. No merge or local write is blindly replayed here.
+                pass
+            finally:
+                with self._lock:
+                    self._integration_jobs.pop(team_id, None)
+        with self._lock:
             finished = [job for job in self._jobs.values() if job.future.done()]
         for job in finished:
             try:
@@ -745,6 +760,7 @@ class TeamSupervisor:
                     len(self._jobs)
                     + len(self._lead_jobs)
                     + len(self._validation_jobs)
+                    + len(self._integration_jobs)
                     >= self.max_workers
                 ):
                     return
@@ -813,6 +829,7 @@ class TeamSupervisor:
                         len(self._jobs)
                         + len(self._lead_jobs)
                         + len(self._validation_jobs)
+                        + len(self._integration_jobs)
                         >= self.max_workers
                     ):
                         return
@@ -828,6 +845,30 @@ class TeamSupervisor:
                     self._validation_jobs[candidate.id] = _ValidationJob(
                         candidate.id, future
                     )
+
+    def _schedule_integrations(self) -> None:
+        if self.worktree_manager is None or not self.write_enabled:
+            return
+        for team in self.repository.list_team_runs(state=TeamRunState.RUNNING.value):
+            if team.integration_mode != "managed":
+                continue
+            operations = self.repository.list_team_integrations(team.id)
+            if any(r["status"] == "recovery_required" for r in operations):
+                continue
+            active = any(r["status"] in {"preparing", "validating", "publishing", "applying"} for r in operations)
+            candidates = self.repository.list_candidates(team.id)
+            pending = any(c.status.value == "committed" and not c.superseded_at and c.team_integrated_revision is None
+                and not any(r["candidate_id"] == c.id and r["status"] != "superseded" for r in operations) for c in candidates)
+            delivery = self.repository.managed_delivery_ready(team.id) and not any(r["kind"] == "delivery" and r["status"] != "superseded" for r in operations)
+            if not (active or pending or delivery):
+                continue
+            with self._lock:
+                if team.id in self._integration_jobs:
+                    continue
+                if len(self._jobs) + len(self._lead_jobs) + len(self._validation_jobs) + len(self._integration_jobs) >= self.max_workers:
+                    return
+                self._integration_jobs[team.id] = self._executor.submit(
+                    IntegrationService(self.repository, self.worktree_manager, stop_event=self._stopping).process_team, team.id)
 
     def _mark_stale_workers(self) -> None:
         with self._lock:

@@ -49,8 +49,17 @@ class ContextConfig:
     summary_argument_preview_chars: int = 2_000
     model_context_windows: dict[str, int] = field(default_factory=dict)
     near_context_ratio: float = 0.8
+    cache_policy: str = "auto"
+    cache_soft_ratio: float = 0.8
+    cache_boundary_growth_ratio: float = 0.1
 
     def __post_init__(self) -> None:
+        if self.cache_policy not in {"auto", "legacy", "cache_friendly"}:
+            raise ValueError("cache_policy must be auto, legacy, or cache_friendly")
+        for name in ("cache_soft_ratio", "cache_boundary_growth_ratio"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < 1:
+                raise ValueError(f"{name} must be in (0, 1)")
         if self.mode not in {"model", "off"}:
             raise ValueError("CONTEXT_COMPACT_MODE must be 'model' or 'off'")
         for name in (
@@ -95,6 +104,12 @@ class RuntimeState:
     history_generation: int = 0
     tool_schema_hash: str = ""
     last_prompt_mode: str | None = None
+    # Client snapshots only; never imply that a provider still has a cache entry.
+    prompt_snapshot: dict[str, Any] = field(default_factory=dict)
+    prompt_revision: int = 0
+    request_baselines: dict[str, Any] = field(default_factory=dict)
+    runtime_reminders: dict[str, Any] = field(default_factory=dict)
+    request_view: dict[str, Any] = field(default_factory=dict)
     # These fields are committed with canonical messages in the existing checkpoint.
     summary_text: str = ""
     compacted_message_count: int = 0
@@ -192,7 +207,11 @@ class RuntimeState:
         self.transcripts[:] = self.transcripts[-10:]
 
     def to_summary_source(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False, indent=2, default=str)
+        data = asdict(self)
+        # Request implementation snapshots are not task evidence or summary input.
+        for key in ("prompt_snapshot", "request_baselines", "runtime_reminders", "request_view"):
+            data.pop(key, None)
+        return json.dumps(data, ensure_ascii=False, indent=2, default=str)
 
 
 def _append_unique(values: list[str], value: str) -> None:

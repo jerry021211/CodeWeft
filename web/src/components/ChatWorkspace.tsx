@@ -28,6 +28,9 @@ type Props = {
   approvalBusy?: boolean;
   runtimeModel?: string | null;
   teamLeadActive?: boolean;
+  teamEnabled?: boolean;
+  useTeam?: boolean;
+  onTeamChange?: (enabled: boolean) => void;
   discussMode?: boolean;
   webSearch?: boolean;
   webSearchAvailable?: boolean;
@@ -163,7 +166,7 @@ export function ChatWorkspace(props: Props) {
             onKeyDown={onKeyDown}
             rows={1}
             disabled={active}
-            placeholder={active ? "Agent 正在工作…" : props.discussMode ? "讨论代码、架构或方案，只读探索…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : "告诉 CodeAgent 你想实现什么…"}
+            placeholder={active ? "Agent 正在工作…" : props.discussMode ? "讨论代码、架构或方案，只读探索…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeAgent 你想实现什么…"}
             aria-label="发送消息"
             className="scrollbar-thin min-h-11 w-full resize-none bg-transparent px-2.5 py-2 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />
@@ -183,12 +186,21 @@ export function ChatWorkspace(props: Props) {
                   ))}
                 </select>
               </label>
-              <button type="button" aria-pressed={Boolean(props.webSearch)} aria-label="联网搜索" disabled={active || props.sending || props.loading || props.teamLeadActive || !props.webSearchAvailable}
-                title={props.teamLeadActive ? "团队会话暂不支持联网搜索" : !props.webSearchAvailable ? "请在服务端 .env 配置 TAVILY_API_KEY 并重启" : "允许本次请求使用 Tavily 搜索网页"}
+              <button type="button" aria-pressed={Boolean(props.webSearch)} aria-label="联网搜索" disabled={active || props.sending || props.loading || props.useTeam || props.teamLeadActive || !props.webSearchAvailable}
+                title={props.useTeam || props.teamLeadActive ? "团队会话暂不支持联网搜索" : !props.webSearchAvailable ? "请在服务端 .env 配置 TAVILY_API_KEY 并重启" : "允许本次请求使用 Tavily 搜索网页"}
                 onClick={() => props.onWebSearchChange?.(!props.webSearch)}
                 className={cx("inline-flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-40", props.webSearch ? "border-accent/30 bg-accent/10 text-accent" : "border-line text-ink-muted hover:bg-surface-muted")}>
                 <Globe className="size-3.5" />联网搜索{props.webSearch ? "：开" : "：关"}
               </button>
+              {props.teamEnabled && !props.teamLeadActive && (
+                <button type="button" aria-label="Agent Team" aria-pressed={Boolean(props.useTeam)}
+                  disabled={active || props.sending || props.loading || props.discussMode}
+                  title={props.discussMode ? "请切换到编码模式后启动团队" : "由 Lead 拆分任务，批准方案后启动团队"}
+                  onClick={() => props.onTeamChange?.(!props.useTeam)}
+                  className={cx("inline-flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-40", props.useTeam ? "border-accent/30 bg-accent/10 text-accent" : "border-line text-ink-muted hover:bg-surface-muted")}>
+                  <Users className="size-3.5" />Agent Team{props.useTeam ? "：开" : "：关"}
+                </button>
+              )}
               {props.teamLeadActive && (
                 <span className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2.5 text-[10px] font-medium text-accent">
                   <Users className="size-3.5" /> Team 运行中

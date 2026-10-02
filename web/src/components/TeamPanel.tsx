@@ -4,6 +4,7 @@ import type { TaskRecord, TeamRecovery, TeamSnapshot } from "@/types/api";
 import { cx, formatNumber, formatTime, prettyJson, tokenTotal } from "@/lib/utils";
 import { EmptyPanel, StatusDot } from "@/components/ui";
 import { TeamObserver } from "@/components/TeamObserver";
+import { api } from "@/lib/api";
 
 type Props = {
   enabled: boolean;
@@ -16,6 +17,7 @@ type Props = {
   onResumeAttempt: (attemptId: string, reason: string, acknowledgeUnknownResult: boolean) => void;
   onCancel: (reason: string) => void;
   onVerifyIntegration: (targetRef: string) => void;
+  onResolveIntegration?: (integrationId: string, action: "retry" | "repair" | "resume", reason: string) => void;
   onCleanupWorktree: (worktreeId: string) => void;
 };
 
@@ -30,11 +32,16 @@ export function TeamPanel({
   onResumeAttempt,
   onCancel,
   onVerifyIntegration,
+  onResolveIntegration,
   onCleanupWorktree,
 }: Props) {
   const [reason, setReason] = useState("");
   const [observing, setObserving] = useState(false);
   const [targetRef, setTargetRef] = useState("HEAD");
+  const [deliveryAcknowledged, setDeliveryAcknowledged] = useState(false);
+  const [integrationDiff, setIntegrationDiff] = useState<{ integration_head: string; diff: string; truncated: boolean }>();
+  const [diffError, setDiffError] = useState("");
+  const managed = team?.team.integration_mode === "managed";
   const pendingPlan = [...(team?.plans ?? [])].reverse().find((item) => item.status === "pending_user_approval");
   const questionWaits = (team?.sessions ?? []).filter((session) => session.state === "waiting" && (
     session.waiting_reason?.startsWith("waiting_for_lead_answer:") || session.waiting_reason === "team_plan_change_required"
@@ -69,7 +76,7 @@ export function TeamPanel({
   }
   if (loading) return <div className="p-5 text-xs text-ink-muted">正在读取团队状态…</div>;
   if (!team) {
-    return <EmptyPanel icon={<Users className="size-5" />} title="当前会话没有 TeamRun" body="第一阶段 TeamRun 由 Lead 提交方案后创建，不会自动修改或合并主分支。" />;
+    return <EmptyPanel icon={<Users className="size-5" />} title="当前会话没有 TeamRun" body="Lead 提交方案并获批后开始协作；新团队自动集成并回写本地，供你测试后自行提交。" />;
   }
 
   const requireReason = (action: () => void) => {
@@ -98,7 +105,12 @@ export function TeamPanel({
           <Metric label="Token" value={`${formatNumber(tokenTotal(team.usage))}${team.team.token_budget ? ` / ${formatNumber(team.team.token_budget)}` : ""}`} />
           <Metric label="Model calls" value={`${formatNumber(team.usage.model_calls ?? 0)}${team.team.model_call_budget ? ` / ${formatNumber(team.team.model_call_budget)}` : ""}`} />
         </div>
-        <p className="mt-3 border-t border-line pt-3 text-[9px] leading-4 text-ink-muted">第一阶段仅生成候选提交；自动合并与自动冲突处理始终关闭。</p>
+        <p className="mt-3 border-t border-line pt-3 text-[9px] leading-4 text-ink-muted">{managed ? `当前集成版本 C${team.team.integration_revision ?? 0} · ${team.team.integration_head?.slice(0, 10)}。通过组合验证后解锁下游任务；完成后自动回写本地，保留为未提交修改，不推送 GitHub。` : "历史团队使用人工集成模式。"}</p>
+        {managed && <div className="mt-2 text-[10px]">
+          <button className="text-accent" onClick={() => { setDiffError(""); void api.getTeamIntegrationDiff(team.team.id).then(setIntegrationDiff).catch((cause: unknown) => setDiffError(String(cause))); }}>查看当前版本累计差异</button>
+          {diffError && <p className="text-warning">{diffError}</p>}
+          {integrationDiff && integrationDiff.integration_head === team.team.integration_head && <details className="mt-2" open><summary>相对团队启动时的本地快照{integrationDiff.truncated ? "（内容过大，已截断）" : ""}</summary><pre className="mt-2 max-h-96 overflow-auto whitespace-pre rounded bg-surface p-2">{integrationDiff.diff || "当前没有已集成的文件差异"}</pre></details>}
+        </div>}
       </section>
 
       {(pendingPlan || highRiskApprovals.length > 0) && (
@@ -116,6 +128,7 @@ export function TeamPanel({
                 {typeof pendingPlan.plan.shared_context === "string" && pendingPlan.plan.shared_context && (
                   <details className="mb-2 text-[10px] text-ink-muted"><summary className="cursor-pointer">公共约定（审批内容）</summary><p className="mt-1 whitespace-pre-wrap break-words">{pendingPlan.plan.shared_context}</p></details>
                 )}
+                {Array.isArray(pendingPlan.plan.integration_validation_commands) && pendingPlan.plan.integration_validation_commands.length > 0 && <details className="mb-2 text-[10px] text-ink-muted"><summary>组合验证命令（审批内容）</summary><pre className="mt-1 whitespace-pre-wrap">{pendingPlan.plan.integration_validation_commands.map(String).join("\n")}</pre></details>}
                 <div className="mb-3 space-y-2">
                   {team.tasks.filter(({ task }) => !Array.isArray(pendingPlan.plan.tasks) || pendingPlan.plan.tasks.some((item) => item && typeof item === "object" && String(item.task_id) === task.id)).map(({ task }) => <TaskDetails key={task.id} task={task} />)}
                 </div>
@@ -194,6 +207,26 @@ export function TeamPanel({
         </section>
       )}
 
+      {managed && (team.integrations ?? []).length > 0 && <section>
+        <Heading icon={<GitBranch className="size-3.5" />} title="自动集成与本地回写" count={team.integrations?.length ?? 0} />
+        <div className="space-y-2">{team.integrations?.map((operation) => <div key={operation.id} className="rounded-xl border border-line p-3 text-[10px]">
+          <div className="font-semibold">{operation.kind === "delivery" ? "回写主项目" : "候选集成"} · {integrationLabel(operation.status)}</div>
+          {operation.error && <p className="mt-1 whitespace-pre-wrap break-words text-warning">{operation.error}</p>}
+          {operation.validations.map((v, i) => <div key={i} className="mt-1 break-words text-ink-muted">{v.command} · {v.status}</div>)}
+          {["conflicted", "validation_failed", "interrupted"].includes(operation.status) && onResolveIntegration && <>
+            <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="填写处理说明" className="mt-2 w-full rounded border border-line bg-surface px-2 py-1" />
+            <button disabled={busy || !reason.trim()} onClick={() => onResolveIntegration(operation.id, "retry", reason.trim())} className="mt-2 rounded bg-accent px-2 py-1 text-white disabled:opacity-40">重新验证与集成</button>
+            {operation.kind === "candidate" && <button disabled={busy || !reason.trim()} onClick={() => onResolveIntegration(operation.id, "repair", reason.trim())} className="ml-2 rounded border border-line px-2 py-1 disabled:opacity-40">安排原任务修复</button>}
+          </>}
+          {operation.status === "recovery_required" && <p className="mt-2 text-warning">结果需要检查，现场已保留：{operation.worktree_path}</p>}
+          {operation.status === "recovery_required" && onResolveIntegration && <div className="mt-2 space-y-2">
+            <label className="flex items-start gap-2"><input type="checkbox" checked={deliveryAcknowledged} onChange={(event) => setDeliveryAcknowledged(event.target.checked)} />我已检查保留现场并确认旧验证进程已停止；继续时仍会核对版本和文件。</label>
+            <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="填写检查说明" className="w-full rounded border border-line bg-surface px-2 py-1" />
+            <button disabled={busy || !deliveryAcknowledged || !reason.trim()} onClick={() => onResolveIntegration(operation.id, "resume", reason.trim())} className="rounded bg-accent px-2 py-1 text-white disabled:opacity-40">检查并恢复</button>
+          </div>}
+        </div>)}</div>
+      </section>}
+
       <section>
         <Heading icon={<Bot className="size-3.5" />} title="Agent Sessions" count={team.sessions.length} />
         <div className="space-y-1.5">
@@ -236,6 +269,9 @@ export function TeamPanel({
               <div className="mt-1 leading-4 text-ink-muted">Teammate 测试：{candidate.tests_reported.join("；") || "未报告"}</div>
               {(validationsByCandidate.get(candidate.id) ?? []).map((validation) => <div key={validation.id} className={cx("mt-1 leading-4", validation.status === "succeeded" ? "text-success" : validation.status === "failed" ? "text-danger" : "text-ink-muted")}>Runtime 验证：{validation.command} · {validation.status}{validation.exit_code != null ? ` (${validation.exit_code})` : ""}</div>)}
               {candidate.integrated_at && <div className="mt-1 text-success">已人工集成并核验</div>}
+              {candidate.team_integrated_revision != null && <div className="mt-1 text-success">已进入团队版本 C{candidate.team_integrated_revision}</div>}
+              {managed && candidate.status === "committed" && candidate.team_integrated_revision == null && !candidate.superseded_at && <div className="mt-1 text-ink-muted">候选已提交，等待集成通过</div>}
+              {candidate.superseded_at && <div className="mt-1 text-ink-muted">原候选已保留，由新的任务执行替代</div>}
             </div>
           ))}
           {team.worktrees.map((worktree) => (
@@ -297,7 +333,7 @@ function schedulingLabel(value: string): string {
     task_configuration_conflict: "任务类型与执行配置冲突，需要修订方案",
     team_plan_not_approved: "等待用户批准 Team Plan",
     dependency_not_completed: "等待前置任务完成",
-    candidate_not_integrated: "等待用户人工集成前置候选提交",
+    candidate_not_integrated: "等待前置候选集成并验证通过",
     no_idle_teammate: "暂无空闲成员",
     resource_conflict: "写入范围或资源租约已被占用",
     team_concurrency_exhausted: "已达到并行任务上限",
@@ -307,6 +343,10 @@ function schedulingLabel(value: string): string {
     "team_status:waiting_approval": "团队等待审批",
   };
   return labels[value] ?? value;
+}
+
+function integrationLabel(status: string) {
+  return ({ preparing: "试合并", validating: "组合验证", publishing: "发布版本", published: "已集成", applying: "正在回写", delivered: "已回写，待你本地测试", conflicted: "合并冲突", validation_failed: "验证失败", interrupted: "执行中断", recovery_required: "需要检查现场", superseded: "已安排重试或修复" } as Record<string, string>)[status] ?? status;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

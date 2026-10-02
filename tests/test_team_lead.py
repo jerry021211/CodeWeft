@@ -138,7 +138,8 @@ class LeadTeamPlanToolTests(unittest.TestCase):
         self.assertEqual(len(lead_sessions), 1)
         self.assertEqual(lead_sessions[0].state.value, "idle")
         self.assertEqual(self.repository.list_task_attempts(team.id), [])
-        self.assertFalse((self.root / "managed-worktrees").exists())
+        self.assertEqual(team.integration_mode, "managed")
+        self.assertEqual(self._git("worktree", "list", "--porcelain").count("worktree "), 1)
         self.assertFalse(result["execution_started"])
 
     def test_read_only_task_cannot_request_document_writes(self) -> None:
@@ -376,17 +377,19 @@ class LeadTeamPlanToolTests(unittest.TestCase):
         self.assertEqual(revisions[1].status.value, "pending_user_approval")
         self.assertEqual(self.repository.list_task_attempts(first["team_run_id"]), [])
 
-    def test_dirty_source_is_rejected_before_team_persistence(self) -> None:
+    def test_dirty_source_is_snapshotted_without_changing_user_branch(self) -> None:
         (self.workspace / "README.md").write_text("dirty\n", encoding="utf-8")
 
-        with self.assertRaises(DirtyWorkspaceConfirmationRequired):
-            self.tool.run(
+        result = json.loads(self.tool.run(
                 baseCommit=self.base_commit,
                 plan=self._plan(),
                 teammateCount=2,
-            )
-
-        self.assertEqual(self.repository.list_team_runs(), [])
+            ))
+        team = self.repository.get_team_run(result["team_run_id"])
+        self.assertEqual(team.state.value, "waiting_approval")
+        self.assertEqual(self._git("show", team.base_commit + ":README.md"), "dirty")
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.base_commit)
+        self.assertEqual(self.repository.list_task_attempts(team.id), [])
 
     def test_scope_mismatch_is_rejected_before_team_persistence(self) -> None:
         plan = self._plan()

@@ -125,7 +125,7 @@ class AnthropicClientTests(unittest.TestCase):
         )
         with self.assertRaises(ModelCallTimeout):
             client.create_message(model="fake", system="", messages=[], tools=[], max_tokens=10)
-        self.assertEqual([event.type for event in events], ["model.started", "model.failed"])
+        self.assertEqual([event.type for event in events], ["model.started", "request.observed", "model.failed"])
         self.assertEqual(events[-1].payload["error_type"], "ModelCallTimeout")
         self.assertEqual(events[-1].payload["error"], "model_response_timeout")
 
@@ -250,7 +250,7 @@ class AnthropicClientTests(unittest.TestCase):
         self.assertEqual(tracker.snapshot().total_tokens, 26)
         self.assertEqual(
             [event.type for event in events],
-            ["model.started", "model.completed", "usage.updated"],
+            ["model.started", "request.observed", "model.completed", "usage.updated"],
         )
 
     def test_fork_shares_usage_tracker_and_can_override_call_kind(self) -> None:

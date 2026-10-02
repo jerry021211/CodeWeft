@@ -16,7 +16,6 @@ from codeagent.tasks import TaskStatus
 from codeagent.teams.models import TeamPlanStatus, TeamRunState
 from codeagent.teams.tasks import validate_task_execution
 from codeagent.tools.base import ToolDefinition
-from codeagent.worktrees import DirtyWorkspaceConfirmationRequired
 
 
 _TERMINAL_TEAM_STATES = {
@@ -53,7 +52,7 @@ class LeadTeamPlanTool:
                 "properties": {
                     "baseCommit": {
                         "type": "string",
-                        "description": "One explicit Git commit shared by every Team task.",
+                        "description": "Current local HEAD for a new Team snapshot, or the existing Team baseline when revising its plan.",
                     },
                     "plan": {
                         "type": "object",
@@ -62,6 +61,11 @@ class LeadTeamPlanTool:
                             "objects with task_id, kind, write_scopes, and risk_level."
                         ),
                         "properties": {
+                            "integration_validation_commands": {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1},
+                                "description": "Build and test commands run on every combined integration version and final local delivery.",
+                            },
                             "shared_context": {
                                 "type": "string",
                                 "maxLength": 8000,
@@ -143,14 +147,14 @@ class LeadTeamPlanTool:
         conversation = self.repository.get_conversation(self.conversation_id)
         manager = self.worktrees.for_workspace(conversation.workspace)
         inspection = manager.inspect_baseline(baseCommit)
-        if inspection.source_dirty:
-            raise DirtyWorkspaceConfirmationRequired(
-                "The source workspace is dirty. TeamPlanSubmit cannot confirm a dirty "
-                "baseline on the user's behalf. Clean it or use the explicit user "
-                "confirmation flow before approving a Team Plan."
-            )
-
-        plan_payload = self._validated_plan(plan, inspection.base_commit)
+        active = self.repository.get_active_team_run_for_conversation(self.conversation_id)
+        if active and inspection.base_commit not in {active.base_commit, active.metadata.get("source_head")}:
+            raise ValueError("Changing the Team baseline requires a new Team; the existing snapshot is immutable")
+        self._validated_plan(plan, inspection.base_commit)
+        snapshot = None if active else manager.snapshot_local(baseCommit)
+        base_commit = active.base_commit if active else snapshot["commit"]
+        plan_payload = self._validated_plan(plan, base_commit)
+        plan_payload["integration_mode"] = active.integration_mode if active else "managed"
         plan_payload["teammate_count"] = teammate_count
         creation_guard = (
             self.memory_access.creating_team(conversation.workspace)
@@ -159,7 +163,8 @@ class LeadTeamPlanTool:
         )
         with creation_guard:
             team, created = self._resolve_team(
-                base_commit=inspection.base_commit,
+                base_commit=base_commit,
+                snapshot=snapshot,
                 max_teammates=max_teammates,
                 token_budget=tokenBudget,
                 model_call_budget=modelCallBudget,
@@ -202,7 +207,7 @@ class LeadTeamPlanTool:
         manager.confirm_baseline(
             team.id,
             confirmed_by="runtime",
-            allow_dirty=False,
+            allow_dirty=team.integration_mode == "managed",
             command_id=f"lead-confirm-clean-base:{team.id}:{inspection.status_hash}",
         )
         current = self.repository.get_team_run(team.id)
@@ -213,7 +218,7 @@ class LeadTeamPlanTool:
                 "state": current.state.value,
                 "plan_revision": submitted.revision,
                 "plan_status": submitted.status.value,
-                "base_commit": inspection.base_commit,
+                "base_commit": base_commit,
                 "task_ids": [item["task_id"] for item in plan_payload["tasks"]],
                 "teammate_count": teammate_count,
                 "next_action": "Wait for the user to approve or reject this Team Plan.",
@@ -231,6 +236,7 @@ class LeadTeamPlanTool:
         token_budget: int | None,
         model_call_budget: int | None,
         deadline_at: str | None,
+        snapshot: dict | None = None,
     ) -> tuple[Any, bool]:
         active = [
             item
@@ -260,9 +266,10 @@ class LeadTeamPlanTool:
                 token_budget=token_budget,
                 model_call_budget=model_call_budget,
                 deadline_at=deadline_at,
+                integration_mode="managed",
                 metadata={
-                    "manual_integration_only": True,
-                    "source_dirty_at_creation": False,
+                    "manual_integration_only": False,
+                    **(snapshot or {}),
                     "created_via": "lead_tool",
                 },
             ),
@@ -275,6 +282,9 @@ class LeadTeamPlanTool:
         if not isinstance(plan, Mapping) or not plan:
             raise ValueError("Team Plan cannot be empty")
         shared_context = plan.get("shared_context", "")
+        commands = plan.get("integration_validation_commands", [])
+        if not isinstance(commands, list) or any(not isinstance(c, str) or not c.strip() for c in commands):
+            raise ValueError("integration_validation_commands must be an array of non-empty command strings")
         if not isinstance(shared_context, str) or len(shared_context) > 8000:
             raise ValueError("Team shared_context must be text of at most 8000 characters")
         raw_tasks = plan.get("tasks")

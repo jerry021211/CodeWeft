@@ -18,7 +18,7 @@ from codeagent.tools.memory import (
 )
 from codeagent.tools.read import ReadFileTool
 from codeagent.tools.runtime_data import LoadContextHistoryTool, LoadToolOutputTool
-from codeagent.tools.registry import ToolRegistry, tool_schema_hash
+from codeagent.tools.registry import ToolRegistry, tool_request_hash, tool_schema_hash
 from codeagent.tools.skill import LOAD_SKILL_TOOL_NAME, LoadSkillTool
 from codeagent.tools.subagent import SUBAGENT_TOOL_NAME, SubagentTool
 from codeagent.tools.tasks import (
@@ -78,6 +78,7 @@ __all__ = [
     "ToolHandler",
     "ToolRegistry",
     "tool_schema_hash",
+    "tool_request_hash",
     "TodoWriteTool",
     "WriteFileTool",
     "WorkspaceGuard",

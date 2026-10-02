@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from codeagent.mcp import McpRouter, load_mcp_servers
 from codeagent.tools import ToolRegistry
@@ -44,6 +45,19 @@ class McpConfigTests(unittest.TestCase):
 
 
 class McpRouterTests(unittest.TestCase):
+    def test_discovery_order_does_not_change_registration_order(self):
+        from codeagent.mcp.router import McpTool
+        with tempfile.TemporaryDirectory() as directory:
+            router = McpRouter(Path(directory) / "missing.json")
+            router._tools = [McpTool(router, "server", SimpleNamespace(
+                name=name, description="test", input_schema={"type": "object"})) for name in ("z", "a")]
+            first, second = ToolRegistry(), ToolRegistry()
+            router.register_tools(first)
+            router._tools.reverse()
+            router.register_tools(second)
+            self.assertEqual(first.schemas(), second.schemas())
+            self.assertEqual(router.list_tools(), ["mcp__server__a", "mcp__server__z"])
+
     def test_discovers_registers_and_calls_stdio_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

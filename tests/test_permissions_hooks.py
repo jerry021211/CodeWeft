@@ -163,7 +163,7 @@ class HookedAgentTests(unittest.TestCase):
         result = agent.run("run danger")
 
         self.assertFalse(executed)
-        self.assertEqual(agent.messages[2]["content"][0]["content"], "blocked by hook")
+        self.assertEqual(agent.messages[3]["content"][0]["content"], "blocked by hook")
         self.assertEqual(result.final_text, "done")
 
     def test_lifecycle_hooks_fire(self) -> None:

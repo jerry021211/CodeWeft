@@ -42,6 +42,7 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
         McpConfigResponse,
         McpServerResponse,
         ManualIntegrationRequest,
+        IntegrationResolutionRequest,
         MessageResponse,
         RunResponse,
         RuntimeConfigResponse,
@@ -83,6 +84,7 @@ from codeagent.web.workspaces import WorkspaceCatalog
 from codeagent.tasks import TaskActivityRecord, TaskListRecord, TaskResource
 from codeagent.runtime import RuntimeDataPaths, TeamSupervisor
 from codeagent.teams import ManualIntegrationVerifier
+from codeagent.teams.models import integration_summary
 from codeagent.worktrees import WorktreeError, WorktreeManagerRegistry
 
 
@@ -880,7 +882,9 @@ def create_app(
         repo.validate_team_plan_tasks(task_list.id, body.plan)
         manager = worktrees.for_workspace(conversation.workspace)
         inspection = manager.inspect_baseline(body.baseCommit)
-        if inspection.source_dirty and not body.allowDirty:
+        snapshot = manager.snapshot_local(body.baseCommit) if body.integrationMode == "managed" else None
+        base_commit = snapshot["commit"] if snapshot else inspection.base_commit
+        if inspection.source_dirty and not body.allowDirty and body.integrationMode == "manual":
             raise StorageConflictError(
                 "Source workspace has uncommitted changes. Confirm allowDirty=true "
                 "after reviewing that those changes will not enter Team Worktrees."
@@ -890,19 +894,21 @@ def create_app(
                 conversation_id=conversation.id,
                 root_run_id=run.id,
                 task_list_id=task_list.id,
-                base_commit=inspection.base_commit,
+                base_commit=base_commit,
+                integration_mode=body.integrationMode,
                 max_teammates=body.maxTeammates,
                 token_budget=body.tokenBudget,
                 model_call_budget=body.modelCallBudget,
                 deadline_at=body.deadlineAt,
                 metadata={
-                    "manual_integration_only": True,
+                    "manual_integration_only": body.integrationMode == "manual",
                     "source_dirty_at_creation": inspection.source_dirty,
+                    **(snapshot or {}),
                 },
             )
         plan_payload = dict(body.plan)
-        plan_payload["base_commit"] = inspection.base_commit
-        plan_payload["integration_mode"] = "manual"
+        plan_payload["base_commit"] = base_commit
+        plan_payload["integration_mode"] = body.integrationMode
         plan_payload["teammate_count"] = body.teammateCount
         plan = repo.create_team_plan_revision(
             team.id,
@@ -975,7 +981,7 @@ def create_app(
         repo.validate_team_plan_tasks(team.task_list_id, body.plan)
         plan_payload = dict(body.plan)
         plan_payload["base_commit"] = team.base_commit
-        plan_payload["integration_mode"] = "manual"
+        plan_payload["integration_mode"] = team.integration_mode
         revisions = repo.list_team_plan_revisions(team_run_id)
         if revisions:
             plan_payload["teammate_count"] = revisions[-1].plan.get(
@@ -1125,6 +1131,11 @@ def create_app(
         body: ManualIntegrationRequest,
     ) -> dict[str, Any]:
         _require_team_enabled(team_enabled, team_supervisor)
+        team = repo.get_team_run(team_run_id)
+        if team is None:
+            raise RecordNotFoundError("TeamRun not found")
+        if team.integration_mode == "managed":
+            raise StorageConflictError("Managed Teams use verified local delivery, not manual integration checks")
         check = ManualIntegrationVerifier(repo).verify(
             team_run_id,
             target_ref=body.targetRef,
@@ -1137,6 +1148,39 @@ def create_app(
                 repo, team_run_id, allow_code=team_write_enabled
             ),
         }
+
+    @app.get("/api/teams/{team_run_id}/integration-diff")
+    def team_integration_diff(team_run_id: str):
+        _require_team_enabled(team_enabled, team_supervisor)
+        team = repo.get_team_run(team_run_id)
+        if team is None:
+            raise RecordNotFoundError("TeamRun not found")
+        if team.integration_mode != "managed":
+            raise StorageConflictError("This Team uses manual integration")
+        from codeagent.worktrees.snapshots import LocalGit
+        manager = worktrees.for_team(team_run_id)
+        diff = LocalGit(manager.source_workspace, manager.managed_root).run(
+            "diff", "--no-ext-diff", "--no-textconv", team.base_commit, team.integration_head, "--").stdout
+        return {"integration_head": team.integration_head, "diff": diff[:2_000_000].decode("utf-8", "replace"),
+                "truncated": len(diff) > 2_000_000}
+
+    @app.post("/api/teams/{team_run_id}/integrations/{integration_id}/resolve")
+    def resolve_team_integration(team_run_id: str, integration_id: str, body: IntegrationResolutionRequest):
+        _require_team_enabled(team_enabled, team_supervisor)
+        if not team_write_enabled:
+            raise StorageConflictError("Team writes are disabled")
+        op = repo.get_team_integration(integration_id)
+        if op["team_run_id"] != team_run_id:
+            raise RecordNotFoundError("Integration not found in this Team")
+        if body.action == "resume":
+            if not body.acknowledgeUnknownResult:
+                raise StorageConflictError("Inspect the retained delivery and acknowledge its unknown result before resuming")
+            from codeagent.teams.managed_integration import IntegrationService
+            IntegrationService(repo, worktrees).resume_delivery(team_run_id, integration_id, reason=body.reason)
+        else:
+            repo.retry_team_integration(integration_id, actor="user", reason=body.reason, repair=body.action == "repair",
+                                        max_attempts=getattr(team_supervisor, "max_attempts_per_task", 2))
+        return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
 
     @app.post("/api/teams/{team_run_id}/worktrees/{worktree_id}/disposition")
     def dispose_worktree(
@@ -1333,15 +1377,16 @@ def _team_snapshot(
             item.to_dict() for item in messages
         ],
         "integration_checks": repository.list_manual_integration_checks(team_run_id),
+        "integrations": [integration_summary(r) for r in repository.list_team_integrations(team_run_id)],
         "usage": usage,
         "manual_integration": {
-            "required": True,
+            "required": team.integration_mode != "managed",
             "commands": [
                 f"git cherry-pick -x {item.commit_hash}"
                 for item in candidates
-                if item.commit_hash and item.integrated_at is None
+                if item.commit_hash and item.integrated_at is None and team.integration_mode != "managed"
             ],
-            "automatic_merge": False,
+            "automatic_merge": team.integration_mode == "managed",
         },
     }
 

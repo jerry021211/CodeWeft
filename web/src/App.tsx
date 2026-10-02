@@ -26,6 +26,7 @@ type TeamCommand =
   | { kind: "resume-attempt"; attemptId: string; reason: string; acknowledgeUnknownResult: boolean }
   | { kind: "cancel"; reason: string }
   | { kind: "integration"; targetRef: string }
+  | { kind: "resolve-integration"; integrationId: string; action: "retry" | "repair" | "resume"; reason: string }
   | { kind: "cleanup"; worktreeId: string };
 
 export default function App() {
@@ -51,6 +52,7 @@ export default function App() {
   });
   const sending = Boolean(selectedId && sendingConversations.includes(selectedId));
   const [modes, setModes] = useState<Record<string, ExecutionMode>>({});
+  const [teamChoices, setTeamChoices] = useState<Record<string, boolean>>({});
   const [webSearchChoices, setWebSearchChoices] = useState<Record<string, boolean>>({});
   const [reasoningChoices, setReasoningChoices] = useState<Record<string, string>>({});
   const [leftOpen, setLeftOpen] = useState(false);
@@ -123,8 +125,12 @@ export default function App() {
       ?? [...teams].sort((left, right) => right.team.updated_at.localeCompare(left.team.updated_at))[0];
   }, [teamsQuery.data]);
   const teamLeadActive = Boolean(team && !["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(team.team.state));
+  const useTeam = teamEnabled && (teamLeadActive || (mode === "normal" && Boolean(teamChoices[selectedId ?? ""])));
+  const selectTeam = (enabled: boolean) => {
+    if (selectedId) setTeamChoices((current) => ({ ...current, [selectedId]: enabled }));
+  };
   const webSearchAvailable = Boolean(runtimeQuery.data?.features?.web_search);
-  const webSearch = webSearchAvailable && !teamLeadActive && (webSearchChoices[selectedId ?? ""]
+  const webSearch = webSearchAvailable && !useTeam && !teamLeadActive && (webSearchChoices[selectedId ?? ""]
     ?? lastUserMessage?.metadata?.web_search_enabled ?? runtimeQuery.data?.features?.web_search_default ?? false);
   const selectWebSearch = (enabled: boolean) => {
     if (selectedId) setWebSearchChoices((current) => ({ ...current, [selectedId]: enabled }));
@@ -285,8 +291,8 @@ export default function App() {
 
   const sendRun = useMutation({
     mutationKey: ["send-run"],
-    mutationFn: async ({ conversationId, content, mode: submittedMode, webSearch, reasoningEffort }: { conversationId: string; content: string; mode: ExecutionMode; webSearch: boolean; reasoningEffort: string }) => {
-      const result = await api.createRun(conversationId, content, false, submittedMode, webSearch, reasoningEffort);
+    mutationFn: async ({ conversationId, content, useTeam, mode: submittedMode, webSearch, reasoningEffort }: { conversationId: string; content: string; useTeam: boolean; mode: ExecutionMode; webSearch: boolean; reasoningEffort: string }) => {
+      const result = await api.createRun(conversationId, content, useTeam, submittedMode, webSearch, reasoningEffort);
       return { ...result, content, conversationId };
     },
     onSuccess: (result) => {
@@ -299,6 +305,7 @@ export default function App() {
     onError: (error) => showError(error, setNotice),
     onSettled: (_, __, variables) => {
       void queryClient.invalidateQueries({ queryKey: messagesKey(variables.conversationId) });
+      void queryClient.invalidateQueries({ queryKey: teamsKey(variables.conversationId) });
     },
   });
 
@@ -353,6 +360,9 @@ export default function App() {
         case "integration":
           await api.verifyManualIntegration(teamId, command.targetRef);
           return;
+        case "resolve-integration":
+          await api.resolveTeamIntegration(teamId, command.integrationId, command.action, command.reason);
+          return;
         case "cleanup":
           await api.disposeWorktree(teamId, command.worktreeId, "cleanup");
           return;
@@ -390,6 +400,7 @@ export default function App() {
     sendRun.mutate({
       conversationId: selectedId,
       content: `继续处理 Task #${task.task.id}：${task.task.subject}。先读取 TaskGet，按 description 的完成条件执行，并及时用 TaskUpdate 更新状态。`,
+      useTeam,
       mode,
       webSearch,
       reasoningEffort,
@@ -415,7 +426,7 @@ export default function App() {
       metadata: { mode, web_search_enabled: webSearch, reasoning_effort: reasoningEffort },
     };
     queryClient.setQueryData<Message[]>(messagesKey(selectedId), (current = []) => [...current, optimistic]);
-    sendRun.mutate({ conversationId: selectedId, content, mode, webSearch, reasoningEffort });
+    sendRun.mutate({ conversationId: selectedId, content, useTeam, mode, webSearch, reasoningEffort });
   };
 
   const teamPanelProps = {
@@ -429,6 +440,7 @@ export default function App() {
     onResumeAttempt: (attemptId: string, reason: string, acknowledgeUnknownResult: boolean) => teamCommand.mutate({ kind: "resume-attempt", attemptId, reason, acknowledgeUnknownResult }),
     onCancelTeam: (reason: string) => teamCommand.mutate({ kind: "cancel", reason }),
     onVerifyIntegration: (targetRef: string) => teamCommand.mutate({ kind: "integration", targetRef }),
+    onResolveIntegration: (integrationId: string, action: "retry" | "repair" | "resume", reason: string) => teamCommand.mutate({ kind: "resolve-integration", integrationId, action, reason }),
     onCleanupWorktree: (worktreeId: string) => teamCommand.mutate({ kind: "cleanup", worktreeId }),
   };
 
@@ -440,7 +452,7 @@ export default function App() {
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} discussMode={mode === "discuss"} onModeChange={selectMode} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
+          <ChatWorkspace teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} discussMode={mode === "discuss"} onModeChange={selectMode} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>

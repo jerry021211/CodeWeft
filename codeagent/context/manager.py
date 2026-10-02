@@ -6,6 +6,7 @@ import json
 import hashlib
 import time
 from dataclasses import replace
+from copy import deepcopy
 from threading import RLock
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from codeagent.context.models import ContextConfig, RuntimeState
 from codeagent.context.budget import RequestBudget, RequestBudgetError, enforce_request, inspect_request, validate_budget
 from codeagent.context.history import conversation_view, history_hash, is_user_turn, serializable, user_content
 from codeagent.context.projection import build_tool_projection
+from codeagent.context.observation import fingerprint
 from codeagent.context.telemetry import tool_projection_metrics
 from codeagent.context.summary_source import bounded_summary_messages, summary_source_messages
 from codeagent.context.summary_prompt import SUMMARIZATION_SYSTEM_PROMPT, summary_handoff, summary_user_prompt
@@ -83,7 +85,7 @@ class ContextManager:
             self.last_compaction = {"status": "skipped", "reason": "history_changed"}
 
     def project_messages(self, messages: list[Message], *, clean_tools: bool = False) -> list[Message]:
-        """Always build from canonical messages, including after recovery/resume."""
+        """Build a canonical view, then replay checkpointed loss-aware edits."""
         validate_tool_history(messages)
         self._validate_summary(messages)
         start = self.state.compacted_message_count if self.state.summary_text else 0
@@ -94,10 +96,54 @@ class ContextManager:
                 summary=self.state.summary_text, revision=self.state.summary_revision,
                 transcript=self.state.summary_transcript,
             )}] + projected
+        base = projected
+        projected = self._stable_tool_view(base)
         if clean_tools:
             projected = self._project_tools(projected)
+            self._remember_tool_view(base, projected)
         validate_tool_history(projected)
         return projected
+
+    def _view_key(self) -> str:
+        return fingerprint({"summary_revision": self.state.summary_revision,
+                            "prefix": self.state.compacted_prefix_hash,
+                            "summary": self.state.summary_text,
+                            "enabled": self.config.tool_projection_enabled,
+                            "investigation": self.config.investigation_keep_rounds,
+                            "command": self.config.command_keep_rounds,
+                            "write": self.config.write_keep_rounds,
+                            "min_chars": self.config.tool_clear_min_chars,
+                            "write_min": self.config.write_clear_min_chars,
+                            "policy": self.config.cache_policy})["hash"]
+
+    def _stable_tool_view(self, base: list[Message]) -> list[Message]:
+        view = self.state.request_view
+        if view and (view.get("version") != 1 or view.get("key") != self._view_key()):
+            self.state.request_view = {}
+            self._generation_reason = "request_view_configuration_or_summary_changed"
+            return base
+        if not view.get("patches"):
+            return base
+        result = list(base)
+        for patch in view.get("patches", []):
+            index = patch["index"]
+            if index >= len(base) or fingerprint(base[index])["hash"] != patch["source_hash"]:
+                self.state.request_view = {}
+                self._generation_reason = "request_view_history_changed"
+                return base
+            result[index] = deepcopy(patch["message"])
+        return result
+
+    def _remember_tool_view(self, base: list[Message], projected: list[Message]) -> None:
+        previous = self.state.request_view
+        if base == projected and not previous:
+            return
+        self.state.request_view = {
+            **previous, "version": 1, "key": self._view_key(),
+            "patches": [{"index": i, "source_hash": fingerprint(old)["hash"],
+                         "message": serializable(deepcopy(new))}
+                        for i, (old, new) in enumerate(zip(base, projected)) if old != new],
+        }
 
     def _retained_messages(self, messages: list[Message], start: int) -> list[Message]:
         """Shared retained view for actual requests and the optimistic savings bound."""
@@ -124,8 +170,14 @@ class ContextManager:
             write_keep=self.config.write_keep_rounds, write_min_chars=self.config.write_clear_min_chars,
         )
 
-    def _under_pressure(self, budget: RequestBudget, window: int) -> bool:
+    def _under_pressure(self, budget: RequestBudget, window: int, *, cache_friendly: bool = False) -> bool:
         # Counts and a previous request's usage cannot establish current pressure.
+        if cache_friendly:
+            # Same 20% default headroom as legacy window policy. Apply it to
+            # usable input space after output reservation, AND the body cap.
+            return (budget.request_chars >= self.config.max_request_chars * self.config.cache_soft_ratio
+                    or budget.estimated_prompt_tokens >= max(0, window - budget.output_reserve_tokens)
+                    * self.config.cache_soft_ratio)
         return (budget.request_chars > min(self.config.compact_threshold_chars, self.config.max_request_chars)
                 or (window > 0 and budget.estimated_total_tokens >= window * self.config.near_context_ratio))
 
@@ -140,6 +192,7 @@ class ContextManager:
         model: str = "",
         max_tokens: int = 0,
         model_window: dict[str, Any] | None = None,
+        cache_capabilities: dict[str, Any] | None = None,
     ) -> list[Message]:
         projected = self.project_messages(messages)
         params = dict(model=model, system=system, messages=projected, tools=tools or [], max_tokens=max_tokens)
@@ -147,17 +200,38 @@ class ContextManager:
         # Production clients use discovery exclusively, including when unknown.
         # Keep explicit limits for SDK clients that do not implement discovery.
         window = model_window["context_window_tokens"] if model_window is not None else self.config.window_for_model(model)
-        if self._under_pressure(budget, window):
+        cache_friendly = window > 0 and (self.config.cache_policy == "cache_friendly" or (
+            self.config.cache_policy == "auto" and bool((cache_capabilities or {}).get("cheap_prefix_reads"))))
+        hard_pressure = (budget.request_chars > self.config.max_request_chars
+                         or (window > 0 and budget.estimated_total_tokens > window))
+        view = self.state.request_view
+        boundary_config = fingerprint({"model": model, "window": window, "max_tokens": max_tokens,
+                                       "system": system, "tools": tools, "friendly": cache_friendly,
+                                       "soft": self.config.cache_soft_ratio,
+                                       "growth": self.config.cache_boundary_growth_ratio,
+                                       "max_chars": self.config.max_request_chars})["hash"]
+        growth = self.config.cache_boundary_growth_ratio
+        # Hysteresis after a boundary (even if no eligible cleanup exists).
+        # Hard safety checks always bypass this gate.
+        boundary_due = (not cache_friendly or hard_pressure or view.get("boundary_config") != boundary_config
+                        or budget.request_chars >= view.get("boundary_chars", 0) + self.config.max_request_chars * growth
+                        or budget.estimated_prompt_tokens >= view.get("boundary_tokens", 0)
+                        + max(0, window - max_tokens) * growth)
+        pressure = lambda value: self._under_pressure(value, window, cache_friendly=cache_friendly)
+        cleanup_boundary = boundary_due and (hard_pressure or pressure(budget))
+        if cleanup_boundary:
             # Only inspect the irreducible portion when it could block compaction.
             enforce_request(**{**params, "messages": []}, max_request_chars=self.config.max_request_chars,
                             context_window_tokens=window)
-            cleaned = self._project_tools(projected)
+            cleaned = self.project_messages(messages, clean_tools=True)
             if cleaned is not projected:
+                if cleaned != projected:
+                    self._generation_reason = "tool_cleanup_boundary"
                 projected = cleaned
                 params["messages"] = projected
                 budget = inspect_request(**params)
         for _ in range(3):
-            if not self._under_pressure(budget, window) or self.config.mode == "off":
+            if not cleanup_boundary or not pressure(budget) or self.config.mode == "off":
                 break
             revision = self.state.summary_revision
             try:
@@ -173,8 +247,23 @@ class ContextManager:
             budget = inspect_request(**params)
             if not self._eligible_cuts(messages):
                 break
+        if cleanup_boundary and cache_friendly:
+            self.state.request_view.update(boundary_config=boundary_config,
+                                           version=1, key=self._view_key(),
+                                           boundary_chars=budget.request_chars,
+                                           boundary_tokens=budget.estimated_prompt_tokens)
         telemetry = {
             "model": model,
+            "cache_policy": "cache_friendly" if cache_friendly else "legacy",
+            "cleanup_boundary": cleanup_boundary,
+            "cache_soft_ratio": self.config.cache_soft_ratio,
+            "cache_boundary_growth_ratio": self.config.cache_boundary_growth_ratio,
+            "effective_soft_request_chars": (self.config.max_request_chars * self.config.cache_soft_ratio
+                                             if cache_friendly else min(self.config.compact_threshold_chars,
+                                                                        self.config.max_request_chars)),
+            "effective_soft_prompt_tokens": (max(0, window - max_tokens) * self.config.cache_soft_ratio
+                                              if cache_friendly else max(0, window * self.config.near_context_ratio - max_tokens))
+                                             if window else None,
             "context_window_tokens": window,
             "context_window_source": model_window["context_window_source"] if model_window is not None else "configuration",
             "context_window_reason": model_window.get("context_window_reason") if model_window is not None else None,
@@ -424,6 +513,7 @@ class ContextManager:
             self.state.summary_source_count = source_count
             self.state.summary_source_hash = source_hash
             self.state.summary_revision += 1
+            self.state.request_view = deepcopy(candidate_state.request_view)
             self.state.history_generation += 1
             self.state.record_transcript(transcript)
             self.state.summary_retry_after_epoch = 0.0

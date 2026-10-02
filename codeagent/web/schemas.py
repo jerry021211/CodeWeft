@@ -265,6 +265,7 @@ class CreateTeamRunRequest(ApiModel):
     modelCallBudget: int | None = Field(default=None, ge=1)
     deadlineAt: str | None = None
     allowDirty: bool = False
+    integrationMode: Literal["managed", "manual"] = "managed"
 
 
 class CreateTeamPlanRevisionRequest(ApiModel):
@@ -297,6 +298,12 @@ class CandidateUserApprovalRequest(ApiModel):
 class ManualIntegrationRequest(ApiModel):
     targetRef: str = Field(min_length=1, max_length=500)
     commandId: str = Field(min_length=1, max_length=200)
+
+
+class IntegrationResolutionRequest(ApiModel):
+    action: Literal["retry", "repair", "resume"]
+    reason: str = Field(min_length=1, max_length=10_000)
+    acknowledgeUnknownResult: bool = False
 
 
 class TeamCancelRequest(ApiModel):

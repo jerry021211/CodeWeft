@@ -47,10 +47,11 @@ type Props = {
   onResumeAttempt?: (attemptId: string, reason: string, acknowledgeUnknownResult: boolean) => void;
   onCancelTeam?: (reason: string) => void;
   onVerifyIntegration?: (targetRef: string) => void;
+  onResolveIntegration?: (integrationId: string, action: "retry" | "repair" | "resume", reason: string) => void;
   onCleanupWorktree?: (worktreeId: string) => void;
 };
 
-export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onCleanupWorktree }: Props) {
+export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onResolveIntegration, onCleanupWorktree }: Props) {
   const [tab, setTab] = useState<"run" | "tasks" | "team" | "debug">("run");
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-line bg-surface">
@@ -64,7 +65,7 @@ export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], task
         {mobile && onClose && <IconButton label="关闭运行面板" onClick={onClose}><X className="size-4" /></IconButton>}
       </header>
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : tab === "team" ? <TeamPanel enabled={teamEnabled} team={team} loading={teamLoading} busy={teamBusy} error={teamError} onTeamPlan={onTeamPlan ?? (() => undefined)} onCandidateApproval={onCandidateApproval ?? (() => undefined)} onResumeAttempt={onResumeAttempt ?? (() => undefined)} onCancel={onCancelTeam ?? (() => undefined)} onVerifyIntegration={onVerifyIntegration ?? (() => undefined)} onCleanupWorktree={onCleanupWorktree ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
+        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : tab === "team" ? <TeamPanel enabled={teamEnabled} team={team} loading={teamLoading} busy={teamBusy} error={teamError} onTeamPlan={onTeamPlan ?? (() => undefined)} onCandidateApproval={onCandidateApproval ?? (() => undefined)} onResumeAttempt={onResumeAttempt ?? (() => undefined)} onCancel={onCancelTeam ?? (() => undefined)} onVerifyIntegration={onVerifyIntegration ?? (() => undefined)} onResolveIntegration={onResolveIntegration} onCleanupWorktree={onCleanupWorktree ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
       </div>
     </aside>
   );

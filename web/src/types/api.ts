@@ -143,6 +143,9 @@ export type TeamRun = {
   task_list_id: Identifier;
   lead_agent_id: Identifier;
   base_commit: string;
+  integration_mode?: "manual" | "managed";
+  integration_head?: string | null;
+  integration_revision?: number;
   state: string;
   active_plan_revision?: number | null;
   max_teammates: number;
@@ -218,6 +221,8 @@ export type TeamCandidate = {
   commit_hash?: string | null;
   integrated_commit?: string | null;
   integrated_at?: string | null;
+  team_integrated_revision?: number | null;
+  superseded_at?: string | null;
 };
 
 export type TeamWorktree = {
@@ -288,11 +293,22 @@ export type TeamSnapshot = {
     last_delivery_error?: string | null;
   }>;
   integration_checks: Array<Record<string, unknown>>;
+  integrations?: Array<{
+    id: string;
+    kind: "candidate" | "delivery";
+    candidate_id?: string | null;
+    status: string;
+    parent_head: string;
+    trial_commit?: string | null;
+    worktree_path: string;
+    error?: string | null;
+    validations: Array<{ command: string; status: string; output_ref: string }>;
+  }>;
   usage: TokenUsage;
   manual_integration: {
     required: boolean;
     commands: string[];
-    automatic_merge: false;
+    automatic_merge: boolean;
   };
 };
 

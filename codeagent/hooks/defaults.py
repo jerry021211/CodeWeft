@@ -74,6 +74,11 @@ def _permission_hook(policy: PermissionPolicy):
             return None
         return decision.reason or "Permission denied."
 
+    hook.permission_snapshot = lambda: {
+        "workspace": str(policy.workspace), "hard_deny_patterns": policy.hard_deny_patterns,
+        "destructive_command_patterns": policy.destructive_command_patterns,
+        "write_tools": policy.write_tools,
+    }
     return hook
 
 

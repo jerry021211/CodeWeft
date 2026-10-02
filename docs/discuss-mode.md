@@ -83,7 +83,9 @@
 ```text
 CLI --discuss / /discuss 或 Web 请求 mode=discuss
   → Agent.prompt_mode = PromptMode.DISCUSS
-  → PromptRuntime 选择 discuss.md，跳过执行、任务规划和写记忆模板
+  → PromptRuntime 复用 Code / Discuss 共用的稳定 system 和工具定义
+  → 首次运行或模式切换时，在历史尾部追加运行时模式通知
+  → 请求压缩后若模式通知被折叠，补回当前模式并重新检查预算
   → 模型输出 tool_use
   → PreToolUse 最前面的 discuss guard
       → 拒绝：tool.blocked + tool_result，模型可继续解释
@@ -97,8 +99,8 @@ CLI --discuss / /discuss 或 Web 请求 mode=discuss
 - `codeagent/hooks/manager.py`：支持前置 hook，以及复制注册表以隔离每个 Agent。
 - `codeagent/agent.py`：安装 guard、提供模式切换、讨论时跳过模型调用前的 reminder
   hooks 和回合结束的自动记忆维护。
-- `codeagent/prompts/templates/discuss.md`：讨论指引。
-- `codeagent/prompts/runtime.py`：排除讨论时不适用的模板。
+- `codeagent/prompts/templates/modes.md`、`discuss.md`：固定模式定义和条件化讨论指引。
+- `codeagent/prompts/runtime.py`：两种模式组装相同模板，Code 专属指引加条件范围。
 - `codeagent/cli.py`：启动参数、交互命令和状态提示符。
 - `codeagent/web/scheduler.py`：将模式固化到队列 job、Run metadata 和用户消息 metadata。
 - `codeagent/web/factory.py`：创建对应 profile 的 Agent，并为讨论 Run 设置只读 memory store。
@@ -106,9 +108,12 @@ CLI --discuss / /discuss 或 Web 请求 mode=discuss
 
 ### 与原仓库有意不同的选择
 
-1. **复用现有 PromptRuntime。** 当前模式每次组装时都有效，不依赖一条旧提示是否仍
-   留在历史里。上下文压缩、Web 新建 Agent、checkpoint 恢复后都由本次模式决定权限。
-   模式切换会改变 system prompt，因此可能损失一次前缀缓存；同模式的工具循环保持稳定。
+1. **稳定 system，模式通知追加到历史尾部。** Code / Discuss 共用提示词快照，固定包含
+   两种模式的条件规则；执行、规划、委派、写记忆指引标明仅 Code 适用。首次请求、模式
+   切换以及压缩丢失通知时追加当前状态，不改写已有历史；同模式且通知仍在请求中时不重复。
+   Web 恢复沿用 checkpoint 快照，权限仍由本次后端模式决定，用户文字不能解除 hook 限制。
+   模式切换本身不再改变 system/tools。旧版快照升级时重建一次；模板、权限、工具变更或
+   历史压缩仍可能影响前缀匹配，不保证服务端缓存命中。
 2. **保留工具 schema，由 hook 执行约束。** 避免切换时重建工具注册表，也确保可以测试
    模型无视提示时是否仍无法写入。退出讨论后原有能力恢复，不额外授予权限。
 3. **未知工具默认拒绝。** 除文件写工具外，也阻止任务更新、TODO、remember、subagent、
@@ -136,6 +141,8 @@ CLI --discuss / /discuss 或 Web 请求 mode=discuss
 
 `tests/test_discuss.py` 覆盖真实文件写入拦截与恢复、读取、模型强行请求写入、审批
 顺序、共享 hooks 隔离、自动记忆维护、提示模板，以及多种命令绕过。
+还验证首次模式通知、重复切换的 system/tools 相等、历史只追加、checkpoint 恢复和压缩补回通知。
+`tests/test_prefix_cache.py` 在最终 SDK 参数处核对稳定前缀及自动预检压缩后的模式状态。
 `tests/test_web_scheduler.py` 验证模式传递和持久化；`tests/test_web_api.py`
 验证 API 参数、非法模式和 Team 冲突。前端使用 TypeScript 检查及 Vite 构建验证。
 

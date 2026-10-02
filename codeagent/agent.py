@@ -14,7 +14,7 @@ from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, wait as wait_futures, FIRST_COMPLETED
 from threading import Event
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,6 +22,8 @@ from uuid import uuid4
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.context import ContextManager, HistoryObserver
 from codeagent.context.budget import BoundModelClient
+from codeagent.context.observation import emit_request_observation, fingerprint, observe_request
+from codeagent.prompts.models import PromptTraceItem
 from codeagent.events import EventEmitter, TokenTotals, UsageTracker
 from codeagent.hooks import HookDecision, HookManager
 from codeagent.hooks.loop_guard import LoopGuard, LoopGuardConfig
@@ -51,7 +53,7 @@ from codeagent.tools import (
     LoadToolOutputTool,
     TodoStore,
     TodoWriteTool,
-    tool_schema_hash,
+    tool_request_hash,
 )
 
 SubagentEnvironment = tuple[ToolRegistry, HookManager, ContextManager]
@@ -118,10 +120,10 @@ class Agent:
     _loop_guard: LoopGuard | None = field(default=None, init=False, repr=False)
     _compact_requested: bool = field(default=False, init=False)
     _tool_schema_changed: bool = field(default=False, init=False)
-    _last_runtime_reminder: tuple | None = field(default=None, init=False, repr=False)
     _yield_reason: str | None = field(default=None, init=False, repr=False)
     _subagent_runtime: SubagentRuntime | None = field(default=None, init=False, repr=False)
     _independent_child_hooks: bool = field(default=False, init=False, repr=False)
+    _request_reasons: list[str] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._independent_child_hooks = self.subagent_environment_factory is not None or not self.hooks.has_handlers
@@ -169,7 +171,7 @@ class Agent:
             self.tools.register(LoadToolOutputTool(self.context.config.tool_output_dir))
         if "load_context_history" not in self.tools:
             self.tools.register(LoadContextHistoryTool(self.context.config.transcript_dir))
-        current_tool_hash = tool_schema_hash(self.tools.schemas())
+        current_tool_hash = tool_request_hash(self.tools.schemas())
         self._tool_schema_changed = bool(self.messages) and (
             self.context.state.tool_schema_hash != current_tool_hash
         )
@@ -189,6 +191,7 @@ class Agent:
         elif self.execution_activity is not None:
             self.set_execution_activity(self.execution_activity)
         if self.messages:
+            self._request_reasons.append("checkpoint_restored" if self.context.state.prompt_snapshot else "legacy_checkpoint_rebuilt")
             self.history_observer.restore(
                 generation=self.context.state.history_generation,
                 last_sent=self.context.project_messages(self.messages),
@@ -315,23 +318,8 @@ class Agent:
         if prompt is not None:
             self.context.begin_turn(len(self.messages))
             self.hooks.trigger("UserPromptSubmit", prompt) #打印日志
-            self._last_runtime_reminder = None
             self.context.record_user_prompt(prompt)
-            # The system prompt alone does not record WHEN a mode changed.
-            # Append the transition before the new request, preserving the
-            # complete old history and tool pairs. Legacy checkpoints have no
-            # mode marker, so announce their current mode once as well.
-            current_mode = self._prompt_mode()
-            if current_mode in {PromptMode.NORMAL, PromptMode.DISCUSS}:
-                previous_mode = self.context.state.last_prompt_mode
-                if self.messages and previous_mode != current_mode.value:
-                    assert self.prompt_runtime is not None
-                    self.add_user_message(self.prompt_runtime.mode_turn_context(current_mode), source="runtime")
-                    self.event_emitter.emit("agent.mode.changed", {
-                        "previous_mode": previous_mode,
-                        "mode": current_mode.value,
-                    })
-                self.context.state.last_prompt_mode = current_mode.value
+            self._sync_mode_reminder(self.messages)
             self.add_user_message(prompt)
 
         with trace_run(
@@ -417,13 +405,10 @@ class Agent:
                         raise ExecutionStopped(reminder.reason)
                     reminder = reminder.message
                 if reminder:
-                    key = (self.context.state.summary_revision, self._prompt_mode(), str(reminder))
-                    if key != self._last_runtime_reminder:
-                        self.add_user_message("[运行时提醒：计划状态；不改变用户目标或权限]\n" + str(reminder), source="runtime")
-                        self._last_runtime_reminder = key
+                    self._sync_runtime_reminder("plan", str(reminder), self.messages)
 
                 tool_schemas = self.tools.schemas()
-                current_tool_hash = tool_schema_hash(tool_schemas)
+                current_tool_hash = tool_request_hash(tool_schemas)
                 self._tool_schema_changed = self._tool_schema_changed or (
                     self.context.state.tool_schema_hash != current_tool_hash
                 )
@@ -575,29 +560,58 @@ class Agent:
 
     def _create_message(self, *, prompt_assembly: PromptAssemblyResult | None = None,
                         iteration: int | None = None, **kwargs: Any) -> Any:
+        if prompt_assembly is not None:
+            # Recovery retries also see mode, rules and tools changed since the
+            # loop originally assembled this call. Stable configurations reuse.
+            kwargs["tools"] = self.tools.schemas()
+            prompt_assembly = self._assemble_prompt(kwargs["tools"])
+            kwargs["system"] = prompt_assembly.system_prompt
         validate_tool_history(kwargs["messages"])
+        canonical = kwargs["messages"]
+        self._sync_mode_reminder(canonical)
+        feedback = ""
         if self._loop_guard is not None:
             feedback = self._loop_guard.feedback()
-            if feedback:
-                kwargs["system"] += "\n\n[本次执行的运行时纠正；不授予新权限]\n" + feedback
+            self._sync_runtime_reminder("loop_guard", feedback, canonical)
+        if self.prompt_runtime is not None:
+            today = self.prompt_runtime.date_turn_context()
+            self._sync_runtime_reminder("date", today, canonical)
         resolve_window = getattr(self.client, "get_model_window", None)
         model_window = resolve_window(kwargs["model"]) if callable(resolve_window) else None
+        resolve_cache = getattr(self.client, "get_cache_capabilities", None)
+        cache_capabilities = resolve_cache(kwargs["model"]) if callable(resolve_cache) else None
         self._check_cancelled()
         kwargs["messages"] = self.context.prepare_before_model_call(
-            kwargs["messages"], client=self._context_client, event_emitter=self.event_emitter,
+            canonical, client=self._context_client, event_emitter=self.event_emitter,
             system=kwargs["system"], tools=kwargs["tools"], model=kwargs["model"],
-            max_tokens=kwargs["max_tokens"], model_window=model_window,
+            max_tokens=kwargs["max_tokens"], model_window=model_window, cache_capabilities=cache_capabilities,
         )
+        # A compaction in preflight may have folded a previously sent reminder.
+        # Append it at the safe tail and recheck the complete request budget.
+        reinjected = self._sync_mode_reminder(canonical, effective=kwargs["messages"])
+        if self._loop_guard is not None:
+            reinjected = self._sync_runtime_reminder("loop_guard", feedback, canonical,
+                                                     effective=kwargs["messages"]) or reinjected
+        if self.prompt_runtime is not None:
+            reinjected = self._sync_runtime_reminder("date", today, canonical,
+                                                     effective=kwargs["messages"]) or reinjected
+        if reinjected:
+            kwargs["messages"] = self.context.prepare_before_model_call(
+                canonical, client=self._context_client, event_emitter=self.event_emitter,
+                system=kwargs["system"], tools=kwargs["tools"], model=kwargs["model"],
+                max_tokens=kwargs["max_tokens"], model_window=model_window, cache_capabilities=cache_capabilities,
+            )
         self._check_cancelled()
+        generation_reason = self.context.consume_generation_reason()
         observation = self.history_observer.observe(
             kwargs["messages"], generation=self.context.state.history_generation,
-            generation_reason=self.context.consume_generation_reason() or "request_projection",
+            generation_reason=generation_reason or "request_projection",
         )
         self.context.state.history_generation = observation.generation
         if observation.rewritten:
             self.event_emitter.emit("history.rewritten", observation.to_event_payload(), iteration=iteration)
         payload = {
-            **observation.to_event_payload(), "tool_schema_hash": tool_schema_hash(kwargs["tools"]),
+            **observation.to_event_payload(), "tool_schema_hash": tool_request_hash(kwargs["tools"]),
             "chars": len(kwargs["system"]), "prompt_version": "single-agent-zh-v1",
         }
         if prompt_assembly is not None:
@@ -608,6 +622,22 @@ class Agent:
                 "dropped_reason": item.dropped_reason,
             } for item in prompt_assembly.trace])
         self.event_emitter.emit("prompt.assembled", payload, iteration=iteration)
+        reasons = list(dict.fromkeys([*self._request_reasons, *([generation_reason] if generation_reason else [])]))
+        if kwargs["model"] != self.config.model or kwargs["max_tokens"] != self.config.max_tokens:
+            reasons.append("recovery_model_or_output_limit")
+        metadata = {"summary_revision": self.context.state.summary_revision,
+                    "history_generation": self.context.state.history_generation,
+                    "prompt_revision": self.context.state.prompt_revision,
+                    "rewrite_reasons": reasons}
+        bind_observation = getattr(self.client, "bind_request_observation", None)
+        if callable(bind_observation):
+            bind_observation(self.context.state.request_baselines, metadata)
+        else:
+            emit_request_observation(self.event_emitter.emit, observe_request(
+                kwargs, self.context.state.request_baselines,
+                call_kind=getattr(self.client, "call_kind", "main"), metadata=metadata,
+                boundary="model_client_parameters"))
+        self._request_reasons.clear()
         if self._loop_guard is not None:
             self._loop_guard.feedback_sent()
             response = self._loop_guard.budget.invoke(self.client, **kwargs)
@@ -625,6 +655,58 @@ class Agent:
             state.latest_request_model = kwargs["model"]
             state.latest_request_estimated = usage.estimated
         return response
+
+    def _sync_mode_reminder(self, canonical: list[Message], *,
+                            effective: list[Message] | None = None) -> bool:
+        mode = self._prompt_mode()
+        if mode not in {PromptMode.NORMAL, PromptMode.DISCUSS}:
+            return False
+        assert self.prompt_runtime is not None
+        previous = self.context.state.last_prompt_mode
+        appended = self._sync_runtime_reminder(
+            "mode", self.prompt_runtime.mode_turn_context(mode), canonical, effective=effective,
+        )
+        if previous != mode.value:
+            self.event_emitter.emit("agent.mode.changed", {
+                "previous_mode": previous, "mode": mode.value,
+            })
+        self.context.state.last_prompt_mode = mode.value
+        return appended
+
+    def _sync_runtime_reminder(self, kind: str, value: str, canonical: list[Message], *,
+                               effective: list[Message] | None = None) -> bool:
+        """Append a new state at a complete tool boundary; never edit old turns."""
+        state = self.context.state.runtime_reminders
+        previous = state.get(kind, {})
+        value_hash = fingerprint(value)["hash"]
+        if not value and not previous.get("active"):
+            return False
+        effective = self.context.project_messages(canonical) if effective is None else effective
+        if previous.get("value_hash") == value_hash and any(
+                fingerprint(message)["hash"] == previous.get("message_hash") for message in effective):
+            return False
+        # The initial date is in the frozen system snapshot; updates are messages.
+        if kind == "date" and previous.get("system_value_hash") == value_hash:
+            return False
+        validate_tool_history(canonical)
+        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期"}
+        text = value or "此前的运行时执行纠偏已解除；继续遵循当前用户目标和权限。"
+        content = text if kind == "mode" else f"[运行时提醒：{labels[kind]}；不改变用户目标或权限]\n{text}"
+        message = {"role": "user", "content": content}
+        canonical.append({**message, "_context_source": "runtime"})
+        state[kind] = {"value_hash": value_hash, "message_hash": fingerprint(message)["hash"],
+                       "active": bool(value)}
+        self._request_reasons.append(f"{kind}_reminder_{'updated' if value else 'cleared'}")
+        return True
+
+    def refresh_project_rules(self) -> None:
+        """Explicit user refresh; next request rebuilds once, preserving history."""
+        self.invalidate_prompt("project_rules_refresh")
+
+    def invalidate_prompt(self, reason: str = "safety_rules_changed") -> None:
+        """Custom permission hooks must call this when their configuration changes."""
+        self.context.state.prompt_snapshot = {}
+        self._request_reasons.append(reason)
 
     def _execute_tools(self, tool_uses: list[ToolUse], results: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """Keep every request paired even when dispatch, hooks or cancellation fail."""
@@ -1155,7 +1237,36 @@ class Agent:
             memory_catalog = ""
 
         assert self.prompt_runtime is not None
-        return self.prompt_runtime.assemble(
+        components = {
+            "mode": ("single_agent" if self._prompt_mode() in {PromptMode.NORMAL, PromptMode.DISCUSS}
+                     else self._prompt_mode().value), "tools": tool_request_hash(tool_schemas),
+            "rules": self.prompt_runtime.rules_fingerprint(),
+            "permissions": fingerprint(self.hooks.permission_snapshot())["hash"],
+            "prompt_config": fingerprint(asdict(self.prompt_runtime.config) | {
+                "template_dir": str(self.prompt_runtime.config.template_dir)})["hash"],
+            "workspace": str(self.prompt_runtime.workspace),
+            "platform": self.prompt_runtime.runtime_platform.prompt_reminder(),
+            "model_config": fingerprint({"model": self.config.model, "max_tokens": self.config.max_tokens,
+                "endpoint": str(getattr(self.client, "base_url", "")),
+                "reasoning": getattr(self.client, "reasoning_effort", "default")})["hash"],
+            "catalogs": fingerprint([memory_catalog, self.skill_catalog, selected_memory_context])["hash"],
+        }
+        snapshot = self.context.state.prompt_snapshot
+        if (snapshot.get("version") == 2 and snapshot.get("components") == components
+                and snapshot.get("system_hash") == fingerprint(snapshot.get("system"))["hash"]):
+            try:
+                return PromptAssemblyResult(snapshot["system"],
+                    [PromptTraceItem(**item) for item in snapshot["trace"]], snapshot["prompt_hash"])
+            except (KeyError, TypeError):
+                pass  # Old/incomplete snapshots rebuild through the path below.
+        if snapshot:
+            changed = [key for key, value in components.items() if snapshot.get("components", {}).get(key) != value]
+            self._request_reasons.extend(f"{key}_changed" for key in changed)
+            if not changed:
+                self._request_reasons.append("prompt_snapshot_incompatible")
+        else:
+            self._request_reasons.append("prompt_snapshot_missing")
+        assembly = self.prompt_runtime.assemble(
             mode=self._prompt_mode(),
             tool_schemas=tool_schemas,
             selected_memory_context=selected_memory_context,
@@ -1163,6 +1274,16 @@ class Agent:
             skill_catalog=self.skill_catalog,
             tool_schema_changed=self._tool_schema_changed,
         )
+        self.context.state.prompt_revision += 1
+        self.context.state.prompt_snapshot = {
+            "version": 2, "components": components, "system": assembly.system_prompt,
+            "system_hash": fingerprint(assembly.system_prompt)["hash"],
+            "trace": [asdict(item) for item in assembly.trace], "prompt_hash": assembly.prompt_hash,
+        }
+        if not self.context.state.runtime_reminders.get("date", {}).get("active"):
+            self.context.state.runtime_reminders["date"] = {
+                "system_value_hash": fingerprint(self.prompt_runtime.date_turn_context())["hash"]}
+        return assembly
 
     def _prompt_mode(self) -> PromptMode:
         if self.prompt_mode is not None:
@@ -1227,6 +1348,8 @@ class Agent:
             )
         else:
             client = self.client
+        if client is not self.client:
+            self._bind_side_observation(client)
         if self._loop_guard is not None:
             client = BudgetedClient(client, self._loop_guard.budget)
         if call_kind == "context_summary":
@@ -1247,12 +1370,22 @@ class Agent:
                 activity=self.execution_activity,
                 request_timeout=self.context.config.summary_timeout_seconds,
             )
+            self._bind_side_observation(client)
             return BudgetedClient(client, self._loop_guard.budget) if self._loop_guard is not None else client
         client = self._side_query_client("context_summary")
         raw_client = client.client if isinstance(client, BudgetedClient) else client
         if isinstance(raw_client, AnthropicModelClient):
             raw_client.request_timeout = self.context.config.summary_timeout_seconds
         return client
+
+    def _bind_side_observation(self, client: Any) -> None:
+        bind = getattr(client, "bind_request_observation", None)
+        if callable(bind):
+            bind(self.context.state.request_baselines, {
+                "summary_revision": self.context.state.summary_revision,
+                "history_generation": self.context.state.history_generation,
+                "prompt_revision": None, "rewrite_reasons": ["auxiliary_call"],
+            })
 
     def _after_turn_memory(self, start_index: int = 0) -> None:
         if self.memory_manager is None or self.discuss_mode:

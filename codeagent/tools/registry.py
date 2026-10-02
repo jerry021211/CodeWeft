@@ -153,11 +153,17 @@ class ToolRegistry:
 
 
 def tool_schema_hash(schemas: list[dict[str, Any]]) -> str:
-    """Return a stable fingerprint for the tools exposed to the model."""
+    """Legacy semantic fingerprint; request observation uses tool_request_hash."""
 
     ordered = sorted(schemas, key=lambda schema: str(schema.get("name", "")))
+    payload = json.dumps(ordered, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def tool_request_hash(schemas: list[dict[str, Any]]) -> str:
+    """Fingerprint the actual registration/send order, including array order."""
     payload = json.dumps(
-        ordered,
+        schemas,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
