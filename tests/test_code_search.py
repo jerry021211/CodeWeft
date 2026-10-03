@@ -41,6 +41,27 @@ class CodeSearchTests(unittest.TestCase):
     def search(self, query, **kwargs):
         return json.loads(self.tool.run(query, **kwargs))
 
+    def test_output_budget_preserves_end_line_across_empty_source_lines(self):
+        # Force repeated shortening over blank lines in several long snippets.
+        source = '\n\n'.join(
+            f'def large_{i}():\n' + ''.join(
+                f'    value_{j} = "token ' + ('x' * 320) + '"\n\n' for j in range(12))
+            for i in range(8))
+        self.write('large.py', source)
+        result = self.search('token', top_k=10)
+        self.assertTrue(result['truncated'])
+        self.assertTrue(result['results'])
+        actual = source.splitlines()
+        for item in result['results']:
+            self.assertEqual(item['quote'], '\n'.join(actual[item['line'] - 1:item['end_line']]))
+
+    def test_file_quota_preserves_ranked_candidate_pool(self):
+        self.write('many.py', '\n'.join(f'def retrieve_{i}():\n    return "needle"\n' for i in range(8)))
+        result = self.search('needle', top_k=10)
+        self.assertEqual(len(result['results']), 3)
+        candidates, _, _ = self.tool.service.candidates(['needle'], '.')
+        self.assertEqual({doc['symbol'] for doc in candidates}, {f'retrieve_{i}' for i in range(8)})
+
     def test_symbol_scope_decorators_and_exact_source(self):
         source = 'class Shelf:\n    @staticmethod\n    async def fetchBlueItem():\n        return "blue"\n'
         self.write('pkg/shelf.py', source)
@@ -72,13 +93,14 @@ class CodeSearchTests(unittest.TestCase):
         self.write('broken.py', 'def brokenPear(:\n    return 42\n')
         self.assertEqual(self.search('secretPeach')['results'], [])
         result = self.search('brokenPear')
-        self.assertFalse(result['scan_complete'])
+        self.assertTrue(result['scan_complete'])
+        self.assertEqual(result['coverage']['fallback_files'], 1)
         self.assertEqual(result['results'][0]['kind'], 'parse_fallback')
 
     def test_corrupt_and_busy_cache_fallback(self):
         self.write('x.py', 'def copper():\n    return 9\n')
         self.index.mkdir()
-        database = self.index / 'source-v1.sqlite3'
+        database = self.index / 'source-v2.sqlite3'
         database.write_bytes(b'not a sqlite database')
         result = self.search('copper')
         self.assertEqual(result['index_backend'], 'python_fallback')

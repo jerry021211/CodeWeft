@@ -154,7 +154,7 @@ class TeamToolExecutionGate:
                     "Wait for the required approval or use a read-only tool.",
                 )
 
-            output = str(handler(**args))
+            output = handler(**args)
             if name == "bash" or name.startswith("mcp__") or is_write:
                 outside = self._outside_scope_changes(
                     binding.id, binding.write_scopes
@@ -476,7 +476,7 @@ class ReadOnlyTeamToolExecutionGate:
                 )
             return f"Blocked: {blocked_reason}"
         try:
-            output = str(handler(**args))
+            output = handler(**args)
         except BaseException as exc:
             if execution is not None:
                 self.repository.finish_tool_execution(
@@ -525,7 +525,7 @@ class ActiveTeamRootToolExecutionGate:
             self.conversation_id
         )
         if team is None:
-            return str(handler(**args))
+            return handler(**args)
         if name in self._TEAM_CONTROL_WRITES:
             return (
                 "Blocked: Root repository and Task mutation is disabled while "
@@ -538,7 +538,7 @@ class ActiveTeamRootToolExecutionGate:
         reason = read_only_gate._blocked_reason(name, args)
         if reason is not None:
             return f"Blocked: Root/Lead is read-only while an Agent Team is active: {reason}"
-        return str(handler(**args))
+        return handler(**args)
 
 
 class TeamPlannerToolExecutionGate:
@@ -594,7 +594,7 @@ class TeamPlannerToolExecutionGate:
         )
         if reason is not None:
             return f"Blocked: Team planning is read-only: {reason}"
-        return str(handler(**args))
+        return handler(**args)
 
     def _task_update_blocked_reason(self, args: dict[str, Any]) -> str | None:
         if "status" in args or "owner" in args:

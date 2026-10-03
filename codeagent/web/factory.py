@@ -189,10 +189,12 @@ class WebAgentFactory:
         def tools_for():
             registry = create_default_registry(
                 web_search_config=web_search_config,
+                lsp_config=self.env.lsp_config,
                 code_search_tool=(SearchCodeTool(
                     self.workspace, self.data_paths.code_index_dir(self.workspace),
                     client=client, model=self.env.model_id, event_emitter=event_emitter,
-                ) if team_session is None and not team_planner else None),
+                    embedding_config=self.env.embedding_config,
+                )),
                 ask_user_fn=(
                     WebUserQuestions(self.task_service, event_emitter, cancellation).ask
                     if team_session is None and not team_planner else None
@@ -286,6 +288,9 @@ class WebAgentFactory:
             )
             subagent_tools = create_default_registry(
                 web_search_config=web_search_config,
+                lsp_config=self.env.lsp_config,
+                code_search_tool=SearchCodeTool(self.workspace, self.data_paths.code_index_dir(self.workspace),
+                                                embedding_config=self.env.embedding_config),
                 todo_store=sub_todos,
                 skill_loader=skill_loader,
                 memory_store=memory_store,

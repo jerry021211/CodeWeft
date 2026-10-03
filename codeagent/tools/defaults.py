@@ -44,6 +44,7 @@ def default_tools(
     run_id: str | None = None,
     agent_id: str = "agent_root",
     code_search_tool: Tool | None = None,
+    lsp_config=None,
     web_search_config: WebSearchConfig | None = None,
 ) -> list[Tool]:
     backend = PlanningBackend.parse(planning_backend)
@@ -66,6 +67,12 @@ def default_tools(
     ]
     if code_search_tool is not None:
         tools.append(code_search_tool)
+    lsp_workspace = workspace_guard.root if workspace_guard is not None else None
+    if lsp_workspace is None and code_search_tool is not None:
+        lsp_workspace = getattr(code_search_tool, 'workspace', None)
+    if lsp_workspace is not None:
+        from codeagent.tools.lsp import LspTool
+        tools.append(LspTool(lsp_workspace, lsp_config))
     if web_search_config is not None and web_search_config.enabled:
         tools.append(WebSearchTool(web_search_config))
     if ask_user_fn is not None:
@@ -115,6 +122,7 @@ def create_default_registry(
     run_id: str | None = None,
     agent_id: str = "agent_root",
     code_search_tool: Tool | None = None,
+    lsp_config=None,
     web_search_config: WebSearchConfig | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
@@ -136,6 +144,7 @@ def create_default_registry(
         run_id=run_id,
         agent_id=agent_id,
         code_search_tool=code_search_tool,
+        lsp_config=lsp_config,
         web_search_config=web_search_config,
     ):
         registry.register(tool)

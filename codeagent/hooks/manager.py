@@ -42,7 +42,8 @@ class HookManager:
         for event, handlers in self._handlers.items():
             manager._handlers[event] = [
                 rebind(handler) if rebind else handler for handler in handlers
-                if exclude_owner is None or getattr(handler, "__self__", None) is not exclude_owner
+                if not getattr(handler, 'agent_local', False)
+                and (exclude_owner is None or getattr(handler, "__self__", None) is not exclude_owner)
             ]
         return manager
 

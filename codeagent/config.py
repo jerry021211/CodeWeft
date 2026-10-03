@@ -19,6 +19,8 @@ from codeagent.recovery import RecoveryConfig
 from codeagent.runtime.data_paths import default_runtime_data_dir
 from codeagent.runtime.parallel import ParallelConfig
 from codeagent.tools.web_search import WebSearchConfig
+from codeagent.code_search.embedding import EmbeddingConfig
+from codeagent.lsp.registry import LspConfig, configured_servers
 
 
 def _load_dotenv() -> None:
@@ -87,6 +89,8 @@ class EnvironmentConfig:
     web_max_concurrent_runs: int = 4
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     web_search_config: WebSearchConfig = field(default_factory=WebSearchConfig)
+    embedding_config: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    lsp_config: LspConfig = field(default_factory=LspConfig)
 
     def __post_init__(self) -> None:
         if type(self.web_max_concurrent_runs) is not int or self.web_max_concurrent_runs < 1:
@@ -104,6 +108,13 @@ class EnvironmentConfig:
         )
         return cls(
             model_id=model_id,
+            embedding_config=embedding_config_from_env(),
+            lsp_config=LspConfig(
+                enabled=_bool_env("CODEAGENT_LSP_ENABLED", True),
+                servers=configured_servers(),
+                timeout_seconds=_float_env("CODEAGENT_LSP_TIMEOUT", 5.),
+                feedback_seconds=_float_env("CODEAGENT_LSP_FEEDBACK_TIMEOUT", 1.5),
+            ),
             web_search_config=WebSearchConfig(
                 enabled=_bool_env("CODEAGENT_WEB_SEARCH_ENABLED", False),
                 api_key=_optional_env("TAVILY_API_KEY"),
@@ -291,6 +302,20 @@ def _required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def embedding_config_from_env() -> EmbeddingConfig:
+    """Read embedding settings only; do not require a chat/summary model."""
+    return EmbeddingConfig(
+        enabled=_bool_env("CODEAGENT_EMBEDDING_ENABLED", False),
+        base_url=_optional_env("CODEAGENT_EMBEDDING_BASE_URL") or "",
+        api_key=_optional_env("CODEAGENT_EMBEDDING_API_KEY") or "",
+        model=_optional_env("CODEAGENT_EMBEDDING_MODEL") or "",
+        dimensions=_int_env("CODEAGENT_EMBEDDING_DIMENSIONS", 0),
+        timeout_seconds=_float_env("CODEAGENT_EMBEDDING_TIMEOUT", 10.),
+        max_chunks=_int_env("CODEAGENT_EMBEDDING_MAX_CHUNKS", 2000),
+        batch_size=_int_env("CODEAGENT_EMBEDDING_BATCH_SIZE", 10),
+    )
 
 
 def _optional_env(name: str) -> str | None:

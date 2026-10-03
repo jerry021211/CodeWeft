@@ -7,6 +7,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from threading import RLock
 
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.config import EnvironmentConfig
@@ -29,6 +30,9 @@ def public_trace(value):
     if isinstance(value, dict):
         return {k: public_trace(v) for k, v in value.items() if k not in {"thinking", "reasoning_content", "signature"}}
     return value
+
+
+_TRACE_WRITE_LOCK = RLock()
 
 
 def append_record(path: Path, value):
@@ -54,7 +58,7 @@ def append_record(path: Path, value):
 
     sanitized = sanitize(public_trace(value))
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
+    with _TRACE_WRITE_LOCK, path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(sanitized, ensure_ascii=False, default=str) + "\n")
         handle.flush()
 
@@ -139,6 +143,13 @@ class EvidenceSDK:
 @dataclass(slots=True)
 class EvaluationModelClient(AnthropicModelClient):
     summary_sdk_client: object | None = None
+    offline_window_tokens: int | None = None
+
+    def get_model_window(self, model: str) -> dict:
+        if self.offline_window_tokens:
+            return {"context_window_tokens": self.offline_window_tokens,
+                    "context_window_source": "offline_configuration"}
+        return AnthropicModelClient.get_model_window(self, model)
 
     def fork(self, **kwargs):
         client = AnthropicModelClient.fork(self, **kwargs)
@@ -176,6 +187,7 @@ def build_agent(profile: dict, workspace: Path, trial: Path, repository, emitter
     # instead of constructing an unrecorded SDK with an independent call counter.
     agent.client = EvaluationModelClient(api_key=env.api_key if profile["mode"] == "live" else None,
                                         sdk_client=recorder, summary_sdk_client=summary_recorder,
+                                        offline_window_tokens=env.context_config.context_window_tokens if profile["mode"] == "offline" else None,
                                         base_url=env.base_url, event_emitter=emitter, usage_tracker=agent.usage_tracker, stream=False)
     agent.context.summary_credentials_scope = hashlib.sha256(json.dumps([env.base_url, summary_key or env.api_key]).encode()).hexdigest()
     agent.allow_subagents = False

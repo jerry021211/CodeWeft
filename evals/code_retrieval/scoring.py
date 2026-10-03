@@ -25,10 +25,11 @@ def citation_documents(target: Path, docs):
     for doc in docs:
         path = doc['path']
         if path not in sources:
-            text = (target / path).read_text(encoding='utf-8')
+            from codeagent.code_intelligence.models import source_text
+            text = source_text((target / path).read_bytes(), path)
             starts = {node.lineno: min([node.lineno, *(d.lineno for d in node.decorator_list)])
                       for node in ast.walk(ast.parse(text))
-                      if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))}
+                      if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))} if Path(path).suffix in ('.py', '.pyi') else {}
             sources[path] = (text.splitlines(), starts)
         lines, starts = sources[path]
         start = starts.get(doc['start_line'], doc['start_line'])
@@ -68,6 +69,8 @@ def check_citation(item, docs):
     path = path.replace("\\", "/")
     candidates = [d for d in docs if d["path"] == path and d["symbol"] == symbol
                   and d["start_line"] <= line <= d["end_line"]]
+    if len(candidates) > 1 and item.get('signature'):
+        candidates = [d for d in candidates if d.get('signature') == item['signature']]
     if len(candidates) != 1:
         return None, [], "unknown_or_ambiguous_symbol"
     doc = candidates[0]
@@ -122,6 +125,8 @@ def grade_case(case, prediction, docs):
         "usage_complete": prediction.get("usage_complete", False),
         "usage": prediction.get("usage", {}), "tool_calls": prediction.get("tool_calls"),
         "model_calls": prediction.get("model_calls"),
+        'embedding_usage': prediction.get('embedding_usage'),
+        'cost_scope': 'chat_only_embedding_price_not_configured',
     }
     parts = price_usage(result["usage"]) if result["usage_complete"] else None
     result.update(cost=parts["total"] if parts else None, cost_components_cny=parts)

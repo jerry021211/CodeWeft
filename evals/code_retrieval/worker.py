@@ -113,7 +113,11 @@ def main():
         started = time.monotonic()
         result["setup_ms"] = round((started - setup_start) * 1000, 3)
         write_json(trial / "started.json", {"setup_ms": result["setup_ms"]})
-        outcome = agent.run(ANSWER_INSTRUCTION + spec["query"])
+        instruction = ANSWER_INSTRUCTION
+        if spec.get('corpus_scope', '').startswith('explicit language'):
+            instruction = instruction.replace('只查 codeagent/ 与 tests/ 的 Python 源码。',
+                '检查当前工作区的多语言源码与相关配置。重载方法需要保留完整签名以区分实体。')
+        outcome = agent.run(instruction + spec["query"])
         result.update(outcome="completed" if outcome.stop_reason == "end_turn" else "agent_failed",
                       answer=outcome.final_text, stop_reason=outcome.stop_reason)
     except Exception as exc:

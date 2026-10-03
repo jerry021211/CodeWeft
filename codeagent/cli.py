@@ -37,6 +37,7 @@ from codeagent.runtime.execution import is_execution_failure
 from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool
 from codeagent.tools.ask_user import terminal_ask_user
 from codeagent.tools.search_code import SearchCodeTool
+from codeagent.tools.workspace import WorkspaceGuard
 from codeagent.web.storage import SQLiteRepository
 
 
@@ -186,8 +187,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     tools = create_default_registry(
         web_search_config=env.web_search_config,
+        lsp_config=env.lsp_config,
+        workspace_guard=WorkspaceGuard(workspace),
         code_search_tool=SearchCodeTool(
             workspace, data_paths.code_index_dir(workspace), client=client, model=env.model_id,
+            embedding_config=env.embedding_config,
         ),
         ask_user_fn=terminal_ask_user,
         todo_store=todo_store,
@@ -342,6 +346,10 @@ def create_default_subagent_environment(
     )
     tools = create_default_registry(
         web_search_config=env.web_search_config,
+        lsp_config=env.lsp_config,
+        workspace_guard=WorkspaceGuard(workspace),
+        code_search_tool=SearchCodeTool(workspace, RuntimeDataPaths(env.data_dir).code_index_dir(workspace),
+                                        embedding_config=env.embedding_config),
         todo_store=todo_store,
         todo_log=print,
         skill_loader=skill_loader,

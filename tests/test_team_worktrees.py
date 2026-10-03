@@ -148,6 +148,67 @@ class TeamWorktreeTests(unittest.TestCase):
             command_id=f"confirm-{allow_dirty}",
         )
 
+    def test_intelligence_worktree_binding_edit_context_and_cancel(self) -> None:
+        from copy import deepcopy
+        import json
+        import sys
+        from unittest.mock import patch
+        from codeagent.config import EnvironmentConfig
+        from codeagent.context import ContextConfig
+        from codeagent.events import EventEmitter, ExecutionContext
+        from codeagent.lsp import LspConfig, ServerDefinition
+        from codeagent.memory import MemoryConfig
+        from codeagent.permissions import WaitingPermissionBroker
+        from codeagent.runtime import CancellationToken, CancelledError
+        from codeagent.tools.lsp import LspTool
+        from codeagent.tools.search_code import SearchCodeTool
+        from codeagent.web.factory import WebAgentFactory
+
+        self._confirm()
+        attempt = self._attempt("intelligence")
+        binding = self.manager.create_for_attempt(attempt)
+        attempt = self.repository.get_task_attempt(attempt.id)
+        token = CancellationToken()
+        fixture = Path(__file__).parent / 'fixtures' / 'lsp_server.py'
+        env = EnvironmentConfig(model_id='mock', data_dir=self.root / 'data', enable_skills=False,
+            context_config=ContextConfig(mode='off'), memory_config=MemoryConfig(enabled=False),
+            team_runtime_enabled=True, team_write_enabled=True,
+            lsp_config=LspConfig(servers=(ServerDefinition('mock', ('.py',), 'python',
+                (sys.executable, str(fixture), 'push')),), feedback_seconds=2))
+        class Client:
+            def __init__(inner):
+                inner.calls = []
+            def create_message(inner, **kwargs):
+                inner.calls.append(deepcopy(kwargs))
+                if len(inner.calls) == 1:
+                    return ModelResponse('tool_use', [{'type': 'tool_use', 'id': 'write', 'name': 'write_file',
+                        'input': {'file_path': 'allowed/branch.py', 'content': 'def branchUnique():\n    return "BROKEN"\n'}}])
+                return ModelResponse('end_turn', [{'type': 'text', 'text': 'done'}])
+        client = Client()
+        factory = WebAgentFactory(env, binding.path, self.repository, project_workspace=self.source)
+        self.addCleanup(factory.close)
+        with patch.object(EnvironmentConfig, 'create_anthropic_client', return_value=client):
+            agent = factory.create(event_emitter=EventEmitter(context=ExecutionContext(
+                conversation_id=self.team.conversation_id, run_id=self.team.root_run_id, agent_id=attempt.agent_id)),
+                cancellation=token, permission_broker=WaitingPermissionBroker(),
+                team_session=self.repository.get_agent_session(attempt.session_id),
+                team_attempt=attempt, worktree_manager=self.manager)
+        search = next(t for t in agent.tools.owners() if isinstance(t, SearchCodeTool))
+        lsp = next(t for t in agent.tools.owners() if isinstance(t, LspTool))
+        self.assertEqual(search.service.index.guard.root, Path(binding.path))
+        self.assertEqual(lsp.service.guard.root, Path(binding.path))
+        self.assertFalse(agent.tools.parallel_safe('search_code'))
+        agent.run_until_yield('write a Python fixture')
+        output = next(b for m in client.calls[1]['messages'] for b in m.get('content', [])
+                      if isinstance(b, dict) and b.get('type') == 'tool_result')
+        self.assertIn('simulated diagnostic', output['content'])
+        self.assertFalse((self.source / 'allowed/branch.py').exists())
+        self.assertEqual(json.loads(search.run('branchUnique'))['results'][0]['symbol'], 'branchUnique')
+        self.assertEqual(lsp.service.sessions, {})
+        token.cancel()
+        with self.assertRaises(CancelledError):
+            agent.tools.execute('search_code', {'query': 'branchUnique'})
+
     def test_model_timeout_keeps_worktree_frozen_until_validated_resume(self) -> None:
         attempt = self._attempt("model-timeout")
         self._confirm()

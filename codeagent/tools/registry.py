@@ -89,7 +89,28 @@ class ToolRegistry:
 
     def read_only_copy(self) -> ToolRegistry:
         """Only explicitly reentrant readers may be shared by an SDK child."""
-        return self.copy_without(name for name in self._tools if not self.parallel_safe(name))
+        return self.copy_without(name for name in self._tools if not self.parallel_safe(name)).fork_workspace_tools()
+
+    def owners(self):
+        return list({id(owner): owner for registered in self._tools.values()
+                     if (owner := getattr(registered.handler, '__self__', None)) is not None}.values())
+
+    def fork_workspace_tools(self):
+        """Clone workspace services, preserving ordinary registry wrapper semantics."""
+        registry = ToolRegistry(self._execution_wrapper)
+        for registered in self._tools.values():
+            owner = getattr(registered.handler, '__self__', None)
+            clone = getattr(owner, 'isolated_copy', None)
+            if callable(clone):
+                registry.register(clone())
+            else:
+                registry.register_handler(registered.definition, registered.handler, registered.input_state)
+        return registry
+
+    def close_workspace_tools(self):
+        for owner in self.owners():
+            if callable(getattr(owner, 'isolated_copy', None)) and callable(getattr(owner, 'close', None)):
+                owner.close()
 
     def execute(self, name: str, args: dict[str, Any] | None = None) -> ToolOutput:
         arguments = {} if args is None else args

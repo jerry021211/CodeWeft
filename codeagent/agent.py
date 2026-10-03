@@ -135,6 +135,8 @@ class Agent:
             self.context.config.summarization_api_key or getattr(self.client, "api_key", None),
         ], default=str).encode("utf-8")).hexdigest()
         self.hooks = self.hooks.copy()
+        from codeagent.hooks.code_intelligence import CodeIntelligenceFeedback
+        self.hooks.register("PostToolUse", CodeIntelligenceFeedback(lambda: self.tools), first=True)
         self.hooks.register("PreToolUse", self._discuss_guard, first=True)
         task_tools = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate"}
         if "todo_write" in self.tools and any(name in self.tools for name in task_tools):
@@ -190,6 +192,12 @@ class Agent:
             self.tools.bind_runtime(self._check_execution, self._loop_guard.budget.remaining_seconds)
         elif self.execution_activity is not None:
             self.set_execution_activity(self.execution_activity)
+        if self._loop_guard is None:
+            self.tools.bind_runtime(self._check_execution, lambda: 120.0)
+        for owner in self.tools.owners():
+            bind_agent = getattr(owner, 'bind_agent', None)
+            if callable(bind_agent):
+                bind_agent(self.client, self.config.model, self.event_emitter)
         if self.messages:
             self._request_reasons.append("checkpoint_restored" if self.context.state.prompt_snapshot else "legacy_checkpoint_rebuilt")
             self.history_observer.restore(
@@ -241,13 +249,17 @@ class Agent:
             if self._subagent_runtime is not None:
                 runtime, self._subagent_runtime = self._subagent_runtime, None
                 runtime.close()
+            self.tools.close_workspace_tools()
             if result is not None:
                 result.usage = self.usage_tracker.snapshot().delta(usage_before)
 
     def run_until_yield(self, prompt: str | None = None) -> AgentResult:
         """Run a Team Agent until completion or a requested safe-boundary yield."""
 
-        return self._guarded_run(prompt, allow_yield=True)
+        try:
+            return self._guarded_run(prompt, allow_yield=True)
+        finally:
+            self.tools.close_workspace_tools()
 
     def export_execution_state(self) -> dict[str, Any]:
         return self._loop_guard.snapshot() if self._loop_guard is not None else {}
@@ -837,7 +849,7 @@ class Agent:
                 # Record returned facts before a deadline check can end this operation.
                 self.context.record_tool_result(tool, output)
                 self.hooks.trigger("PostToolUse", tool, output)
-        result["content"] = str(output) + getattr(output, "guard_feedback", "")
+        result["content"] = getattr(output, "context_feedback", "") + str(output) + getattr(output, "guard_feedback", "")
         if status == "success":
             result.pop("is_error", None)
         else:
@@ -862,7 +874,7 @@ class Agent:
         if ran:
             self.context.record_tool_result(tool, output)
             self.hooks.trigger("PostToolUse", tool, output)
-        result["content"] += getattr(output, "guard_feedback", "")
+        result["content"] = getattr(output, "context_feedback", "") + result["content"] + getattr(output, "guard_feedback", "")
         self._emit_tool_outcome(tool, result, execution)
 
     def _execute_parallel(self, kind, indices, calls, results, executions):
@@ -974,7 +986,7 @@ class Agent:
                     output = returned[index]
                     self.context.record_tool_result(calls[index], output)
                     self.hooks.trigger("PostToolUse", calls[index], output)
-                    results[index]["content"] += getattr(output, "guard_feedback", "")
+                    results[index]["content"] = getattr(output, "context_feedback", "") + results[index]["content"] + getattr(output, "guard_feedback", "")
                 except BaseException as exc:
                     if error is None:
                         error = exc
@@ -1204,7 +1216,7 @@ class Agent:
                 tool_output_dir=self.context.config.tool_output_dir / "subagents" / identifier,
             )
             todo_store = TodoStore() if "todo_write" in self.tools else None
-            tools = self.tools.copy_without({"todo_write"})
+            tools = self.tools.copy_without({"todo_write"}).fork_workspace_tools()
             if todo_store is not None:
                 tools.register(TodoWriteTool(store=todo_store, on_change=self.subagent_log))
             # Built-in planning hooks retain counters and a store in closures.

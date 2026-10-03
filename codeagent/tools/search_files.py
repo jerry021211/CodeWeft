@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -70,15 +71,32 @@ class SearchFiles:
             self.notes.append(message)
 
 
-def search_files(root: Path, guard: WorkspaceGuard | None, *, include_ignored: bool = False) -> SearchFiles:
+def search_files(root: Path, guard: WorkspaceGuard | None, *, include_ignored: bool = False, check=lambda: None) -> SearchFiles:
     result = SearchFiles()
     candidates: list[Path] | None = None
     if not include_ignored:
         try:
-            completed = subprocess.run(
+            check()
+            process = subprocess.Popen(
                 ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
-                cwd=root, capture_output=True, timeout=15, check=False,
+                cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}),
             )
+            deadline = time.monotonic() + 15
+            try:
+                while True:
+                    check()
+                    try:
+                        stdout, stderr = process.communicate(timeout=.05)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if time.monotonic() >= deadline:
+                            raise
+                completed = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate()
             if completed.returncode == 0:
                 candidates = [root / os.fsdecode(name) for name in completed.stdout.split(b"\0") if name]
                 if completed.stderr:
@@ -95,6 +113,7 @@ def search_files(root: Path, guard: WorkspaceGuard | None, *, include_ignored: b
             result.warning(f"Unreadable directory: {error.filename}")
 
         for directory, dirs, files in os.walk(root, topdown=True, followlinks=False, onerror=onerror):
+            check()
             parent = Path(directory)
             kept = []
             for name in sorted(dirs):
@@ -112,6 +131,7 @@ def search_files(root: Path, guard: WorkspaceGuard | None, *, include_ignored: b
             candidates.extend(parent / name for name in files if name != ".git")
 
     for candidate in sorted(set(candidates), key=lambda p: (str(p).casefold(), str(p))):
+        check()
         if ".git" in candidate.relative_to(root).parts:
             continue
         if guard is not None and not guard.allows(candidate):

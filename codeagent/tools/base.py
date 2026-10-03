@@ -51,6 +51,7 @@ class ToolOutput(str):
         changed_files: tuple[str, ...] = (), process_id: int | None = None,
         process_running: bool = False, duration_seconds: float = 0.0,
         retryable: bool = False, retry_safe: bool = False,
+        context_feedback: str = "",
     ):
         if status not in {"success", "error", "blocked"}:
             raise ValueError(f"Invalid tool status: {status}")
@@ -68,6 +69,10 @@ class ToolOutput(str):
         result.duration_seconds = duration_seconds
         result.retryable = retryable
         result.retry_safe = retry_safe
+        result.context_feedback = context_feedback
+        # Built-in read_file attaches content identity evidence. It contains no
+        # body and grants no permission; missing metadata disables referencing.
+        result.file_read_snapshot = None
         return result
 
 

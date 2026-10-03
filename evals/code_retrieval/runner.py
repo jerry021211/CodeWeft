@@ -40,7 +40,15 @@ def usage_evidence(trial: Path, *, offline: bool):
     complete = complete and all(isinstance(r.get("usage"), dict) and all(
         type(r["usage"].get(k)) is int and r["usage"][k] >= 0 for k in TOKEN_FIELDS) for r in responses)
     events = records(trial / "events.jsonl")
+    embedding = [e.get('payload', {}).get('embedding_usage') for e in events if e.get('type') == 'code_search.completed']
+    embedding = [row for row in embedding if row is not None]
     return {"usage_complete": complete,
+            'embedding_usage': {'searches': len(embedding),
+                'requests': sum(row.get('requests', 0) for row in embedding),
+                'input_tokens': sum(row.get('input_tokens', 0) for row in embedding),
+                'usage_complete': all(row.get('usage_complete', False) for row in embedding),
+                'cache_hits': sum(row.get('cache_hits', 0) for row in embedding),
+                'embedded': sum(row.get('embedded', 0) for row in embedding)},
             "usage": {k: sum(r["usage"][k] for r in responses) if complete else None for k in TOKEN_FIELDS},
             "model_calls": len(requests), "provider_models": sorted({r["model"] for r in responses if r.get("model")}),
             "tool_calls": sum(e.get("type") == "tool.started" for e in events)}
@@ -52,14 +60,19 @@ def target_hashes(target):
 
 
 def environment(source: Path):
-    # Read only connection settings; never serialize credentials or load runtime flags.
+    # Read connection/explicit embedding settings; never serialize credentials
+    # or inherit unrelated Agent runtime flags from .env.
     env = dict(os.environ)
     source = source.resolve()
     for directory in (source, *source.parents):
         if (directory / ".env").is_file():
             from dotenv import dotenv_values
             values = dotenv_values(directory / ".env")
-            for key in ("API_KEY", "ANTHROPIC_API_KEY", "BASE_URL", "ANTHROPIC_BASE_URL", "MODEL_ID"):
+            for key in ("API_KEY", "ANTHROPIC_API_KEY", "BASE_URL", "ANTHROPIC_BASE_URL", "MODEL_ID",
+                        "CODEAGENT_EMBEDDING_ENABLED", "CODEAGENT_EMBEDDING_BASE_URL",
+                        "CODEAGENT_EMBEDDING_API_KEY", "CODEAGENT_EMBEDDING_MODEL",
+                        "CODEAGENT_EMBEDDING_DIMENSIONS", "CODEAGENT_EMBEDDING_TIMEOUT",
+                        "CODEAGENT_EMBEDDING_MAX_CHUNKS", "CODEAGENT_EMBEDDING_BATCH_SIZE"):
                 # Match the application's load_dotenv(override=False), then
                 # resolve the same canonical-name-first aliases as from_env().
                 if key not in env and values.get(key) is not None:
@@ -129,7 +142,8 @@ def run(bundle: Path, output: Path, *, source: Path, variant="baseline", mode="o
         trial = output / "trials" / f"{q['_id']}-r{repeat}"
         trial.mkdir(parents=True)
         write_json(trial / "trial.json", {"query": q["text"], "workspace": str(target), "profile": profile,
-                                           "mode": mode, "tool_factory": tool_factory})
+                                           "mode": mode, "tool_factory": tool_factory,
+                                           "corpus_scope": manifest.get('corpus_scope', '')})
         started, observed_query_start, timed_out = time.monotonic(), None, False
         with (trial / "stdout.log").open("w", encoding="utf-8") as stdout, (trial / "stderr.log").open("w", encoding="utf-8") as stderr:
             child = subprocess.Popen([sys.executable, "-P", "-B", "-m", "evals.code_retrieval.worker", "--trial", str(trial)],

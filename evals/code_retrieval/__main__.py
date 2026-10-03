@@ -15,6 +15,7 @@ def main():
     freeze = commands.add_parser("prepare", help="冻结代码、题目、答案和当前评测程序")
     freeze.add_argument("--source", type=Path, default=Path.cwd())
     freeze.add_argument("--output", type=Path, required=True)
+    freeze.add_argument('--annotations', type=Path, help='多语言人工标注 JSON；不传时保留原 Python 题库')
     execute = commands.add_parser("run", help="每题新会话，自动生成报告；默认仅离线检查")
     execute.add_argument("--bundle", type=Path, required=True)
     execute.add_argument("--output", type=Path, required=True)
@@ -40,7 +41,11 @@ def main():
         if args.command == "validate":
             print(json.dumps(validate_source(args.source.resolve()), ensure_ascii=False, indent=2))
         elif args.command == "prepare":
-            print(prepare(args.source, args.output))
+            if args.annotations:
+                from .polyglot import prepare_polyglot
+                print(prepare_polyglot(args.source, args.output, args.annotations))
+            else:
+                print(prepare(args.source, args.output))
         elif args.command == "run":
             from .runner import run
             print(run(args.bundle.resolve(), args.output, source=args.source.resolve(), variant=args.variant,
