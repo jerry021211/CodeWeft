@@ -58,7 +58,7 @@ class SummaryPromptTests(unittest.TestCase):
         self.assertEqual(request["system"], SUMMARIZATION_SYSTEM_PROMPT)
         self.assertEqual(request["model"], "dedicated-summary")
         self.assertEqual(request["tools"], [])
-        self.assertNotIn("max_tokens", request)
+        self.assertEqual(request["max_tokens"], self.manager.config.summary_max_tokens)
         self.assertEqual([m["role"] for m in request["messages"]], ["user"])
         text = request["messages"][0]["content"]
         self.assertEqual(text.count(SUMMARY_FORMAT), 1)

@@ -30,6 +30,8 @@ class LoadToolOutputTool:
                 "char_offset 从0开始，定位首条选中行的Unicode字符；char_limit限制本次原文字符总量。"
                 "长行或结果未读完时，按返回的 next_offset/next_char_offset 继续。"
                 "file_path 取自实际归档路径；返回只是只读视图，不可作为写入正文。"
+                "已知关键词时优先传 query 做区分大小写的字面搜索（非正则），避免逐页读完整日志。"
+                "搜索返回匹配行和字符位置；search_complete=false 时按返回游标继续，不代表没有更多匹配。"
             ),
             input_schema={
                 "type": "object",
@@ -39,6 +41,9 @@ class LoadToolOutputTool:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
                     "char_offset": {"type": "integer", "minimum": 0, "maximum": 1_000_000_000},
                     "char_limit": {"type": "integer", "minimum": 1, "maximum": _TOOL_OUTPUT_BODY_MAX_CHARS},
+                    "query": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "max_matches": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "scan_limit_chars": {"type": "integer", "minimum": 1024, "maximum": 4_000_000},
                 },
                 "required": ["file_path"],
             },
@@ -49,6 +54,7 @@ class LoadToolOutputTool:
     def run(
         self, file_path: str, offset: int = 1, limit: int = 2000,
         char_offset: int = 0, char_limit: int = _TOOL_OUTPUT_BODY_MAX_CHARS,
+        query: str | None = None, max_matches: int = 10, scan_limit_chars: int = 1_000_000,
     ) -> str:
         try:
             for name, value, minimum, maximum in (
@@ -56,10 +62,18 @@ class LoadToolOutputTool:
                 ("limit", limit, 1, 5000),
                 ("char_offset", char_offset, 0, 1_000_000_000),
                 ("char_limit", char_limit, 1, _TOOL_OUTPUT_BODY_MAX_CHARS),
+                ("max_matches", max_matches, 1, 20),
+                ("scan_limit_chars", scan_limit_chars, 1024, 4_000_000),
             ):
                 if type(value) is not int or not minimum <= value <= maximum:
                     raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
             path = _archive_path(self.root, file_path)
+            if query is not None:
+                if not isinstance(query, str) or not 1 <= len(query) <= 256 or "\n" in query or "\r" in query:
+                    raise ValueError("query must be 1..256 characters on a single line (literal, case-sensitive)")
+                return _search_output(path, query, offset=offset, char_offset=char_offset,
+                                      max_matches=max_matches, scan_limit=scan_limit_chars,
+                                      result_limit=char_limit)
             sections: list[str] = []
             response_chars = 0
             body_remaining = char_limit
@@ -95,6 +109,70 @@ class LoadToolOutputTool:
             return "\n\n".join(sections) or ("(no lines at this offset)" if offset > 1 else "(empty output)")
         except (OSError, RuntimeError, ValueError) as exc:
             return f"Error: Runtime output path or range is not allowed: {exc}"[:_TOOL_OUTPUT_MAX_CHARS]
+
+
+def _search_output(path: Path, query: str, *, offset: int, char_offset: int,
+                   max_matches: int, scan_limit: int, result_limit: int) -> str:
+    """Stream literal matches with bounded memory, including within huge lines.
+
+    Cursors address original Unicode text, just like the existing reader. Keep
+    overlap at chunk/scan boundaries so a match straddling either is not lost.
+    Never interpret archive contents as tool instructions or executable regex.
+    """
+    sections: list[str] = []
+    scanned = 0
+    line, position = offset, 0
+    carry = ""
+    result_chars = 0
+    next_match = char_offset
+
+    def finish(complete: bool, next_line: int, next_char: int) -> str:
+        footer = (f"matches={len(sections)} scanned_chars={scanned} "
+                  f"search_complete={str(complete).lower()} more_output={str(not complete).lower()}")
+        if not complete:
+            footer += f" next_offset={next_line} next_char_offset={next_char}"
+        return "\n\n".join([*sections, footer])
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for _ in range(offset - 1):
+            if _history_record(handle, offset=0, limit=0) is None:
+                return finish(True, offset, 0)
+        # Skip within the starting line without allocating it in its entirety.
+        while position < char_offset:
+            chunk = handle.readline(min(8192, char_offset - position))
+            if not chunk:
+                return finish(True, line, position)
+            position += len(chunk)
+            if chunk.endswith("\n"):
+                line, position, next_match = line + 1, 0, 0
+                break
+        while scanned < scan_limit:
+            chunk = handle.readline(min(8192, scan_limit - scanned))
+            if not chunk:
+                return finish(True, line, position)
+            scanned += len(chunk)
+            ended = chunk.endswith("\n")
+            text = carry + (chunk[:-1] if ended else chunk)
+            base = position - len(carry)
+            index = text.find(query, max(0, next_match - base))
+            while index >= 0:
+                match_position = base + index
+                excerpt = text[max(0, index - 120):index + len(query) + 120]
+                if len(sections) >= max_matches or result_chars >= result_limit:
+                    return finish(False, line, match_position)
+                # Always make progress even with a one-character result budget.
+                excerpt = excerpt[:result_limit - result_chars]
+                sections.append(f"line={line} char_offset={match_position}\n{line}\t{excerpt}")
+                result_chars += len(excerpt)
+                next_match = match_position + 1  # Include overlapping literal matches.
+                index = text.find(query, index + 1)
+            position += len(chunk)
+            if ended:
+                line, position, next_match, carry = line + 1, 0, 0, ""
+            else:
+                carry = text[-(len(query) + 119):]
+        # Resume before a possible incomplete match, but after emitted matches.
+        return finish(False, line, max(next_match, position - len(query) + 1, 0))
 
 
 _HISTORY_OUTPUT_MAX_CHARS = 16_000

@@ -1,7 +1,7 @@
 """Non-mutating size inspection of a complete Anthropic-style request.
 
-Character limits are exact for the stable JSON representation used here, not
-for transport bytes. Token counts are deliberately conservative estimates;
+Character limits apply to stable JSON excluding inline binary media data.
+The full transport character count remains observable. Token counts are estimates;
 provider tokenizers and image/document processing can differ. A passing check
 does not guarantee that the provider accepts the request.
 """
@@ -25,11 +25,16 @@ class RequestBudget:
     output_reserve_tokens: int
     estimated_total_tokens: int
     multimodal_blocks: int
+    media_payload_chars: int = 0
     estimation_method: str = "utf8_bytes_div_2_plus_media_reserve"
     token_count_is_estimate: bool = True
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "text_request_chars": self.text_request_chars}
+
+    @property
+    def text_request_chars(self) -> int:
+        return self.request_chars - self.media_payload_chars
 
 
 class RequestBudgetError(RuntimeError):
@@ -40,7 +45,7 @@ class RequestBudgetError(RuntimeError):
         self.reason = reason
         self.limit = limit
         if reason == "max_request_chars":
-            detail = f"serialized request characters {budget.request_chars} > {limit}"
+            detail = f"serialized request characters {budget.text_request_chars} > {limit} (excluding binary media data)"
         else:
             detail = (
                 f"estimated prompt tokens {budget.estimated_prompt_tokens} + "
@@ -135,7 +140,11 @@ def inspect_request(
     # it never writes back to caller-owned message/tool structures.
     normalized = json.loads(serialized)
     media_count = _media_count(normalized["messages"]) + _media_count(normalized["system"])
-    estimated_prompt = (len(serialized.encode("utf-8")) + 1) // 2
+    # Base64 encodes transport bytes, not language tokens. Keep exact transport
+    # size observable, but apply text budgets to the non-binary representation.
+    text_serialized = json.dumps(_without_media_data(normalized), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    media_payload_chars = len(serialized) - len(text_serialized)
+    estimated_prompt = (len(text_serialized.encode("utf-8")) + 1) // 2
     estimated_prompt += media_count * _MEDIA_RESERVE_TOKENS
     return RequestBudget(
         request_chars=len(serialized),
@@ -143,6 +152,7 @@ def inspect_request(
         output_reserve_tokens=max_tokens or 0,
         estimated_total_tokens=estimated_prompt + (max_tokens or 0),
         multimodal_blocks=media_count,
+        media_payload_chars=media_payload_chars,
     )
 
 
@@ -185,7 +195,7 @@ def validate_budget(
             _nonnegative_integer(name, value)
         elif name == "safety_margin_tokens":
             raise ValueError("safety_margin_tokens must be a nonnegative integer")
-    if max_request_chars and budget.request_chars > max_request_chars:
+    if max_request_chars and budget.text_request_chars > max_request_chars:
         raise RequestBudgetError(budget, reason="max_request_chars", limit=max_request_chars)
     if context_window_tokens and budget.estimated_total_tokens + safety_margin_tokens > context_window_tokens:
         raise RequestBudgetError(
@@ -197,6 +207,17 @@ def validate_budget(
 def _nonnegative_integer(name: str, value: Any) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a nonnegative integer")
+
+
+def _without_media_data(value: Any, in_media: bool = False) -> Any:
+    if isinstance(value, dict):
+        kind = value.get("type")
+        in_media = in_media or (isinstance(kind, str) and kind in _MEDIA_TYPES)
+        return {key: "" if in_media and key == "data" and value.get("type") == "base64" else _without_media_data(item, in_media)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_media_data(item, in_media) for item in value]
+    return value
 
 
 def _json_value(value: Any) -> Any:

@@ -128,7 +128,7 @@ Team 成员继承启动任务的选择。摘要、记忆和搜索改写等辅助
 MODEL_ID=claude-3-5-sonnet-latest
 API_KEY=your_api_key_here
 BASE_URL=
-MAX_TOKENS=8000
+MAX_TOKENS=32000
 MAX_ITERATIONS=50
 STREAMING=false
 CODEAGENT_PLANNING_MODE=auto
@@ -615,8 +615,11 @@ python -m codeagent --no-stream "按照我之前记录过的项目讲解偏好�
 
 默认规则是“够用就保留，接近上限再整理”：
 
-- 完整请求超过 300k 字符，或本次估算输入加输出预留达到已配置窗口的 80%，
-  才尝试清理旧的大工具内容；清理后仍有压力才调用摘要模型。
+- 自动压缩只由模型 Token 窗口触发：普通策略在本次估算输入加输出预留达到窗口的 80% 时，
+  尝试清理旧的大工具内容；缓存友好策略按扣除输出预留后的输入窗口的 80% 触发。
+  清理后仍有压力才调用摘要模型；窗口未知时不使用字符数兜底。
+- 字符数不再触发自动压缩或再次清理，也不再限制完整请求容量，
+  工具输出归档和摘要字符验收继续保留。手动压缩和提供方超窗恢复不受此项调整影响。
 - 消息数、执行轮数不再独立触发摘要；上一轮很大也不会让已经缩小的当前请求反复压缩。
 - 摘要只折叠合法的旧区间，保留当前用户原文、近期至少 2 个执行轮；跨回合至少留 12 条消息。
   候选摘要须让完整请求至少省下 256 字符及约 5%，估算输入 token 也要下降，才归档并提交。
@@ -658,7 +661,7 @@ SUMMARIZATION_MODEL_ID=your-summary-model
 SUMMARIZATION_API_KEY=your-summary-api-key  # 留空时与主模型共用 API Key
 CONTEXT_TOOL_RESULT_BUDGET_CHARS=200000
 CONTEXT_SINGLE_TOOL_OUTPUT_MAX_CHARS=80000
-CONTEXT_COMPACT_THRESHOLD_CHARS=300000
+# CONTEXT_COMPACT_THRESHOLD_CHARS 为兼容旧配置保留，不再触发自动压缩
 CONTEXT_SUMMARY_MAX_CHARS=4000              # 字符数，不是 token 数；超长只重压缩一次
 CONTEXT_TRANSCRIPT_DIR=.transcripts              # 旧目录导入位置
 CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results  # 旧目录导入位置
@@ -666,11 +669,11 @@ CONTEXT_REACTIVE_RETRIES=1
 CONTEXT_RECENCY_MESSAGES=12
 CONTEXT_RECENCY_ROUNDS=2
 CONTEXT_MAX_FOLD_ROUNDS=12
-CONTEXT_MAX_REQUEST_CHARS=600000
+# CONTEXT_MAX_REQUEST_CHARS 已停用；请求容量仅按模型 Token 窗口检查
 CONTEXT_SUMMARY_INPUT_MAX_CHARS=120000
 CONTEXT_WINDOW_TOKENS=0                     # 未知窗口；不猜厂商值
 CONTEXT_MODEL_WINDOWS_JSON={}                # 按实际模型名覆盖窗口，包含 fallback
-CONTEXT_NEAR_CONTEXT_RATIO=0.8
+CONTEXT_NEAR_CONTEXT_RATIO=0.8              # 普通策略仅按模型 Token 窗口触发；窗口未知不自动压缩
 CONTEXT_SUMMARY_WINDOW_TOKENS=0
 CONTEXT_SUMMARY_TIMEOUT_SECONDS=45            # SDK I/O timeout，非严格总期限
 CONTEXT_FAILURE_COOLDOWN_SECONDS=90

@@ -21,7 +21,7 @@ class CompactionPreflightTests(unittest.TestCase):
 
     def manager(self, **options):
         manager = ContextManager(config=ContextConfig(**{
-            "summarization_model": "summary", "compact_threshold_chars": 40000,
+            "summarization_model": "summary", "context_window_tokens": 1_000_000, "near_context_ratio": 0.025,
             "transcript_dir": self.root / "archive", "tool_output_dir": self.root / "outputs",
             **options,
         }))
@@ -70,7 +70,7 @@ class CompactionPreflightTests(unittest.TestCase):
         self.assertTrue(Path(manager.state.summary_transcript).is_file())
 
     def test_preflight_uses_cleaned_view_and_keeps_pairs(self):
-        manager = self.manager(compact_threshold_chars=1, investigation_keep_rounds=0)
+        manager = self.manager(near_context_ratio=0.001, investigation_keep_rounds=0)
         history = rounds(5, name="grep", size=10000)
         history[0]["content"] = "active requirement " * 3000
         original, client = deepcopy(history), SummaryClient()
@@ -82,14 +82,14 @@ class CompactionPreflightTests(unittest.TestCase):
         validate_tool_history(projected)
 
     def test_skipping_model_does_not_bypass_main_hard_limit(self):
-        manager, client = self.manager(max_request_chars=50000), SummaryClient()
+        manager, client = self.manager(context_window_tokens=50000), SummaryClient()
         with self.assertRaises(RequestBudgetError):
             manager.prepare_before_model_call(self.protected_history(), client=client)
         self.assertEqual(client.calls, [])
         self.assertEqual(manager.state.summary_retry_after_epoch, 0)
 
     def test_optimistic_bound_still_requires_real_savings_check(self):
-        manager = self.manager(compact_threshold_chars=1, summary_max_chars=12000)
+        manager = self.manager(near_context_ratio=0.001, summary_max_chars=12000)
         history, client = rounds(size=20), SummaryClient("verbose summary " * 600)
         projected = manager.prepare_before_model_call(history, client=client)
         self.assertEqual(len(client.calls), 1)

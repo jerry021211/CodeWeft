@@ -67,7 +67,7 @@ class EnvironmentConfig:
     model_id: str
     api_key: str | None = None
     base_url: str | None = None
-    max_tokens: int = 8000
+    max_tokens: int = 32_000
     reasoning_effort: str = "default"
     max_iterations: int = 50
     stream: bool = False
@@ -122,7 +122,7 @@ class EnvironmentConfig:
             ),
             api_key=_first_optional_env("API_KEY", "ANTHROPIC_API_KEY"),
             base_url=_first_optional_env("BASE_URL", "ANTHROPIC_BASE_URL"),
-            max_tokens=_int_env("MAX_TOKENS", 8000),
+            max_tokens=_int_env("MAX_TOKENS", 32_000),
             reasoning_effort=_optional_env("REASONING_EFFORT") or "default",
             max_iterations=_int_env("MAX_ITERATIONS", 50),
             stream=_bool_env("STREAMING", False),
@@ -142,6 +142,9 @@ class EnvironmentConfig:
                     "CONTEXT_COMPACT_THRESHOLD_CHARS", 300_000
                 ),
                 summary_max_chars=_int_env("CONTEXT_SUMMARY_MAX_CHARS", 4_000),
+                summary_max_tokens=_int_env("CONTEXT_SUMMARY_MAX_TOKENS", 8_192),
+                command_output_max_chars=_int_env("CONTEXT_COMMAND_OUTPUT_MAX_CHARS", 12_000),
+                read_reference_enabled=_bool_env("CONTEXT_READ_REFERENCE_ENABLED", True),
                 transcript_dir=Path(
                     os.getenv("CONTEXT_TRANSCRIPT_DIR", ".transcripts")
                 ),
@@ -160,7 +163,6 @@ class EnvironmentConfig:
                 max_fold_messages=_int_env("CONTEXT_MAX_FOLD_MESSAGES", 200),
                 max_fold_rounds=_int_env("CONTEXT_MAX_FOLD_ROUNDS", 12),
                 summary_input_max_chars=_int_env("CONTEXT_SUMMARY_INPUT_MAX_CHARS", 120_000),
-                max_request_chars=_int_env("CONTEXT_MAX_REQUEST_CHARS", 600_000),
                 context_window_tokens=_int_env("CONTEXT_WINDOW_TOKENS", 0),
                 summary_context_window_tokens=_int_env("CONTEXT_SUMMARY_WINDOW_TOKENS", 0),
                 failure_cooldown_seconds=_float_env("CONTEXT_FAILURE_COOLDOWN_SECONDS", 90.0),

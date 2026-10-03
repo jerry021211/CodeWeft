@@ -248,7 +248,7 @@ class PrefixCacheTests(unittest.TestCase):
             self.send(agent)
             before = deepcopy(agent.messages)
             agent.messages += rounds(8, start=1, size=3000)[1:]
-            config.compact_threshold_chars = 10_000
+            config.near_context_ratio = 0.01
             config.cache_policy = "legacy"
             self.send(agent)
             self.assertGreater(agent.context.state.summary_revision, 0)
@@ -268,7 +268,7 @@ class PrefixCacheTests(unittest.TestCase):
         self.send(agent)
         before = deepcopy(agent.messages)
         agent.messages += rounds(8, start=1, size=3000)[1:]
-        config.compact_threshold_chars = 10_000
+        config.near_context_ratio = 0.01
         config.cache_policy = "legacy"
         self.send(agent)
         self.assertGreater(agent.context.state.summary_revision, 0)
@@ -318,7 +318,7 @@ class StableCleanupTests(unittest.TestCase):
     def manager(self, **options):
         return ContextManager(config=ContextConfig(**{
             "mode": "off", "cache_policy": "cache_friendly", "max_request_chars": 50_000,
-            "context_window_tokens": 1_000_000, "compact_threshold_chars": 1000,
+            "context_window_tokens": 26_000, "compact_threshold_chars": 1000,
             "investigation_keep_rounds": 1, "tool_clear_min_chars": 2000, **options}))
 
     def test_below_soft_limit_retains_history_despite_legacy_character_trigger(self):
@@ -354,21 +354,24 @@ class StableCleanupTests(unittest.TestCase):
         manager.prepare_before_model_call(history, event_emitter=emitter)
         self.assertEqual([e.payload["cleanup_boundary"] for e in events if e.type == "context.request_projected"], [True, False])
         history += rounds(1, start=9, name="grep", size=6000)[1:]
-        with self.assertRaises(RequestBudgetError):
-            manager.prepare_before_model_call(history, event_emitter=emitter)
+        manager.prepare_before_model_call(history, event_emitter=emitter)
+        self.assertTrue(events[-1].payload["cleanup_boundary"])
+        self.assertIsNone(events[-1].payload["max_request_chars"])
 
-    def test_unknown_window_and_unrecognized_provider_keep_legacy_policy(self):
+    def test_unknown_window_and_large_window_never_fall_back_to_characters(self):
         for window, capabilities in ((0, {"cheap_prefix_reads": True}), (1_000_000, {})):
             manager = self.manager(cache_policy="auto", context_window_tokens=window)
-            sent = manager.prepare_before_model_call(rounds(4, name="grep", size=5000), cache_capabilities=capabilities)
-            self.assertIn(TOOL_VIEW_MARKER, str(sent))
+            history = rounds(4, name="grep", size=5000)
+            sent = manager.prepare_before_model_call(history, cache_capabilities=capabilities)
+            self.assertEqual(sent, history)
+            self.assertEqual(manager.state.request_view, {})
 
-    def test_hard_output_reserve_and_body_limits_cannot_be_bypassed(self):
+    def test_hard_output_reserve_and_token_window_cannot_be_bypassed(self):
         manager = self.manager(context_window_tokens=10_000)
         with self.assertRaises(RequestBudgetError):
             manager.prepare_before_model_call(rounds(1, size=100), max_tokens=10_000)
         with self.assertRaises(RequestBudgetError):
-            self.manager().prepare_before_model_call([{"role": "user", "content": "x" * 51_000}])
+            self.manager(context_window_tokens=25_000).prepare_before_model_call([{"role": "user", "content": "x" * 51_000}])
 
     def test_projection_config_and_source_changes_invalidate_snapshot(self):
         manager = self.manager()

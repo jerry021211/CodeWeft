@@ -19,8 +19,16 @@ class ContextConfig:
     summarization_api_key: str | None = None
     tool_result_budget_chars: int = 200_000
     single_tool_output_max_chars: int = 80_000
+    # Legacy configuration only; automatic compaction uses the model token window.
     compact_threshold_chars: int = 300_000
     summary_max_chars: int = 4_000
+    # Independent from the final character limit; includes reasoning where the
+    # provider counts it against completion tokens.
+    summary_max_tokens: int = 8_192
+    # Command output can be searched in the private archive. File reads and
+    # unknown tools retain the existing single-result budget. Zero opts out.
+    command_output_max_chars: int = 12_000
+    read_reference_enabled: bool = True
     transcript_dir: Path = Path(".transcripts")
     tool_output_dir: Path = Path(".task_outputs/tool-results")
     reactive_retries: int = 1
@@ -34,7 +42,8 @@ class ContextConfig:
     max_fold_messages: int = 200
     max_fold_rounds: int = 12
     summary_input_max_chars: int = 120_000
-    max_request_chars: int = 600_000
+    # Legacy SDK field, ignored: request admission uses the model token window.
+    max_request_chars: int = 0
     context_window_tokens: int = 0
     summary_context_window_tokens: int = 0
     failure_cooldown_seconds: float = 90.0
@@ -54,6 +63,8 @@ class ContextConfig:
     cache_boundary_growth_ratio: float = 0.1
 
     def __post_init__(self) -> None:
+        if type(self.read_reference_enabled) is not bool:
+            raise ValueError("read_reference_enabled must be a boolean")
         if self.cache_policy not in {"auto", "legacy", "cache_friendly"}:
             raise ValueError("cache_policy must be auto, legacy, or cache_friendly")
         for name in ("cache_soft_ratio", "cache_boundary_growth_ratio"):
@@ -64,15 +75,15 @@ class ContextConfig:
             raise ValueError("CONTEXT_COMPACT_MODE must be 'model' or 'off'")
         for name in (
             "tool_result_budget_chars", "single_tool_output_max_chars", "compact_threshold_chars",
-            "summary_max_chars", "recency_messages", "recency_rounds", "min_fold_messages",
+            "summary_max_chars", "summary_max_tokens", "recency_messages", "recency_rounds", "min_fold_messages",
             "message_trigger_min_fold", "round_trigger_min_fold", "max_fold_messages", "max_fold_rounds",
-            "summary_input_max_chars", "max_request_chars", "tool_clear_min_chars", "write_clear_min_chars",
+            "summary_input_max_chars", "tool_clear_min_chars", "write_clear_min_chars",
             "summary_text_preview_chars", "summary_argument_preview_chars",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("reactive_retries", "persisted_preview_chars", "context_window_tokens",
+        for name in ("max_request_chars", "reactive_retries", "persisted_preview_chars", "command_output_max_chars", "context_window_tokens",
                      "summary_context_window_tokens", "investigation_keep_rounds",
                      "command_keep_rounds", "write_keep_rounds"):
             value = getattr(self, name)
@@ -103,13 +114,15 @@ class RuntimeState:
     user_goal: str = ""
     history_generation: int = 0
     tool_schema_hash: str = ""
-    last_prompt_mode: str | None = None
+    last_prompt_mode: str | None = None  # Legacy checkpoints only; cleared after permission migration.
     # Client snapshots only; never imply that a provider still has a cache entry.
     prompt_snapshot: dict[str, Any] = field(default_factory=dict)
     prompt_revision: int = 0
     request_baselines: dict[str, Any] = field(default_factory=dict)
     runtime_reminders: dict[str, Any] = field(default_factory=dict)
     request_view: dict[str, Any] = field(default_factory=dict)
+    # Session-local read receipts, never a promise of provider-side caching.
+    read_references: dict[str, Any] = field(default_factory=dict)
     # These fields are committed with canonical messages in the existing checkpoint.
     summary_text: str = ""
     compacted_message_count: int = 0
@@ -120,6 +133,7 @@ class RuntimeState:
     summary_source_hash: str = ""
     summary_retry_after_epoch: float = 0.0
     summary_failure_scope: str = ""
+    summary_recovery_attempted: bool = False
     current_turn_start: int = -1
     latest_request_prompt_tokens: int = 0
     peak_request_prompt_tokens: int = 0
@@ -209,7 +223,7 @@ class RuntimeState:
     def to_summary_source(self) -> str:
         data = asdict(self)
         # Request implementation snapshots are not task evidence or summary input.
-        for key in ("prompt_snapshot", "request_baselines", "runtime_reminders", "request_view"):
+        for key in ("prompt_snapshot", "request_baselines", "runtime_reminders", "request_view", "read_references"):
             data.pop(key, None)
         return json.dumps(data, ensure_ascii=False, indent=2, default=str)
 

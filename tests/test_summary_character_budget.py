@@ -47,7 +47,7 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         client = ScriptedClient(" \n" + expected + "\n ")
         self.assertEqual(self.manager._model_summary([], client=client), expected)
         self.assertEqual(len(client.calls), 1)
-        self.assertNotIn("max_tokens", client.calls[0])
+        self.assertEqual(client.calls[0]["max_tokens"], self.manager.config.summary_max_tokens)
         self.assertEqual(client.calls[0]["tools"], [])
         self.assertIn("最多 4000 字符", client.calls[0]["messages"][0]["content"])
         self.assertIn("不是 token 数", client.calls[0]["messages"][0]["content"])
@@ -61,7 +61,7 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         self.assertIn("原始证据", client.calls[1]["messages"][0]["content"])
         self.assertEqual(client.calls[1]["messages"][1], {"role": "assistant", "content": "长" * 4001})
         self.assertIn("4001 字符", client.calls[1]["messages"][-1]["content"])
-        self.assertTrue(all("max_tokens" not in call for call in client.calls))
+        self.assertTrue(all(call["max_tokens"] == self.manager.config.summary_max_tokens for call in client.calls))
 
     def test_custom_character_budget_drives_prompt_and_both_validations(self):
         self.manager.config.summary_max_chars = 30
@@ -141,16 +141,17 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         self.assertIn("首次摘要", self.manager._summary_params([])["messages"][0]["content"])
         self.assertNotIn("# 本批涉及的文件", self.manager._summary_params([])["messages"][0]["content"])
 
-    def test_budget_without_token_cap_does_not_reserve_characters_as_tokens(self):
+    def test_budget_reserves_completion_tokens_separately_from_characters(self):
         request = self.manager._summary_params([])
         budget = inspect_request(**request)
-        self.assertEqual(budget.output_reserve_tokens, 0)
-        self.assertEqual(budget.estimated_total_tokens, budget.estimated_prompt_tokens)
+        self.assertEqual(budget.output_reserve_tokens, self.manager.config.summary_max_tokens)
+        self.assertEqual(budget.estimated_total_tokens,
+                         budget.estimated_prompt_tokens + self.manager.config.summary_max_tokens)
         client = ScriptedClient("ok")
         BoundModelClient(client, max_request_chars=10000).create_message(**request)
-        self.assertNotIn("max_tokens", client.calls[0])
+        self.assertEqual(client.calls[0]["max_tokens"], self.manager.config.summary_max_tokens)
 
-    def test_actual_sdk_transport_omits_summary_cap_and_preserves_main_cap(self):
+    def test_actual_sdk_transport_sends_separate_summary_and_main_caps(self):
         requests = []
 
         def handle(request):
@@ -166,7 +167,7 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
             client = AnthropicModelClient(sdk_client=sdk, request_timeout=45)
             self.assertEqual(self.manager._model_summary([], client=client), "摘要")
             client.create_message(model="main", system="", messages=[{"role": "user", "content": "hi"}], tools=[], max_tokens=8000)
-        self.assertNotIn("max_tokens", requests[0])
+        self.assertEqual(requests[0]["max_tokens"], self.manager.config.summary_max_tokens)
         self.assertEqual(requests[1]["max_tokens"], 8000)
 
 

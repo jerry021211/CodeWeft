@@ -88,7 +88,7 @@ class ContextRuntimeTests(unittest.TestCase):
 
     def manager(self, **settings):
         config = ContextConfig(**{
-            "compact_threshold_chars": 1000, "summarization_model": "summary", "transcript_dir": self.root / "transcripts",
+            "context_window_tokens": 1_000_000, "near_context_ratio": 0.0005, "summarization_model": "summary", "transcript_dir": self.root / "transcripts",
             "tool_output_dir": self.root / "outputs", **settings,
         })
         return ContextManager(config=config)
@@ -288,7 +288,7 @@ class ContextRuntimeTests(unittest.TestCase):
 
     def test_oversized_system_never_reaches_main_provider(self):
         client = ScriptedContextClient([_text()])
-        agent = self.agent(client, manager=self.manager(max_request_chars=10000))
+        agent = self.agent(client, manager=self.manager(context_window_tokens=10000))
         assembly = PromptAssemblyResult(system_prompt="system " * 3000, trace=[], prompt_hash="test")
         with patch.object(Agent, "_assemble_prompt", return_value=assembly):
             result = agent.run("tiny user request")
@@ -300,7 +300,7 @@ class ContextRuntimeTests(unittest.TestCase):
         tools = ToolRegistry()
         tools.register_handler(ToolDefinition("large", "description " * 3000, {"type": "object"}), lambda: "ok")
         client = ScriptedContextClient([_text()])
-        agent = self.agent(client, manager=self.manager(max_request_chars=20000), tools=tools)
+        agent = self.agent(client, manager=self.manager(context_window_tokens=10000), tools=tools)
         result = agent.run("tiny user request")
         self.assertTrue(result.stop_reason.startswith("recovery_failed"))
         self.assertEqual(client.main_calls, [])
@@ -346,7 +346,7 @@ class ContextRuntimeTests(unittest.TestCase):
     def test_reactive_retry_reprojects_canonical_and_keeps_latest_rounds(self):
         history = _rounds(10, parallel=True)
         original = deepcopy(history)
-        manager = self.manager(compact_threshold_chars=300000)
+        manager = self.manager(near_context_ratio=0.8)
         manager.begin_turn(0)
         client = ScriptedContextClient([RuntimeError("prompt too long"), _text("recovered")])
         agent = self.agent(client, manager=manager, messages=history)
@@ -374,7 +374,7 @@ class ContextRuntimeTests(unittest.TestCase):
         self.assertEqual(manager.last_compaction["reason"], "history_changed")
 
     def test_summary_input_budget_does_not_send_oversized_summary_or_main_request(self):
-        manager = self.manager(summary_input_max_chars=1000, max_request_chars=2000)
+        manager = self.manager(summary_input_max_chars=1000, context_window_tokens=2000)
         history = _rounds(10)
         for message in history:
             if message["role"] == "user" and isinstance(message["content"], list):

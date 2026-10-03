@@ -26,7 +26,8 @@ def definitions():
 def context_settings(variant: str, scale: str):
     settings = dict(VARIANTS[variant])
     if scale == "stress":
-        settings["compact_threshold_chars"] = 40_000
+        # Stress the token trigger; character counts no longer initiate cleanup.
+        settings["near_context_ratio"] = 0.04
     ContextConfig(**settings)  # Fail early if the real configuration rejects it.
     return settings
 

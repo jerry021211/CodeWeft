@@ -52,7 +52,7 @@ class ContextTelemetryTests(unittest.TestCase):
     def test_real_pressure_cleanup_reports_current_savings_without_accumulation(self):
         events = []
         manager = ContextManager(config=ContextConfig(
-            mode="off", compact_threshold_chars=1000, investigation_keep_rounds=0,
+            mode="off", context_window_tokens=10_000, investigation_keep_rounds=0,
             tool_clear_min_chars=1000,
         ))
         messages = [{"role": "user", "content": "find matches"},
@@ -69,14 +69,15 @@ class ContextTelemetryTests(unittest.TestCase):
 
     def test_blocked_request_also_reports_window_and_budget(self):
         events = []
-        manager = ContextManager(config=ContextConfig(mode="off", max_request_chars=1000))
+        manager = ContextManager(config=ContextConfig(mode="off", context_window_tokens=1000))
         with self.assertRaises(RequestBudgetError):
             manager.prepare_before_model_call(
                 [{"role": "user", "content": "x" * 2000}],
                 event_emitter=EventEmitter(CallbackEventSink(events.append)),
             )
         self.assertEqual(events[-1].type, "context.request_blocked")
-        self.assertEqual(events[-1].payload["max_request_chars"], 1000)
+        self.assertIsNone(events[-1].payload["max_request_chars"])
+        self.assertEqual(events[-1].payload["context_window_tokens"], 1000)
         self.assertEqual(events[-1].payload["canonical_messages"], 1)
 
 

@@ -23,8 +23,8 @@ _IDENTITY_FIELDS = frozenset({
     "artifact_id", "artifact_path", "url", "uri", "status", "is_error",
     "error_code", "exit_code", "stop_reason", "finish_reason",
 })
-_REASONING_TYPES = frozenset({"thinking", "redacted_thinking", "reasoning", "reasoning_text"})
-_REASONING_FIELDS = frozenset({"thinking", "reasoning", "reasoning_content", "signature", "encrypted_content"})
+_REASONING_TYPES = frozenset({"thinking", "redacted_thinking", "reasoning", "reasoning_text", "provider_reasoning"})
+_REASONING_FIELDS = frozenset({"thinking", "reasoning", "reasoning_content", "signature", "encrypted_content", "_chat_extra", "thought_signature"})
 _MEDIA_TYPES = frozenset({"image", "input_image", "document", "audio", "input_audio", "video"})
 _MEDIA_METADATA = _IDENTITY_FIELDS | frozenset({
     "title", "mime_type", "media_type", "format", "width", "height", "duration",

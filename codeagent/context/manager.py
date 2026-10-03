@@ -18,6 +18,7 @@ from codeagent.context.models import ContextConfig, RuntimeState
 from codeagent.context.budget import RequestBudget, RequestBudgetError, enforce_request, inspect_request, validate_budget
 from codeagent.context.history import conversation_view, history_hash, is_user_turn, serializable, user_content
 from codeagent.context.projection import build_tool_projection
+from codeagent.context.read_references import project_read_references, record_read
 from codeagent.context.observation import fingerprint
 from codeagent.context.telemetry import tool_projection_metrics
 from codeagent.context.summary_source import bounded_summary_messages, summary_source_messages
@@ -53,6 +54,7 @@ class ContextManager:
         self.summary_credentials_scope = ""
         self.cancellation_check: Callable[[], None] | None = None
         self.last_compaction: dict[str, Any] = {"status": "no_work", "reason": "not_started"}
+        self.last_read_projection: dict[str, int] = {}
 
     def begin_turn(self, message_count: int) -> None:
         self.state.current_turn_start = message_count
@@ -101,6 +103,21 @@ class ContextManager:
         if clean_tools:
             projected = self._project_tools(projected)
             self._remember_tool_view(base, projected)
+        # Run after cleanup and summary projection. The full canonical results
+        # remain available for rehydration when an earlier anchor is removed.
+        snapshot = self.state.read_references
+        if snapshot and (not isinstance(snapshot, dict) or snapshot.get("version") != 1
+                         or not isinstance(snapshot.get("receipts"), dict)):
+            self.state.read_references = snapshot = {}
+            self._generation_reason = "read_reference_snapshot_rebuilt"
+        if snapshot:
+            previous_policy = snapshot.get("enabled")
+            if type(previous_policy) is bool and previous_policy != self.config.read_reference_enabled:
+                self._generation_reason = "read_reference_policy_changed"
+            snapshot["enabled"] = self.config.read_reference_enabled
+        self.last_read_projection = {"read_reference_count": 0, "read_reference_chars_saved": 0}
+        if self.config.read_reference_enabled:
+            projected, self.last_read_projection = project_read_references(projected, self.state.read_references)
         validate_tool_history(projected)
         return projected
 
@@ -114,7 +131,8 @@ class ContextManager:
                             "write": self.config.write_keep_rounds,
                             "min_chars": self.config.tool_clear_min_chars,
                             "write_min": self.config.write_clear_min_chars,
-                            "policy": self.config.cache_policy})["hash"]
+                            "policy": self.config.cache_policy,
+                            "read_reference_enabled": self.config.read_reference_enabled})["hash"]
 
     def _stable_tool_view(self, base: list[Message]) -> list[Message]:
         view = self.state.request_view
@@ -172,14 +190,13 @@ class ContextManager:
 
     def _under_pressure(self, budget: RequestBudget, window: int, *, cache_friendly: bool = False) -> bool:
         # Counts and a previous request's usage cannot establish current pressure.
+        if window <= 0:
+            return False
         if cache_friendly:
-            # Same 20% default headroom as legacy window policy. Apply it to
-            # usable input space after output reservation, AND the body cap.
-            return (budget.request_chars >= self.config.max_request_chars * self.config.cache_soft_ratio
-                    or budget.estimated_prompt_tokens >= max(0, window - budget.output_reserve_tokens)
+            # Apply headroom to usable model input space after output reservation.
+            return (budget.estimated_prompt_tokens >= max(0, window - budget.output_reserve_tokens)
                     * self.config.cache_soft_ratio)
-        return (budget.request_chars > min(self.config.compact_threshold_chars, self.config.max_request_chars)
-                or (window > 0 and budget.estimated_total_tokens >= window * self.config.near_context_ratio))
+        return budget.estimated_total_tokens >= window * self.config.near_context_ratio
 
     def prepare_before_model_call(
         self,
@@ -202,27 +219,30 @@ class ContextManager:
         window = model_window["context_window_tokens"] if model_window is not None else self.config.window_for_model(model)
         cache_friendly = window > 0 and (self.config.cache_policy == "cache_friendly" or (
             self.config.cache_policy == "auto" and bool((cache_capabilities or {}).get("cheap_prefix_reads"))))
-        hard_pressure = (budget.request_chars > self.config.max_request_chars
-                         or (window > 0 and budget.estimated_total_tokens > window))
+        hard_pressure = window > 0 and budget.estimated_total_tokens > window
         view = self.state.request_view
         boundary_config = fingerprint({"model": model, "window": window, "max_tokens": max_tokens,
                                        "system": system, "tools": tools, "friendly": cache_friendly,
                                        "soft": self.config.cache_soft_ratio,
                                        "growth": self.config.cache_boundary_growth_ratio,
-                                       "max_chars": self.config.max_request_chars})["hash"]
+                                       "trigger": "model_window"})["hash"]
         growth = self.config.cache_boundary_growth_ratio
         # Hysteresis after a boundary (even if no eligible cleanup exists).
         # Hard safety checks always bypass this gate.
         boundary_due = (not cache_friendly or hard_pressure or view.get("boundary_config") != boundary_config
-                        or budget.request_chars >= view.get("boundary_chars", 0) + self.config.max_request_chars * growth
                         or budget.estimated_prompt_tokens >= view.get("boundary_tokens", 0)
                         + max(0, window - max_tokens) * growth)
         pressure = lambda value: self._under_pressure(value, window, cache_friendly=cache_friendly)
+        # Once a summary is needed, aim one existing growth band below the soft
+        # trigger. This is headroom, not a new hard limit or a reason to compact
+        # an otherwise healthy request. Very small soft ratios remain supported.
+        target_ratio = max(self.config.cache_soft_ratio / 2, self.config.cache_soft_ratio - growth)
+        target_tokens = max(0, window - max_tokens) * target_ratio
+        needs_headroom = lambda value: value.estimated_prompt_tokens > target_tokens
         cleanup_boundary = boundary_due and (hard_pressure or pressure(budget))
         if cleanup_boundary:
             # Only inspect the irreducible portion when it could block compaction.
-            enforce_request(**{**params, "messages": []}, max_request_chars=self.config.max_request_chars,
-                            context_window_tokens=window)
+            enforce_request(**{**params, "messages": []}, context_window_tokens=window)
             cleaned = self.project_messages(messages, clean_tools=True)
             if cleaned is not projected:
                 if cleaned != projected:
@@ -230,18 +250,25 @@ class ContextManager:
                 projected = cleaned
                 params["messages"] = projected
                 budget = inspect_request(**params)
+        summary_started = False
+        summaries_written = 0
         for _ in range(3):
-            if not cleanup_boundary or not pressure(budget) or self.config.mode == "off":
+            needs_summary = (needs_headroom(budget) if cache_friendly and summary_started else pressure(budget))
+            if not cleanup_boundary or not needs_summary or self.config.mode == "off":
                 break
             revision = self.state.summary_revision
+            summary_started = True
+            required = window > 0 and budget.estimated_total_tokens > window
             try:
-                self.compact_history(messages, reason="auto_compact", client=client, event_emitter=event_emitter,
+                self.compact_history(messages, reason="hard_limit" if required else "auto_compact",
+                                     client=client, event_emitter=event_emitter,
                                      request=params, request_budget=budget)
             except ContextCompactionError:
                 # Failure is observable; only continue when the whole request still fits.
                 break
             if revision == self.state.summary_revision:
                 break
+            summaries_written += 1
             projected = self.project_messages(messages, clean_tools=True)
             params["messages"] = projected
             budget = inspect_request(**params)
@@ -250,7 +277,7 @@ class ContextManager:
         if cleanup_boundary and cache_friendly:
             self.state.request_view.update(boundary_config=boundary_config,
                                            version=1, key=self._view_key(),
-                                           boundary_chars=budget.request_chars,
+                                           boundary_chars=budget.text_request_chars,
                                            boundary_tokens=budget.estimated_prompt_tokens)
         telemetry = {
             "model": model,
@@ -258,9 +285,12 @@ class ContextManager:
             "cleanup_boundary": cleanup_boundary,
             "cache_soft_ratio": self.config.cache_soft_ratio,
             "cache_boundary_growth_ratio": self.config.cache_boundary_growth_ratio,
-            "effective_soft_request_chars": (self.config.max_request_chars * self.config.cache_soft_ratio
-                                             if cache_friendly else min(self.config.compact_threshold_chars,
-                                                                        self.config.max_request_chars)),
+            "compaction_trigger": "model_window",
+            "compact_target_chars": None,
+            "compact_target_prompt_tokens": target_tokens if cache_friendly else None,
+            "summaries_written": summaries_written,
+            "compact_target_reached": not needs_headroom(budget) if cache_friendly else None,
+            "effective_soft_request_chars": None,
             "effective_soft_prompt_tokens": (max(0, window - max_tokens) * self.config.cache_soft_ratio
                                               if cache_friendly else max(0, window * self.config.near_context_ratio - max_tokens))
                                              if window else None,
@@ -269,17 +299,17 @@ class ContextManager:
             "context_window_reason": model_window.get("context_window_reason") if model_window is not None else None,
             "context_window_model": model_window.get("context_window_model") if model_window is not None else model,
             "near_context_ratio": self.config.near_context_ratio,
-            "max_request_chars": self.config.max_request_chars,
-            "compact_threshold_chars": min(self.config.compact_threshold_chars, self.config.max_request_chars),
+            "max_request_chars": None,
+            "compact_threshold_chars": None,
             "canonical_messages": len(messages),
             "projected_messages": len(projected),
             "summary_revision": self.state.summary_revision,
             "compacted_message_count": self.state.compacted_message_count,
+            **self.last_read_projection,
             **(tool_projection_metrics(messages, projected) if event_emitter is not None else {}),
         }
         try:
-            validate_budget(budget, max_request_chars=self.config.max_request_chars,
-                            context_window_tokens=window)
+            validate_budget(budget, context_window_tokens=window)
         except RequestBudgetError as exc:
             if event_emitter is not None:
                 event_emitter.emit("context.request_blocked", {
@@ -332,6 +362,7 @@ class ContextManager:
 
     def record_tool_result(self, tool_use: ToolUse, output: str) -> None:
         self.state.record_tool_result(tool_use, output)
+        self.state.read_references = record_read(self.state.read_references, tool_use, output)
 
     def force_compact(
         self,
@@ -394,9 +425,15 @@ class ContextManager:
             if self.config.mode == "off":
                 self.last_compaction = {"status": "skipped", "reason": "disabled"}
                 return self.project_messages(messages)
-            if self._in_failure_cooldown():
-                self.last_compaction = {"status": "skipped", "reason": "failure_cooldown"}
-                return self.project_messages(messages)
+            if self._in_failure_cooldown() and reason != "manual_compact":
+                # A single persisted emergency retry can escape a soft failure.
+                # Repeated sends/restores cannot turn a failing summary into an
+                # unbounded paid retry loop; the final hard check still blocks.
+                if reason in {"hard_limit", "reactive_compact"} and not self.state.summary_recovery_attempted:
+                    self.state.summary_recovery_attempted = True
+                else:
+                    self.last_compaction = {"status": "skipped", "reason": "failure_cooldown"}
+                    return self.project_messages(messages)
             validate_tool_history(messages)
             start = self.state.compacted_message_count
             cuts = self._eligible_cuts(messages)
@@ -405,7 +442,7 @@ class ContextManager:
                 return self.project_messages(messages)
             before = request or dict(model="", system="", messages=self.project_messages(messages), tools=[], max_tokens=0)
             before_budget = request_budget or inspect_request(**before)
-            required_savings = max(256, int(before_budget.request_chars * 0.05))
+            required_savings = max(256, int(before_budget.text_request_chars * 0.05))
             # Omit the entire future summary envelope. Even this optimistic bound
             # must save enough; never charge the model for a provably useless cut.
             preflights = {}
@@ -413,17 +450,19 @@ class ContextManager:
                 retained = self._retained_messages(messages, cut)
                 if request is not None:
                     retained = self._project_tools(retained)
+                if self.config.read_reference_enabled:
+                    retained, _ = project_read_references(retained, self.state.read_references)
                 floor = inspect_request(**{**before, "messages": retained})
                 protected = [user for message in messages[self._turn_start(messages):cut]
                              if message.get("_context_source") != "runtime"
                              and (user := user_content(message)) is not None]
                 preflights[cut] = {
                     "candidate_cut": cut,
-                    "before_request_chars": before_budget.request_chars,
-                    "retained_request_chars": floor.request_chars,
+                    "before_request_chars": before_budget.text_request_chars,
+                    "retained_request_chars": floor.text_request_chars,
                     "protected_user_chars": sum(len(json.dumps(serializable(m), ensure_ascii=False,
                                                                separators=(",", ":"))) for m in protected),
-                    "max_possible_saved_chars": before_budget.request_chars - floor.request_chars,
+                    "max_possible_saved_chars": before_budget.text_request_chars - floor.text_request_chars,
                     "required_saved_chars": required_savings,
                 }
             viable = [cut for cut in cuts if preflights[cut]["max_possible_saved_chars"] >= required_savings]
@@ -480,13 +519,13 @@ class ContextManager:
                     messages, clean_tools=request is not None,
                 )
                 after_budget = inspect_request(**{**before, "messages": candidate_view})
-                saved = before_budget.request_chars - after_budget.request_chars
+                saved = before_budget.text_request_chars - after_budget.text_request_chars
                 if (saved < required_savings
                         or after_budget.estimated_prompt_tokens >= before_budget.estimated_prompt_tokens):
                     self._start_cooldown()
                     self.last_compaction = {"status": "skipped", "reason": "insufficient_savings",
                                             "saved_chars": saved, "summary_called": True,
-                                            "after_request_chars": after_budget.request_chars,
+                                            "after_request_chars": after_budget.text_request_chars,
                                             "preflight": preflights[end]}
                     return before["messages"]
                 # Immutable linked segments keep old checkpoint references stable,
@@ -518,6 +557,7 @@ class ContextManager:
             self.state.record_transcript(transcript)
             self.state.summary_retry_after_epoch = 0.0
             self.state.summary_failure_scope = ""
+            self.state.summary_recovery_attempted = False
             self._cooldown_until = 0.0
             self._generation_reason = reason
             self.last_compaction = {
@@ -552,6 +592,8 @@ class ContextManager:
         raise ContextCompactionError(f"Context summary failed: {exc}") from exc
 
     def _start_cooldown(self) -> None:
+        if not self._in_failure_cooldown():
+            self.state.summary_recovery_attempted = False
         self._cooldown_until = time.monotonic() + self.config.failure_cooldown_seconds
         self._cooldown_scope = self._failure_scope()
         self.state.summary_failure_scope = self._cooldown_scope
@@ -565,6 +607,8 @@ class ContextManager:
         return hashlib.sha256(json.dumps([
             self.config.summarization_model, self.config.summarization_api_key,
             self.summary_credentials_scope,
+            self.config.summary_max_tokens, self.config.summary_max_chars,
+            self.config.summary_context_window_tokens, self.config.summary_input_max_chars,
         ]).encode("utf-8")).hexdigest()
 
     def _in_failure_cooldown(self) -> bool:
@@ -615,10 +659,14 @@ class ContextManager:
         return path
 
     def _finalize_single_tool_result(self, tool_use: ToolUse, output: str) -> str:
-        if len(output) <= self.config.single_tool_output_max_chars:
+        limit = self.config.single_tool_output_max_chars
+        if tool_use.name == "bash" and self.config.command_output_max_chars:
+            limit = min(limit, self.config.command_output_max_chars)
+        if len(output) <= limit:
             return output
         return self._persisted_tool_result(
-            tool_use, output, self.config.single_tool_output_max_chars
+            tool_use, output, limit,
+            preview_chars=self.config.persisted_preview_chars if tool_use.name == "bash" else None,
         )
 
     def _persisted_tool_result(
@@ -641,13 +689,23 @@ class ContextManager:
                 f"path: {path}",
                 "完整结果已保存到指定路径。",
                 "只有在当前预览缺少必要信息时，才按精确范围读取该文件。",
+                "使用 load_tool_output 的 query 搜索原文；省略 query 可按 offset/char_offset 回读。",
                 "",
                 "--- head preview ---",
             ]
         )
         available = max(0, max_chars - len(header) - 1)
         available = min(available, preview_chars) if preview_chars is not None else available
-        preview = f"{header}\n{output[:available]}"
+        # Preserve the final command status/stderr as well as the opening context.
+        # The complete, unchanged output remains searchable in the archive.
+        separator = "\n--- tail preview ---\n"
+        if available > len(separator) and len(output) > available:
+            body = available - len(separator)
+            head = body // 2
+            excerpt = output[:head] + separator + output[-(body - head):]
+        else:
+            excerpt = output[:available]
+        preview = f"{header}\n{excerpt}"
         return preview if len(preview) <= max_chars else self._truncated_tool_result(output, max_chars)
 
     @staticmethod
@@ -684,6 +742,7 @@ class ContextManager:
             system=SUMMARIZATION_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
             tools=[],
+            max_tokens=self.config.summary_max_tokens,
         )
 
     def _model_summary(self, messages: list[Message], *, client: Any | None,

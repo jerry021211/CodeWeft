@@ -69,7 +69,8 @@ class ContextGradingTests(unittest.TestCase):
 
     def test_exhausted_sdk_cap_stops_without_network_style_retries(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = run_suite(output=Path(temp), cases=["S03"], variants=["D"], scale="stress", max_api_calls=1)
+            root = run_suite(output=Path(temp), cases=["S03"], variants=["D"], scale="stress", max_api_calls=1,
+                             context_window_tokens=1_000_000)
             result = read_json(root / "result.json")["results"][0]
             self.assertEqual(result["failure_codes"][0], "api_call_limit")
             self.assertEqual(result["execution"]["stop_reason"], "budget_exceeded:evaluation_api_calls")

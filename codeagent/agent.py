@@ -64,7 +64,7 @@ class AgentConfig:
     """Runtime settings for one agent instance."""
 
     model: str
-    max_tokens: int = 8000
+    max_tokens: int = 32_000
     max_iterations: int = 50
     planning_backend: PlanningBackend = PlanningBackend.TODO
     loop_guard: LoopGuardConfig | None = field(default_factory=LoopGuardConfig)
@@ -1366,7 +1366,7 @@ class Agent:
             client = BudgetedClient(client, self._loop_guard.budget)
         if call_kind == "context_summary":
             return client  # The summary manager uses its independent input/window budget.
-        return BoundModelClient(client, max_request_chars=self.context.config.max_request_chars,
+        return BoundModelClient(client,
                                 window_resolver=self.context.config.window_for_model)
 
     def _context_client(self) -> Any:

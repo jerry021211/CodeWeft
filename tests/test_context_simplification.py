@@ -100,7 +100,7 @@ class ContextSimplificationTests(unittest.TestCase):
         client = SummaryClient()
         manager = self.manager()
         self.assertEqual(manager.prepare_before_model_call(history, client=client), original)
-        manager.config.compact_threshold_chars = 30000
+        manager.config.context_window_tokens = 30_000
         projected = manager.prepare_before_model_call(history, client=client)
         self.assertIn(TOOL_VIEW_MARKER, str(projected))
         self.assertEqual(client.calls, [])
@@ -152,7 +152,7 @@ class ContextSimplificationTests(unittest.TestCase):
 
     def test_nonshrinking_summary_is_not_committed_or_archived_and_is_cooled_down(self):
         history = rounds(size=20)
-        manager = self.manager(compact_threshold_chars=1, summary_max_chars=12000)
+        manager = self.manager(context_window_tokens=1_000_000, near_context_ratio=0.001, summary_max_chars=12000)
         original = deepcopy(history)
         client = SummaryClient("too verbose " * 800)
         projected = manager.prepare_before_model_call(history, client=client)
@@ -168,7 +168,7 @@ class ContextSimplificationTests(unittest.TestCase):
 
     def test_nonshrinking_summary_cannot_bypass_the_main_hard_limit(self):
         history = rounds(size=20)
-        manager = self.manager(max_request_chars=1500)
+        manager = self.manager(context_window_tokens=1000)
         with self.assertRaises(RequestBudgetError):
             manager.prepare_before_model_call(history, client=SummaryClient("verbose " * 1000))
         self.assertEqual(manager.state.summary_revision, 0)

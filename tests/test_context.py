@@ -115,7 +115,7 @@ class ContextManagerTests(unittest.TestCase):
             self.assertEqual(manager.state.files_read["a.py|0|100"]["count"], 3)
             self.assertEqual(client.calls[0]["model"], "summary-model")
             self.assertEqual(client.calls[0]["tools"], [])
-            self.assertNotIn("max_tokens", client.calls[0])
+            self.assertEqual(client.calls[0]["max_tokens"], manager.config.summary_max_tokens)
             self.assertEqual(len(list((Path(temp_dir) / "transcripts").glob("*.jsonl"))), 2)
 
     def test_summary_failure_keeps_history_and_generation(self) -> None:

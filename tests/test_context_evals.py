@@ -129,7 +129,8 @@ class ContextEvaluationTests(unittest.TestCase):
 
     def test_offline_ablation_really_triggers_projection_summaries_and_recall(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = run_suite(output=Path(temp), cases=["S02", "S03", "S04"], variants=list("ABCD"), scale="stress")
+            root = run_suite(output=Path(temp), cases=["S02", "S03", "S04"], variants=list("ABCD"), scale="stress",
+                             context_window_tokens=1_000_000)
             result = read_json(root / "result.json")
             self.assertTrue(result["all_passed"], result)
             self.assertFalse(result["quality_measurement"])

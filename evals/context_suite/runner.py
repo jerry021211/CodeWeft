@@ -150,7 +150,11 @@ def run_suite(*, output=ROOT / "eval-results", mode="offline", scale="production
             target.write_text(text, encoding="utf-8")
         settings = {**context_settings(variant, scale), "context_window_tokens": context_window_tokens,
                     "summary_context_window_tokens": summary_context_window_tokens}
-        settings["summary_max_chars"] = ContextConfig(**settings).summary_max_chars
+        effective = ContextConfig(**settings)
+        # Persist cost-affecting defaults so replays do not silently inherit a
+        # different ingress/summary policy from a later checkout.
+        for key in ("summary_max_chars", "summary_max_tokens", "command_output_max_chars", "read_reference_enabled"):
+            settings[key] = getattr(effective, key)
         model = env["MODEL_ID"] if mode == "live" else "offline-context-script"
         profile = {"suite": "context-v1", "mode": mode, "model": model,
                    "summary_model": env.get("SUMMARIZATION_MODEL_ID") or model if mode == "live" else model,

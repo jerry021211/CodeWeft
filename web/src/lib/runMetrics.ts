@@ -46,15 +46,16 @@ export function contextPressure(event?: RunEvent) {
   const p = event?.payload ?? {};
   const window = asNumber(p.context_window_tokens);
   const total = asNumber(p.estimated_total_tokens);
-  const chars = asNumber(p.request_chars);
-  const maxChars = asNumber(p.max_request_chars);
-  const threshold = asNumber(p.compact_threshold_chars);
-  const nearRatio = asNumber(p.near_context_ratio);
+  const chars = asNumber(p.text_request_chars) ?? asNumber(p.request_chars);
+  const softPromptTokens = asNumber(p.effective_soft_prompt_tokens);
+  const outputReserve = asNumber(p.output_reserve_tokens) ?? 0;
+  const nearRatio = window != null && window > 0 && softPromptTokens != null
+    ? (softPromptTokens + outputReserve) / window : asNumber(p.near_context_ratio);
   const ratio = window != null && window > 0 && total != null ? total / window : undefined;
   const blocked = event ? canonical(event.type) === "context_request_blocked" : false;
-  const near = (ratio != null && nearRatio != null && ratio >= nearRatio) || (chars != null && threshold != null && chars > threshold);
-  const knownBudget = ratio != null || (chars != null && maxChars != null && maxChars > 0);
-  return { window, ratio, nearRatio, blocked, near, chars, maxChars, threshold, knownBudget };
+  const near = ratio != null && nearRatio != null && ratio >= nearRatio;
+  const knownBudget = ratio != null;
+  return { window, ratio, nearRatio, blocked, near, chars, knownBudget };
 }
 
 export function contextWindowSource(event: RunEvent) {

@@ -87,7 +87,7 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
 
     def manager(self, **options):
         manager = ContextManager(config=ContextConfig(**{
-            "compact_threshold_chars": 1000, "summarization_model": "summary", "transcript_dir": self.root / "transcripts",
+            "context_window_tokens": 2_000_000, "near_context_ratio": 0.00025, "summarization_model": "summary", "transcript_dir": self.root / "transcripts",
             "tool_output_dir": self.root / "outputs", **options,
         }))
         manager.begin_turn(0)
@@ -172,21 +172,21 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
             self.assertEqual(state["summary_retry_after_epoch"], 1090.0)
             clock.update(mono=500.0, wall=1030.0)
             restored = ContextManager(config=manager.config, state=RuntimeState(**state))
-            restored.force_compact(history, client=client)
+            restored.force_compact(history, client=client, reason="auto_compact")
             self.assertEqual(len(client.summary_calls), 1)
             self.assertEqual(restored.last_compaction["reason"], "failure_cooldown")
             # A wall-clock jump after restoration must not end active cooldown.
             clock.update(mono=559.999, wall=999_999.0)
-            restored.force_compact(history, client=client)
+            restored.force_compact(history, client=client, reason="auto_compact")
             self.assertEqual(len(client.summary_calls), 1)
             clock["mono"] = 560.0
-            restored.force_compact(history, client=client)
+            restored.force_compact(history, client=client, reason="auto_compact")
             self.assertEqual(len(client.summary_calls), 2)
             self.assertEqual(restored.state.summary_text, "recovered")
             self.assertEqual(restored.state.summary_retry_after_epoch, 0.0)
 
     def test_model_explicit_key_and_owner_scope_changes_release_old_cooldown(self):
-        for changed in ("model", "key", "scope"):
+        for changed in ("model", "key", "scope", "output_budget"):
             with self.subTest(changed=changed):
                 history, manager = _rounds(), self.manager()
                 manager.summary_credentials_scope = "owner-old"
@@ -198,9 +198,11 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
                         manager.config.summarization_model = "summary-next"
                     elif changed == "key":
                         manager.config.summarization_api_key = "different-authorized-key"
+                    elif changed == "output_budget":
+                        manager.config.summary_max_tokens = 16000
                     else:
                         manager.summary_credentials_scope = "owner-next"
-                    manager.force_compact(history, client=client)
+                    manager.force_compact(history, client=client, reason="auto_compact")
                 self.assertEqual(len(client.summary_calls), 2)
                 self.assertEqual(manager.state.summary_text, "new config succeeds")
 
@@ -278,7 +280,7 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
         expected = {
             "recency_messages": 14, "recency_rounds": 3, "min_fold_messages": 6,
             "message_trigger_min_fold": 18, "round_trigger_min_fold": 9, "max_fold_messages": 160,
-            "max_fold_rounds": 11, "max_request_chars": 550000, "summary_input_max_chars": 110000,
+            "max_fold_rounds": 11, "max_request_chars": 0, "summary_input_max_chars": 110000,
             "context_window_tokens": 99000, "summary_context_window_tokens": 55000,
             "failure_cooldown_seconds": 25.5, "summary_timeout_seconds": 30.5,
             "tool_projection_enabled": False, "investigation_keep_rounds": 0,
@@ -296,7 +298,7 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
         cases = {
             "CONTEXT_RECENCY_MESSAGES": "-1", "CONTEXT_RECENCY_ROUNDS": "0",
             "CONTEXT_MAX_FOLD_ROUNDS": "-1", "CONTEXT_SUMMARY_INPUT_MAX_CHARS": "-1",
-            "CONTEXT_MAX_REQUEST_CHARS": "0", "CONTEXT_WINDOW_TOKENS": "-2",
+            "CONTEXT_WINDOW_TOKENS": "-2",
             "CONTEXT_SUMMARY_WINDOW_TOKENS": "-1", "CONTEXT_FAILURE_COOLDOWN_SECONDS": "-0.5",
             "CONTEXT_SUMMARY_TIMEOUT_SECONDS": "0", "CONTEXT_SUMMARY_TEXT_PREVIEW_CHARS": "-1",
             "CONTEXT_SUMMARY_ARGUMENT_PREVIEW_CHARS": "0", "CONTEXT_NEAR_CONTEXT_RATIO": "1.5",

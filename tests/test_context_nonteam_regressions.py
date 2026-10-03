@@ -134,7 +134,7 @@ class NonTeamContextRegressions(unittest.TestCase):
     def test_cancellation_during_summary_prevents_state_commit(self):
         token = CancellationToken()
         client = Client(cancel_summary=token)
-        context = self.context(compact_threshold_chars=1000)
+        context = self.context(context_window_tokens=1_000_000, near_context_ratio=0.001)
         context.begin_turn(0)
         history = _history(10)
         original = deepcopy(history)
@@ -156,7 +156,7 @@ class NonTeamContextRegressions(unittest.TestCase):
 
     def test_irreducible_system_with_long_history_never_pays_for_summary(self):
         client = Client()
-        context = self.context(max_request_chars=5000)
+        context = self.context(context_window_tokens=5000)
         context.begin_turn(0)
         agent = self.agent(client, context=context, messages=_history(30))
         assembly = PromptAssemblyResult(system_prompt="irreducible system " * 1000, trace=[], prompt_hash="large")
@@ -165,11 +165,11 @@ class NonTeamContextRegressions(unittest.TestCase):
         self.assertTrue(result.stop_reason.startswith("recovery_failed"))
         self.assertEqual(client.calls, [])
         self.assertEqual(context.state.summary_revision, 0)
-        self.assertIn("serialized request characters", result.final_text)
+        self.assertIn("window budget", result.final_text)
 
     def test_irreducible_tools_with_long_history_never_pay_for_summary(self):
         client = Client()
-        context = self.context(max_request_chars=5000)
+        context = self.context(context_window_tokens=5000)
         context.begin_turn(0)
         tools = ToolRegistry()
         tools.register_handler(ToolDefinition("large", "schema description " * 1000, {"type": "object"}), lambda: "ok")
@@ -266,21 +266,21 @@ class NonTeamContextRegressions(unittest.TestCase):
 
     def test_agent_memory_selection_obeys_same_side_request_budget(self):
         store = MemoryStore(self.root / "memory")
-        store.remember(name="fact", description="d" * 12000, content="stable fact")
+        store.remember(name="fact", description="d" * 24000, content="stable fact")
         memory = MemoryManager(store, MemoryConfig(retrieval_mode="legacy"))
         client = Client([_response("main still proceeds")])
-        context = self.context(max_request_chars=7000)
+        context = self.context(context_window_tokens=8000)
         agent = self.agent(client, context=context)
         agent.memory_manager = memory
         result = agent.run("small task")
         self.assertEqual(result.final_text, "main still proceeds")
         self.assertEqual([kind for kind, _ in client.calls], ["main"])
-        self.assertLessEqual(inspect_request(**client.calls[0][1]).request_chars, 7000)
+        self.assertLessEqual(inspect_request(**client.calls[0][1]).estimated_total_tokens, 8000)
 
     def test_45_round_task_rolls_summaries_and_resumes_checkpoint_without_duplicate_work(self):
         prompt = "EXACT 用户目标：修改 /project/真实文件.py，保留 public_api；不要重新执行已有成功操作。"
         client = LongTaskClient(rounds=45)
-        context = self.context(max_request_chars=30000, compact_threshold_chars=12000)
+        context = self.context(max_request_chars=30000, context_window_tokens=1_000_000, near_context_ratio=0.012)
         live = self.agent(client, context=context, iterations=22)
         partial = live.run(prompt)
         self.assertTrue(partial.stop_reason.startswith("max_iterations"))

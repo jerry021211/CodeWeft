@@ -13,12 +13,20 @@ const { collectRunMetrics, runElapsedMs, contextPressure, contextWindowSource } 
 after(() => { unlinkSync(bundle); rmdirSync(directory); });
 const event = (seq, type, payload = {}, extra = {}) => ({ id: `e${seq}`, seq, type, payload, run_id: "run", agent_id: "root", conversation_id: "conversation", occurred_at: `2026-09-28T00:00:${String(seq).padStart(2, "0")}Z`, ...extra });
 
+test("binary attachments do not create false text-budget pressure", () => {
+  const pressure = contextPressure(event(1, "context.request_projected", {
+    request_chars: 8_000_000, text_request_chars: 1200, max_request_chars: 600_000, compact_threshold_chars: 300_000,
+  }));
+  assert.equal(pressure.chars, 1200);
+  assert.equal(pressure.near, false);
+});
+
 test("discovery source, query failures and missing budgets are explicit", () => {
   assert.equal(contextWindowSource(event(1, "context.request_projected", { context_window_source: "model_api" })), "模型接口");
   assert.equal(contextWindowSource(event(1, "context.request_projected", { context_window_reason: "timeout" })), "接口查询超时");
   assert.equal(contextWindowSource(event(1, "context.request_projected", { context_window_reason: "missing_window" })), "接口未返回窗口大小");
   assert.equal(contextPressure(event(1, "context.request_projected", { request_chars: 184196 })).knownBudget, false);
-  assert.equal(contextPressure(event(1, "context.request_projected", { request_chars: 184196, max_request_chars: 600000 })).knownBudget, true);
+  assert.equal(contextPressure(event(1, "context.request_projected", { request_chars: 184196, max_request_chars: 600000 })).knownBudget, false);
 });
 
 test("counts attempted model calls and executed tools once through replay and outcomes", () => {
@@ -43,9 +51,18 @@ test("elapsed time freezes on completion and is unknown for incomplete terminal 
   assert.equal(runElapsedMs(active, "interrupted", Date.now()), undefined);
 });
 
-test("unknown windows do not produce a token percentage; both pressure triggers apply", () => {
+test("only model window pressure marks compaction; characters never trigger it", () => {
   assert.equal(contextPressure(event(1, "context.request_projected", { context_window_tokens: 0, estimated_total_tokens: 100 })).ratio, undefined);
   assert.equal(contextPressure(event(1, "context.request_projected", { context_window_tokens: 100, estimated_total_tokens: 80, near_context_ratio: 0.8 })).near, true);
-  assert.equal(contextPressure(event(1, "context.request_projected", { request_chars: 301, compact_threshold_chars: 300 })).near, true);
+  assert.equal(contextPressure(event(1, "context.request_projected", { request_chars: 301, compact_threshold_chars: 300 })).near, false);
   assert.equal(contextPressure(event(1, "context.request_blocked")).blocked, true);
+});
+
+test("cache-friendly threshold includes output reservation in the displayed total", () => {
+  const payload = { context_window_tokens: 1000, effective_soft_prompt_tokens: 640,
+    output_reserve_tokens: 200, near_context_ratio: 0.8 };
+  const below = contextPressure(event(1, "context.request_projected", { ...payload, estimated_total_tokens: 820 }));
+  assert.equal(below.near, false);
+  assert.equal(below.nearRatio, 0.84);
+  assert.equal(contextPressure(event(2, "context.request_projected", { ...payload, estimated_total_tokens: 840 })).near, true);
 });

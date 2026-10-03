@@ -18,6 +18,7 @@ INVESTIGATION_TOOLS = frozenset({"read_file", "grep", "glob"})
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 TOOL_VIEW_MARKER = "[codeagent:tool-result-view:v1]"
 WRITE_VIEW_MARKER = "[codeagent:write-args-view:v1]"
+READ_REFERENCE_MARKER = "[codeagent:file-read-reference:v1]"
 TRUNCATION_MARKER = "\n[系统视图截断，非磁盘内容]\n"
 _READ_TAIL = re.compile(r"\n\.\.\. \(\d+ lines total, showing \d+-\d+\)$")
 _BODY_KEYS = frozenset({"content", "old_string", "new_string"})
@@ -51,7 +52,7 @@ def is_projection_placeholder(value: Any) -> bool:
         return True
     return any(
         value.startswith(marker + "\n") and value.endswith(_closing(marker))
-        for marker in (TOOL_VIEW_MARKER, WRITE_VIEW_MARKER)
+        for marker in (TOOL_VIEW_MARKER, WRITE_VIEW_MARKER, READ_REFERENCE_MARKER)
     )
 
 
