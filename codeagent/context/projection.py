@@ -25,7 +25,9 @@ _BODY_KEYS = frozenset({"content", "old_string", "new_string"})
 _STORED_OUTPUT_HEADER = re.compile(
     r"\A\[tool output stored\]\ntool: ([^\r\n]+)\noriginal_chars: (\d{1,20})\n"
     r"path: ([^\r\n\x00]+)\n完整结果已保存到指定路径。\n"
-    r"只有在当前预览缺少必要信息时，才按精确范围读取该文件。\n\n--- head preview ---\n"
+    r"只有在当前预览缺少必要信息时，才按精确范围读取该文件。\n"
+    r"(?:使用 load_tool_output 的 query 搜索原文；省略 query 可按 offset/char_offset 回读。\n)?"
+    r"\n--- head preview ---\n"
 )
 
 

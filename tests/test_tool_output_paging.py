@@ -112,14 +112,16 @@ class ToolOutputPagingTests(unittest.TestCase):
             {"role": "assistant", "content": [{"type": "tool_use", "id": "cmd", "name": "bash", "input": {"command": "once"}}]},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "cmd", "content": received}]},
         ]
-        projected = build_tool_projection(messages, command_keep=0)
+        # Command previews are now smaller than the default cleanup threshold.
+        # Force cleanup here to verify that the archive handle survives it.
+        projected = build_tool_projection(messages, command_keep=0, min_chars=1000)
         note = projected[1]["content"][0]["content"]
         import json
         self.assertIn(json.dumps(path, ensure_ascii=False), note)
         self.assertIn("load_tool_output", note)
         self.assertIn("HISTORICAL_PROOF", self.tool.run(path, char_offset=90_000, char_limit=100))
         self.assertEqual(messages[1]["content"][0]["content"], received)
-        self.assertEqual(projected, build_tool_projection(projected, command_keep=0))
+        self.assertEqual(projected, build_tool_projection(projected, command_keep=0, min_chars=1000))
 
     def test_outside_traversal_missing_and_invalid_ranges_are_denied(self):
         other = self.root / "private.txt"
