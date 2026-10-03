@@ -15,7 +15,7 @@ from codeagent.code_search.service import has_code_locator
 from codeagent.events import TokenUsage
 from codeagent.hooks.loop_guard import LoopGuardConfig
 from codeagent.models import ModelResponse
-from codeagent.permissions.discuss import READ_ONLY_TOOLS
+from codeagent.permissions.read_only import READ_ONLY_TOOLS
 from codeagent.runtime.execution import RunBudget, ExecutionStopped
 from codeagent.tools.defaults import create_default_registry
 from codeagent.tools.search_code import SearchCodeTool

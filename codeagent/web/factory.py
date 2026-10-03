@@ -92,6 +92,7 @@ class WebAgentFactory:
         team_attempt: TaskAttemptRecord | None = None,
         worktree_manager: WorktreeManager | None = None,
         root_prompt_mode: PromptMode | None = None,
+        read_only: bool = False,
         web_search_enabled: bool = False,
         reasoning_effort: str | None = None,
     ) -> Agent:
@@ -106,6 +107,8 @@ class WebAgentFactory:
         if team_session is not None and root_prompt_mode is not None:
             raise ValueError("root_prompt_mode is only valid for a Root Agent")
         root_mode = root_prompt_mode or PromptMode.NORMAL
+        if read_only and (team_session is not None or root_mode is not PromptMode.NORMAL):
+            raise ValueError("Read-only permissions cannot start or control a Team")
         web_search_config = replace(
             self.env.web_search_config,
             enabled=web_search_enabled and team_session is None and root_mode is not PromptMode.TEAM_PLANNER,
@@ -172,7 +175,7 @@ class WebAgentFactory:
         )
         skill_loader = self._skill_loader()
         memory_store = self._memory_store(
-            always_read_only=team_session is not None or team_planner or root_mode is PromptMode.DISCUSS
+            always_read_only=team_session is not None or team_planner or read_only
         )
         recovery = RecoveryRuntime(self.env.recovery_config)
         memory_manager = (
@@ -343,6 +346,7 @@ class WebAgentFactory:
             memory_catalog=(memory_manager.catalog_prompt() if memory_manager else ""),
             allow_subagents=team_session is None and not team_planner,
             prompt_mode=root_mode if team_session is None else None,
+            read_only=read_only,
         )
         if checkpoint is not None and team_session is None and not team_planner:
             guard_state = getattr(checkpoint, "metadata", {}).get("execution_guard")

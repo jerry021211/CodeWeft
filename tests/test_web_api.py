@@ -29,7 +29,7 @@ class FakeScheduler:
         self.stopped = False
         self.submissions: list[tuple[str, str, bool]] = []
         self.mcp_reloads: list[str] = []
-        self.modes: list[str] = []
+        self.read_only_choices: list[bool] = []
         self.web_search_choices: list[bool | None] = []
 
     def start(self) -> None:
@@ -38,9 +38,9 @@ class FakeScheduler:
     def stop(self) -> None:
         self.stopped = True
 
-    def submit(self, conversation_id: str, content: str, *, use_team: bool = False, mode: str = "normal", web_search_enabled: bool | None = None):
+    def submit(self, conversation_id: str, content: str, *, use_team: bool = False, read_only: bool = False, web_search_enabled: bool | None = None):
         self.web_search_choices.append(web_search_enabled)
-        self.modes.append(mode)
+        self.read_only_choices.append(read_only)
         self.submissions.append((conversation_id, content, use_team))
         run = self.repository.create_run(conversation_id)
         self.repository.create_message(
@@ -176,12 +176,31 @@ class WebApiTests(unittest.TestCase):
         url = f"/api/conversations/{conversation.id}/runs"
         response = self.client.post(url, json={"content": "inspect", "mode": "discuss"})
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(self.scheduler.modes, ["discuss"])
+        self.assertEqual(self.scheduler.read_only_choices, [True])
         conflict = self.client.post(url, json={"content": "inspect", "mode": "discuss", "useTeam": True})
         self.assertEqual(conflict.status_code, 409)
         invalid = self.client.post(url, json={"content": "inspect", "mode": "unsafe"})
         self.assertEqual(invalid.status_code, 422)
         self.assertEqual(len(self.scheduler.submissions), 1)
+
+    def test_read_only_permission_api_and_legacy_conflicts(self) -> None:
+        conversation = self.repository.create_conversation(title="Permissions", workspace=str(self.workspace))
+        url = f"/api/conversations/{conversation.id}/runs"
+        for value in (True, False):
+            response = self.client.post(url, json={"content": "inspect", "readOnly": value})
+            self.assertEqual(response.status_code, 202)
+            self.repository.update_run_status(response.json()["run_id"], "completed")
+        self.assertEqual(self.scheduler.read_only_choices, [True, False])
+        for body in (
+            {"mode": "discuss", "readOnly": False},
+            {"mode": []},
+            {"mode": {}},
+        ):
+            response = self.client.post(url, json={"content": "inspect", **body})
+            self.assertEqual(response.status_code, 422)
+        response = self.client.post(url, json={"content": "inspect", "readOnly": True, "useTeam": True})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(len(self.scheduler.submissions), 2)
 
     def test_task_event_endpoint_returns_sse_stream(self) -> None:
         created = self.client.post(

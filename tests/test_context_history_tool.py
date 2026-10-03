@@ -15,7 +15,7 @@ from codeagent.events import EventEmitter, ExecutionContext
 from codeagent.memory import MemoryConfig
 from codeagent.messages import ToolUse
 from codeagent.permissions import WaitingPermissionBroker
-from codeagent.permissions.discuss import discuss_tool_guard
+from codeagent.permissions.read_only import read_only_tool_guard
 from codeagent.runtime import CancellationToken
 from codeagent.tools import LoadContextHistoryTool
 from codeagent.tools.runtime_data import _history_record
@@ -128,7 +128,7 @@ class ContextHistoryToolTests(unittest.TestCase):
                 self.assertTrue(self.tool.run("history.jsonl", **{key: value}).startswith("Error:"))
 
     def test_read_only_discuss_guard_allows_history_lookup(self) -> None:
-        self.assertIsNone(discuss_tool_guard(ToolUse("read-history", "load_context_history", {"file_path": "history.jsonl"})))
+        self.assertIsNone(read_only_tool_guard(ToolUse("read-history", "load_context_history", {"file_path": "history.jsonl"})))
 
     def test_cli_subagent_registration_cannot_read_parent_archive(self) -> None:
         env = EnvironmentConfig(model_id="fake", enable_skills=False, memory_config=MemoryConfig(enabled=False))

@@ -130,7 +130,7 @@ class MemoryStore:
         return retrieve(self, query, **kwargs)
 
     def search(self, query: str, *, max_items: int = 5) -> list[MemoryRecord]:
-        # Manual search is available in Discuss; never mutate a derived cache here.
+        # Manual search is available with read-only permissions; never mutate a derived cache here.
         if not query.strip():
             return self.list_memories()[:max(0, max_items)]
         return [hit.record for hit in self.retrieve(query, limit=max_items, allow_index_write=False).hits]

@@ -693,10 +693,10 @@ def create_app(
         content = body.content.strip()
         if not content:
             raise HTTPException(status_code=422, detail="Run content cannot be blank.")
-        if body.mode == "discuss" and (
+        if body.readOnly and (
             body.useTeam or repo.get_active_team_run_for_conversation(conversation_id)
         ):
-            raise HTTPException(status_code=409, detail="Discuss 模式不能启动或接管正在运行的 Team；请使用普通会话。")
+            raise HTTPException(status_code=409, detail="只读权限下不能启动或接管正在运行的 Team。")
         if body.useTeam and not team_enabled:
             raise HTTPException(
                 status_code=409,
@@ -716,13 +716,13 @@ def create_app(
         search_enabled = body.webSearch if body.webSearch is not None else bool(search_config and search_config.enabled)
         if search_enabled:
             if body.useTeam or repo.get_active_team_run_for_conversation(conversation_id):
-                raise HTTPException(status_code=409, detail="联网搜索目前仅支持普通会话和 Discuss 模式。")
+                raise HTTPException(status_code=409, detail="联网搜索目前仅支持普通会话。")
             if not search_config or not search_config.available:
                 raise HTTPException(status_code=422, detail="请先在服务端配置 TAVILY_API_KEY，再开启联网搜索。")
         if body.webSearch is not None or search_enabled:
             options["web_search_enabled"] = search_enabled
-        if body.mode == "discuss":
-            options["mode"] = body.mode
+        if body.readOnly:
+            options["read_only"] = True
         run = scheduler.submit(conversation_id, content, **options)
         return CreateRunResponse(
             run_id=run.id,

@@ -323,7 +323,7 @@ class MemoryRetrievalTests(unittest.TestCase):
                 return ModelResponse("end_turn", [{"type": "text", "text": text}])
         agent = Agent(client=Client(), tools=ToolRegistry(), config=AgentConfig(model="fake"),
                       memory_manager=MemoryManager(self.store))
-        agent.set_discuss_mode(True)
+        agent.set_read_only(True)
         result = agent.run("断线后如何回放事件")
         self.assertEqual(result.final_text, "done")
         self.assertFalse((self.store.root / INDEX_NAME).exists())

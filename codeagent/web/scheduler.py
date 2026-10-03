@@ -52,6 +52,7 @@ class AgentFactory(Protocol):
         permission_broker: WaitingPermissionBroker,
         checkpoint: Any | None = None,
         root_prompt_mode: PromptMode | None = None,
+        read_only: bool = False,
         web_search_enabled: bool = False,
         reasoning_effort: str | None = None,
     ) -> Any: ...
@@ -64,7 +65,7 @@ class _RunJob:
     workspace: str
     prompt: str
     use_team: bool
-    mode: str
+    read_only: bool
     emitter: EventEmitter
     cancellation: CancellationToken
     broker: WaitingPermissionBroker
@@ -153,19 +154,19 @@ class RunScheduler:
 
     def submit(
         self, conversation_id: str, content: str, *, use_team: bool = False,
-        mode: str = "normal",
+        read_only: bool = False,
         web_search_enabled: bool | None = None,
         reasoning_effort: str | None = None,
     ) -> RunRecord:
         # Admission, queue order and shutdown share one short critical section.
         with self._lock:
             self.start()
-            return self._submit(conversation_id, content, use_team=use_team, mode=mode,
+            return self._submit(conversation_id, content, use_team=use_team, read_only=read_only,
                                 web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort)
 
     def _submit(
         self, conversation_id: str, content: str, *, use_team: bool,
-        mode: str,
+        read_only: bool,
         web_search_enabled: bool | None = None,
         reasoning_effort: str | None = None,
     ) -> RunRecord:
@@ -179,13 +180,11 @@ class RunScheduler:
             web_search_enabled = bool(search_config and search_config.enabled)
         if use_team or self.repository.get_active_team_run_for_conversation(conversation_id):
             if web_search_enabled:
-                raise ValueError("联网搜索目前仅支持普通会话和 Discuss 模式。")
-        if mode not in {"normal", "discuss"}:
-            raise ValueError("Unknown execution mode")
-        if mode == "discuss" and (
+                raise ValueError("联网搜索目前仅支持普通会话。")
+        if read_only and (
             use_team or self.repository.get_active_team_run_for_conversation(conversation_id)
         ):
-            raise ValueError("Discuss mode cannot start or control a Team")
+            raise ValueError("Read-only permissions cannot start or control a Team")
         prompt = str(content).strip()
         if not prompt:
             raise ValueError("Message content cannot be empty")
@@ -197,17 +196,18 @@ class RunScheduler:
                 conversation_id,
                 title=_conversation_title(prompt),
             )
-        requested_mode = "team" if use_team else "discuss" if mode == "discuss" else "single"
+        requested_mode = "team" if use_team else "single"
         run = self.repository.create_run(
             conversation_id,
             metadata={
                 "requested_mode": requested_mode,
+                "read_only": read_only,
                 "web_search_enabled": web_search_enabled,
                 "reasoning_effort": reasoning_effort or "default",
                 "agent_profile": (
                     PromptMode.TEAM_PLANNER.value
                     if use_team
-                    else mode
+                    else PromptMode.NORMAL.value
                 ),
             },
         )
@@ -216,7 +216,7 @@ class RunScheduler:
             role="user",
             content=prompt,
             run_id=run.id,
-            metadata={"status": "complete", "mode": mode, "web_search_enabled": web_search_enabled,
+            metadata={"status": "complete", "read_only": read_only, "web_search_enabled": web_search_enabled,
                       "reasoning_effort": reasoning_effort or "default"},
         )
         emitter = EventEmitter(
@@ -278,7 +278,7 @@ class RunScheduler:
             workspace=conversation.workspace,
             prompt=prompt,
             use_team=bool(use_team),
-            mode=mode,
+            read_only=read_only,
             emitter=emitter,
             cancellation=cancellation,
             broker=broker,
@@ -761,8 +761,8 @@ class RunScheduler:
                 job.conversation_id
             )
             if active_team is not None:
-                if job.mode == "discuss":
-                    raise ValueError("A Team became active after this discussion was queued")
+                if job.read_only:
+                    raise ValueError("A Team became active after this read-only request was queued")
                 self._execute_team_lead(job, active_team)
                 return
             if not job.use_team:
@@ -779,13 +779,13 @@ class RunScheduler:
             profile = (
                 PromptMode.TEAM_PLANNER
                 if job.use_team
-                else PromptMode(job.mode)
+                else PromptMode.NORMAL
             )
             job.emitter.emit(
                 "agent.profile.selected",
                 {
                     "profile": profile.value,
-                    "requested_mode": "team" if job.use_team else "discuss" if job.mode == "discuss" else "single",
+                    "requested_mode": "team" if job.use_team else "single",
                 },
             )
             create_kwargs = {
@@ -794,8 +794,10 @@ class RunScheduler:
                 "permission_broker": job.broker,
                 "checkpoint": checkpoint,
             }
-            if job.use_team or job.mode == "discuss":
+            if job.use_team:
                 create_kwargs["root_prompt_mode"] = profile
+            if job.read_only:
+                create_kwargs["read_only"] = True
             if job.web_search_enabled:
                 create_kwargs["web_search_enabled"] = True
             if job.reasoning_effort is not None:

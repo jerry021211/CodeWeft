@@ -82,9 +82,9 @@ class PromptRuntime:
         tool_names = [str(schema["name"]) for schema in tool_schemas]
         tools = set(tool_names)
 
-        single_agent = mode in {PromptMode.NORMAL, PromptMode.DISCUSS}
-        if single_agent:
-            self._add_template(fragments, "base.core", "core", section="static", required=True)
+        single_agent = mode is PromptMode.NORMAL
+        # Shared evidence and permission rules apply to every independently prompted role.
+        self._add_template(fragments, "base.core", "core", section="static", required=True)
 
         identity_template = {
             PromptMode.TEAM_PLANNER: "team_planner",
@@ -100,18 +100,15 @@ class PromptRuntime:
             self._load_template(identity_template),
             section="static",
             source=self._template_source(identity_template),
-            required=single_agent,
+            required=True,
         )
         if single_agent:
-            self._add_template(fragments, "base.modes", "modes", section="static", required=True)
-            self._add_template(fragments, "base.discuss", "discuss", section="static", required=True)
             self._add_template(
                 fragments,
                 "base.execution",
                 "execution",
                 section="static",
                 required=True,
-                code_only=True,
             )
 
         project_instructions = self._project_instructions()
@@ -132,11 +129,11 @@ class PromptRuntime:
                 required=single_agent,
             )
         if "TaskCreate" in tools and mode is not PromptMode.TEAM_PLANNER:
-            self._add_template(fragments, "tools.tasks", "tasks", code_only=single_agent)
+            self._add_template(fragments, "tools.tasks", "tasks")
         if "todo_write" in tools and "TaskCreate" not in tools:
-            self._add_template(fragments, "tools.todo", "todo", code_only=single_agent)
+            self._add_template(fragments, "tools.todo", "todo")
         if single_agent and SUBAGENT_TOOL_NAME in tools:
-            self._add_template(fragments, "tools.subagent", "subagent_tool", code_only=True)
+            self._add_template(fragments, "tools.subagent", "subagent_tool")
 
         if skill_catalog and "load_skill" in tools:
             self._add_template(fragments, "skills.guidance", "skill")
@@ -157,7 +154,7 @@ class PromptRuntime:
         if tools & memory_tools:
             self._add_template(fragments, "memory.guidance", "memory")
         if REMEMBER_TOOL_NAME in tools:
-            self._add_template(fragments, "memory.write", "memory_write", code_only=single_agent)
+            self._add_template(fragments, "memory.write", "memory_write")
         if memory_catalog and not selected_memory_context:
             self._add(
                 fragments,
@@ -188,7 +185,7 @@ class PromptRuntime:
             "runtime.reminder",
             "\n".join(runtime_facts),
             source="runtime",
-            required=single_agent,
+            required=True,
         )
         return fragments
 
@@ -202,19 +199,6 @@ class PromptRuntime:
         return fingerprint({"project": self._project_instructions(),
                             "templates": {name: self._load_template(name) for name in sorted(templates)}})["hash"]
 
-    def mode_turn_context(self, mode: PromptMode) -> str:
-        """Record an actual runtime mode change next to the new user turn."""
-        if mode not in {PromptMode.NORMAL, PromptMode.DISCUSS}:
-            raise ValueError("Mode turn context is only available for ordinary Agents")
-        return self._load_template("mode_turn").format(
-            mode_label="Discuss · 只读讨论" if mode is PromptMode.DISCUSS else "Code · 编码",
-            mode_rules=(
-                "Discuss 只读限制已启用；仅允许读取、搜索和讨论，不执行写入。"
-                if mode is PromptMode.DISCUSS
-                else "Discuss 只读限制已解除；可以在用户授权范围内编写和修改文件。不要要求用户再次切换模式。"
-            ),
-        )
-
     def _add_template(
         self,
         fragments: list[PromptFragment],
@@ -223,11 +207,8 @@ class PromptRuntime:
         *,
         section: PromptSection = "dynamic",
         required: bool = False,
-        code_only: bool = False,
     ) -> None:
         content = self._load_template(template_name)
-        if code_only:
-            content = f"<code_mode_only>\n以下规则仅在 Code 模式适用，Discuss 模式不执行这些操作。\n{content}\n</code_mode_only>"
         self._add(
             fragments,
             fragment_id,

@@ -163,7 +163,13 @@ class HookedAgentTests(unittest.TestCase):
         result = agent.run("run danger")
 
         self.assertFalse(executed)
-        self.assertEqual(agent.messages[3]["content"][0]["content"], "blocked by hook")
+        blocked_results = [
+            block["content"]
+            for message in agent.messages if isinstance(message.get("content"), list)
+            for block in message["content"]
+            if block.get("type") == "tool_result" and block.get("tool_use_id") == "toolu_1"
+        ]
+        self.assertEqual(blocked_results, ["blocked by hook"])
         self.assertEqual(result.final_text, "done")
 
     def test_lifecycle_hooks_fire(self) -> None:

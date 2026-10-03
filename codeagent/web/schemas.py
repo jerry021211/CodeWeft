@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ApiModel(BaseModel):
@@ -30,9 +30,23 @@ class UpdateConversationRequest(ApiModel):
 class CreateRunRequest(ApiModel):
     content: str = Field(min_length=1, max_length=200_000)
     useTeam: bool = False
-    mode: Literal["normal", "discuss"] = "normal"
+    readOnly: bool = False
     webSearch: bool | None = None
     reasoningEffort: str | None = Field(default=None, min_length=1, max_length=32)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_mode(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "mode" in value:
+            value = dict(value)
+            mode = value.pop("mode")
+            if not isinstance(mode, str) or mode not in {"normal", "discuss"}:
+                raise ValueError("Unknown legacy execution mode")
+            if mode == "discuss":
+                if "readOnly" in value and value["readOnly"] is not True:
+                    raise ValueError("Legacy discuss requires readOnly=true")
+                value["readOnly"] = True
+        return value
 
 
 class ApprovalDecisionRequest(ApiModel):

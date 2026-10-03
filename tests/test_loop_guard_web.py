@@ -226,23 +226,29 @@ class LoopGuardWebTests(unittest.TestCase):
                     self.assertEqual(result.stop_reason.startswith("budget_exceeded:"), failed)
                     self.assertEqual(len(client.calls), expected_calls)
 
-    def test_factory_enables_only_normal_and_discuss_roots(self):
+    def test_factory_keeps_guard_roles_and_isolates_intelligence_tools(self):
         factory = self.factory()
         with patch.object(EnvironmentConfig, "create_anthropic_client", return_value=ScriptedClient()):
-            for mode in (PromptMode.NORMAL, PromptMode.DISCUSS, PromptMode.TEAM_PLANNER):
+            for mode, read_only in ((PromptMode.NORMAL, False), (PromptMode.NORMAL, True), (PromptMode.TEAM_PLANNER, False)):
                 with self.subTest(mode=mode):
                     agent = factory.create(
                         event_emitter=EventEmitter(context=ExecutionContext(
                             conversation_id=self.conversation.id, run_id="mode-run",
                         )),
                         cancellation=CancellationToken(), permission_broker=WaitingPermissionBroker(),
-                        root_prompt_mode=mode,
+                        root_prompt_mode=mode, read_only=read_only,
                     )
                     self.assertEqual(agent.config.loop_guard is None, mode is PromptMode.TEAM_PLANNER)
-                    self.assertEqual('search_code' in {s['name'] for s in agent.tools.schemas()}, mode is not PromptMode.TEAM_PLANNER)
+                    self.assertTrue({'search_code', 'lsp'} <= {s['name'] for s in agent.tools.schemas()})
                     if agent.subagent_environment_factory is not None:
                         sub_tools, _, _ = agent.subagent_environment_factory()
-                        self.assertNotIn('search_code', {s['name'] for s in sub_tools.schemas()})
+                        self.assertTrue({'search_code', 'lsp'} <= {s['name'] for s in sub_tools.schemas()})
+                        from codeagent.tools.search_code import SearchCodeTool
+                        from codeagent.tools.lsp import LspTool
+                        for kind in (SearchCodeTool, LspTool):
+                            parent = next(t for t in agent.tools.owners() if isinstance(t, kind))
+                            child = next(t for t in sub_tools.owners() if isinstance(t, kind))
+                            self.assertIsNot(parent.service, child.service)
 
     def test_scheduler_classifies_failures_and_accepts_agents_without_export(self):
         for reason in (

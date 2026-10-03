@@ -149,8 +149,7 @@ class NonTeamContextRegressions(unittest.TestCase):
             after.pop(key)
             before.pop(key)
         self.assertEqual(after, before)
-        self.assertEqual(agent.messages[:len(original)], original)
-        self.assertIn("[运行时模式更新]", agent.messages[-1]["content"])
+        self.assertEqual(agent.messages, original)
         self.assertEqual([call[1]["model"] for call in client.calls], ["summary"])
         self.assertEqual(list(context.config.transcript_dir.glob("*.jsonl")), [])
 

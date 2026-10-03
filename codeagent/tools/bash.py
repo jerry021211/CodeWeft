@@ -63,6 +63,8 @@ class BashTool:
                 f"在 {self.runtime_platform.operating_system} 上使用 {self.runtime_platform.shell_name} 执行命令。"
                 "使用该 Shell 的语法。返回输出，非零退出码会明确标记；超时可能已有副作用，重试前核实。"
                 "命令退出成功不代表功能验证完成。"
+                "验证预期报错时，用测试框架或包装脚本断言具体退出码和错误信息；"
+                "匹配才以 0 退出并输出测试通过，不匹配保留失败。不要无条件忽略错误。"
             ),
             input_schema={
                 "type": "object",

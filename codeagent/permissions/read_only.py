@@ -1,4 +1,4 @@
-"""Conservative discussion-mode tool policy, independent of permission approval.
+"""Conservative read-only tool policy, independent of the assistant's task.
 
 This is a command policy, not an OS sandbox. Only literal, single commands with
 known read-only options are accepted; shell programs and opaque tools fail closed.
@@ -46,7 +46,7 @@ _GIT_OPTIONS = {
 }
 
 
-def is_safe_discuss_command(command: object) -> bool:
+def is_safe_read_only_command(command: object) -> bool:
     if not isinstance(command, str) or not command.strip() or _SHELL_SYNTAX.search(command):
         return False
     try:
@@ -97,13 +97,13 @@ def _safe_options(args: list[str], allowed: set[str]) -> bool:
     return all(not arg.startswith("-") or arg in allowed for arg in args)
 
 
-def discuss_tool_guard(tool_use: ToolUse) -> str | None:
+def read_only_tool_guard(tool_use: ToolUse) -> str | None:
     if tool_use.name in READ_ONLY_TOOLS:
         return None
-    if tool_use.name == "bash" and is_safe_discuss_command(tool_use.input.get("command")):
+    if tool_use.name == "bash" and is_safe_read_only_command(tool_use.input.get("command")):
         return None
     return (
-        f"Blocked: Discuss mode cannot execute {tool_use.name}. "
+        f"Blocked: Read-only permission cannot execute {tool_use.name}. "
         "Only read-only tools and literal allowlisted commands are available. "
-        "Explain proposed changes; the user must exit discuss mode before execution."
+        "Answer within these permissions; only the user can change the permission setting."
     )

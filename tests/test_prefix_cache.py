@@ -194,7 +194,7 @@ class PrefixCacheTests(unittest.TestCase):
         self.assertIn("Blocked", agent.hooks.trigger("PreToolUse", ToolUse("deny", "bash", {"command": "new-danger"})))
         before_mode_change = deepcopy(agent.client._client.calls[-1])
         revision = agent.context.state.prompt_revision
-        agent.set_discuss_mode(True)
+        agent.set_read_only(True)
         self.send(agent)
         self.assertNotIn("mode_changed", self.observations()[-1]["rewrite_reasons"])
         self.assertEqual(revision, agent.context.state.prompt_revision)
@@ -263,7 +263,8 @@ class PrefixCacheTests(unittest.TestCase):
         config = ContextConfig(summarization_model="summary", compact_threshold_chars=100_000,
                                transcript_dir=self.root / "transcripts", tool_output_dir=self.root / "outputs")
         agent = self.agent(config=config, messages=rounds(1, size=1000))
-        agent.prompt_mode = PromptMode.DISCUSS
+        agent.read_only = True
+        agent.prompt_mode = PromptMode.NORMAL
         agent.context.begin_turn(0)
         self.send(agent)
         before = deepcopy(agent.messages)
@@ -274,7 +275,7 @@ class PrefixCacheTests(unittest.TestCase):
         self.assertGreater(agent.context.state.summary_revision, 0)
         self.assertEqual(agent.messages[:len(before)], before)
         sent = agent.client._client.calls[-1]
-        self.assertIn("本轮当前执行模式：Discuss · 只读讨论", sent["messages"][-1]["content"])
+        self.assertIn("当前权限：只读", sent["messages"][-1]["content"])
         self.assertEqual(sent["system"], agent.client._client.calls[0]["system"])
         after_count = len(agent.messages)
         self.send(agent)

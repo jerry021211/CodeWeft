@@ -5,9 +5,29 @@ import unittest
 from pathlib import Path
 
 from codeagent.prompts import PromptConfig, PromptMode, PromptRuntime
+from codeagent.prompts.template import load_template
 
 
 class PromptRuntimeTests(unittest.TestCase):
+    def test_all_roles_receive_common_rules_without_human_interaction_workflow(self):
+        runtime = PromptRuntime(workspace=Path.cwd())
+        core = load_template("core")
+        identity = load_template("identity")
+        for mode in PromptMode:
+            with self.subTest(mode=mode):
+                result = runtime.assemble(mode=mode, tool_schemas=[])
+                self.assertTrue(result.system_prompt.startswith(core + "\n\n"))
+                fragments = {item.id: item for item in result.trace if item.included}
+                self.assertIn("base.identity", fragments)
+                self.assertIn("runtime.reminder", fragments)
+                if mode is PromptMode.NORMAL:
+                    self.assertIn(identity, result.system_prompt)
+                else:
+                    self.assertNotIn(identity, result.system_prompt)
+                    self.assertNotIn("base.modes", fragments)
+                    self.assertNotIn("base.execution", fragments)
+                    self.assertNotIn("ask_user", result.system_prompt)
+
     def test_ordinary_modes_share_system_for_each_planning_backend(self):
         runtime = PromptRuntime(workspace=Path.cwd())
         for planner in ([], ["todo_write"], ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"]):
@@ -15,11 +35,9 @@ class PromptRuntimeTests(unittest.TestCase):
                 tools = [{"name": name} for name in [*planner, "bash", "subagent", "remember", "load_skill"]]
                 options = dict(tool_schemas=tools, skill_catalog="skill catalog", memory_catalog="memory catalog")
                 normal = runtime.assemble(mode=PromptMode.NORMAL, **options)
-                discuss = runtime.assemble(mode=PromptMode.DISCUSS, **options)
-                self.assertEqual(normal.system_prompt, discuss.system_prompt)
-                self.assertEqual(normal.prompt_hash, discuss.prompt_hash)
                 self.assertNotIn("本轮当前执行模式", normal.system_prompt)
-                self.assertIn("<code_mode_only>", normal.system_prompt)
+                self.assertNotIn("<code_mode_only>", normal.system_prompt)
+                self.assertNotIn("Discuss", normal.system_prompt)
 
     def test_read_only_memory_tools_do_not_advertise_remember(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
@@ -61,7 +79,7 @@ class PromptRuntimeTests(unittest.TestCase):
             skill_catalog="可用技能：\n- python-refactor: Refactor Python.",
         )
 
-        self.assertIn("交互式编程助手", result.system_prompt)
+        self.assertIn("交互式助手", result.system_prompt)
         self.assertIn("使用 todo_write", result.system_prompt)
         self.assertIn("subagent 工具用于", result.system_prompt)
         self.assertIn("独立且边界明确", result.system_prompt)
@@ -74,8 +92,6 @@ class PromptRuntimeTests(unittest.TestCase):
             [
                 "base.core",
                 "base.identity",
-                "base.modes",
-                "base.discuss",
                 "base.execution",
                 "tools.todo",
                 "tools.subagent",
@@ -138,9 +154,11 @@ class PromptRuntimeTests(unittest.TestCase):
         self.assertIn("implementing one assigned code Task", teammate_work.system_prompt)
         self.assertIn("submit one Candidate", teammate_work.system_prompt)
         self.assertIn("read-only analysis Task", teammate_analysis.system_prompt)
-        self.assertEqual(lead.trace[0].source, "templates/team_lead_identity.md")
+        self.assertEqual(next(item.source for item in lead.trace if item.id == "base.identity"),
+                         "templates/team_lead_identity.md")
         self.assertEqual(
-            teammate_plan.trace[0].source, "templates/teammate_plan.md"
+            next(item.source for item in teammate_plan.trace if item.id == "base.identity"),
+            "templates/teammate_plan.md",
         )
 
     def test_task_guidance_replaces_todo_guidance(self) -> None:
@@ -175,7 +193,8 @@ class PromptRuntimeTests(unittest.TestCase):
         self.assertIn("automatically integrates", result.system_prompt.lower())
         self.assertIn("never pushes to github", result.system_prompt.lower())
         self.assertNotIn("Perform the work directly", result.system_prompt)
-        self.assertEqual(result.trace[0].source, "templates/team_planner.md")
+        self.assertEqual(next(item.source for item in result.trace if item.id == "base.identity"),
+                         "templates/team_planner.md")
 
     def test_team_planning_allows_small_teams_without_duplicate_design(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
@@ -229,8 +248,8 @@ class PromptRuntimeTests(unittest.TestCase):
                 tool_schemas=[],
             )
 
-            self.assertTrue(result.system_prompt.startswith("## 范围与权限"))
-            self.assertIn("交互式编程助手", result.system_prompt)
+            self.assertTrue(result.system_prompt.startswith(load_template("core") + "\n\n"))
+            self.assertIn("交互式助手", result.system_prompt)
             self.assertNotIn("PROJECT CODING AGENT", result.system_prompt)
             self.assertIn("Use the project's public API conventions.", result.system_prompt)
             self.assertIn("project.instructions", [item.id for item in result.trace])

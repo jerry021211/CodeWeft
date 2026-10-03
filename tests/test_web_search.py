@@ -16,7 +16,7 @@ from codeagent.events import EventEmitter, ExecutionContext
 from codeagent.memory import MemoryConfig
 from codeagent.messages import ToolUse
 from codeagent.permissions import WaitingPermissionBroker
-from codeagent.permissions.discuss import discuss_tool_guard
+from codeagent.permissions.read_only import read_only_tool_guard
 from codeagent.runtime import CancellationToken, CancelledError
 from codeagent.tools.web_search import WebSearchConfig, WebSearchTool
 from codeagent.web.factory import WebAgentFactory, serialize_runtime_state
@@ -133,7 +133,7 @@ class WebSearchTests(unittest.TestCase):
     def test_enabled_search_is_allowed_in_discuss_and_read_only_children(self):
         registry = create_default_registry(web_search_config=self.config)
         self.assertIn("web_search", registry.read_only_copy())
-        self.assertIsNone(discuss_tool_guard(ToolUse(id="search", name="web_search", input={"query": "test"})))
+        self.assertIsNone(read_only_tool_guard(ToolUse(id="search", name="web_search", input={"query": "test"})))
 
     def test_factory_run_isolation_subagents_and_checkpoint_reopen(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -155,7 +155,7 @@ class WebSearchTests(unittest.TestCase):
                 cancellation=CancellationToken(), permission_broker=WaitingPermissionBroker())
             try:
                 with patch.object(EnvironmentConfig, "create_anthropic_client", return_value=client):
-                    online = factory.create(**kwargs, web_search_enabled=True, root_prompt_mode=PromptMode.DISCUSS)
+                    online = factory.create(**kwargs, web_search_enabled=True, read_only=True)
                     self.assertIn("web_search", online.tools)
                     online.run("test")
                     checkpoint = SimpleNamespace(messages=online.messages, context=serialize_runtime_state(online.context.state))

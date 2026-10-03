@@ -63,8 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Use an existing task list when the tasks backend is active.",
     )
     parser.add_argument(
-        "--discuss", action="store_true",
-        help="Start in read-only discussion mode; no edits or planning required.",
+        "--read-only", action="store_true",
+        help="Restrict tools to read-only operations.",
     )
     parser.add_argument(
         "--web-search", action=argparse.BooleanOptionalAction, default=None,
@@ -218,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         client=client,
         tools=tools,
         config=env.to_agent_config(planning_backend=planning_backend),
-        prompt_mode=PromptMode.DISCUSS if args.discuss else PromptMode.NORMAL,
+        prompt_mode=PromptMode.NORMAL,
+        read_only=args.read_only,
         hooks=create_default_hooks(
             permission_policy=PermissionPolicy(workspace=workspace, broker=permission_broker),
             workspace=workspace,
@@ -251,10 +252,10 @@ def main(argv: list[str] | None = None) -> int:
             print_run_result(result, stream=stream)
             return 1 if is_execution_failure(result.stop_reason) else 0
 
-        print("codeagent interactive mode. Type /discuss to toggle read-only discussion; q, quit, or exit to stop.")
+        print("codeagent interactive mode. Type /read-only on or /read-only off to change permissions; q, quit, or exit to stop.")
         while True:
             try:
-                user_input = input("[discuss] > " if agent.discuss_mode else "> ").strip()
+                user_input = input("[read-only] > " if agent.read_only else "> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
@@ -263,13 +264,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if not user_input:
                 continue
-            if user_input.lower() in {"/discuss", "/discuss on", "/discuss off"}:
-                enabled = (
-                    not agent.discuss_mode if user_input.lower() == "/discuss"
-                    else user_input.lower().endswith(" on")
-                )
-                agent.set_discuss_mode(enabled)
-                print("Discuss mode ON — read only." if enabled else "Discuss mode OFF — normal permissions restored.")
+            if user_input.lower() in {"/read-only on", "/read-only off"}:
+                enabled = user_input.lower().endswith(" on")
+                agent.set_read_only(enabled)
+                print("Read-only permission enabled." if enabled else "Normal permissions restored.")
                 continue
 
             result = agent.run(user_input)

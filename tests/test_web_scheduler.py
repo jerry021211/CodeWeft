@@ -48,6 +48,7 @@ class _FakeFactory:
     def __init__(self, gate=None):
         self.gate = gate
         self.prompt_modes = []
+        self.read_only_choices = []
         self.web_search_choices = []
 
     def create(
@@ -59,9 +60,11 @@ class _FakeFactory:
         checkpoint=None,
         root_prompt_mode=None,
         web_search_enabled=False,
+        read_only=False,
     ):
         del permission_broker, checkpoint
         self.prompt_modes.append(root_prompt_mode)
+        self.read_only_choices.append(read_only)
         self.web_search_choices.append(web_search_enabled)
         return _FakeAgent(event_emitter, cancellation, self.gate)
 
@@ -187,12 +190,12 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("run.completed", event_types)
         self.assertIsNotNone(self.repository.get_checkpoint_for_run(run.id))
 
-    def test_discuss_profile_is_snapshotted_and_next_run_can_exit(self):
+    def test_read_only_is_snapshotted_independently_of_agent_profile(self):
         factory = _FakeFactory()
         scheduler = RunScheduler(self.repository, factory)
         try:
-            for mode in ("discuss", "normal"):
-                run = scheduler.submit(self.conversation.id, "inspect", mode=mode)
+            for read_only in (True, False):
+                run = scheduler.submit(self.conversation.id, "inspect", read_only=read_only)
                 deadline = time.time() + 3
                 while time.time() < deadline:
                     current = self.repository.get_run(run.id)
@@ -200,10 +203,12 @@ class SchedulerTests(unittest.TestCase):
                         break
                     time.sleep(0.01)
                 self.assertEqual(current.status, "completed")
-                self.assertEqual(current.metadata["agent_profile"], mode)
+                self.assertEqual(current.metadata["agent_profile"], "normal")
+                self.assertEqual(current.metadata["read_only"], read_only)
             users = [m for m in self.repository.list_messages(self.conversation.id) if m.role == "user"]
-            self.assertEqual([m.metadata["mode"] for m in users], ["discuss", "normal"])
-            self.assertEqual(factory.prompt_modes, [PromptMode.DISCUSS, None])
+            self.assertEqual([m.metadata["read_only"] for m in users], [True, False])
+            self.assertEqual(factory.prompt_modes, [None, None])
+            self.assertEqual(factory.read_only_choices, [True, False])
         finally:
             scheduler.stop()
 
@@ -230,7 +235,7 @@ class SchedulerTests(unittest.TestCase):
     def test_discuss_rejects_team_before_creating_run(self):
         scheduler = RunScheduler(self.repository, _FakeFactory())
         with self.assertRaises(ValueError):
-            scheduler.submit(self.conversation.id, "inspect", mode="discuss", use_team=True)
+            scheduler.submit(self.conversation.id, "inspect", read_only=True, use_team=True)
         self.assertEqual(self.repository.list_runs(conversation_id=self.conversation.id), [])
 
     def test_run_uses_the_workspace_bound_to_its_conversation(self):

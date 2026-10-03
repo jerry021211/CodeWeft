@@ -32,7 +32,7 @@ from codeagent.messages import Message, ToolUse, extract_text, normalize_tool_us
 from codeagent.prompts import PromptAssemblyResult, PromptMode, PromptRuntime
 from codeagent.planning import PlanningBackend
 from codeagent.permissions import CliPermissionBroker, WaitingPermissionBroker
-from codeagent.permissions.discuss import discuss_tool_guard
+from codeagent.permissions.read_only import read_only_tool_guard
 from codeagent.permissions.broker import permission_execution, permission_tool
 from codeagent.recovery import RecoveryRuntime
 from codeagent.runtime import CancellationToken
@@ -115,6 +115,7 @@ class Agent:
     execution_activity: ExecutionActivity | None = None
     permission_broker: CliPermissionBroker | WaitingPermissionBroker | None = None
     prompt_mode: PromptMode | None = None
+    read_only: bool = False
     execution_budget: RunBudget | None = None
     tool_admission: Admission | None = None
     _loop_guard: LoopGuard | None = field(default=None, init=False, repr=False)
@@ -137,7 +138,7 @@ class Agent:
         self.hooks = self.hooks.copy()
         from codeagent.hooks.code_intelligence import CodeIntelligenceFeedback
         self.hooks.register("PostToolUse", CodeIntelligenceFeedback(lambda: self.tools), first=True)
-        self.hooks.register("PreToolUse", self._discuss_guard, first=True)
+        self.hooks.register("PreToolUse", self._read_only_guard, first=True)
         task_tools = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate"}
         if "todo_write" in self.tools and any(name in self.tools for name in task_tools):
             raise ValueError("TodoWrite and Task tools cannot be registered together")
@@ -179,7 +180,7 @@ class Agent:
         )
         self.context.state.tool_schema_hash = current_tool_hash
         if self.config.loop_guard is not None and self._prompt_mode() in {
-            PromptMode.NORMAL, PromptMode.DISCUSS, PromptMode.SUBAGENT,
+            PromptMode.NORMAL, PromptMode.SUBAGENT,
         }:
             self._loop_guard = LoopGuard(
                 self.config.loop_guard, tools=lambda: self.tools, emit=self.event_emitter.emit,
@@ -211,18 +212,14 @@ class Agent:
             message["_context_source"] = "runtime"
         self.messages.append(message)
 
-    @property
-    def discuss_mode(self) -> bool:
-        return self.prompt_mode is PromptMode.DISCUSS
+    def set_read_only(self, enabled: bool) -> None:
+        """Change an idle ordinary Agent's permissions, never its role or task."""
+        if self.prompt_mode not in {None, PromptMode.NORMAL}:
+            raise ValueError("Read-only permissions cannot replace a Team or subagent role")
+        self.read_only = enabled
 
-    def set_discuss_mode(self, enabled: bool) -> None:
-        """Switch an idle ordinary Agent; never use this to unlock a Team role."""
-        if self.prompt_mode not in {None, PromptMode.NORMAL, PromptMode.DISCUSS}:
-            raise ValueError("Discuss mode cannot replace a Team or subagent role")
-        self.prompt_mode = PromptMode.DISCUSS if enabled else PromptMode.NORMAL
-
-    def _discuss_guard(self, tool_use: ToolUse) -> str | None:
-        return discuss_tool_guard(tool_use) if self.discuss_mode else None
+    def _read_only_guard(self, tool_use: ToolUse) -> str | None:
+        return read_only_tool_guard(tool_use) if self.read_only else None
 
     def set_execution_activity(self, activity: ExecutionActivity) -> None:
         """Bind one Team worker's monitor to main, retry and forked side calls."""
@@ -331,7 +328,7 @@ class Agent:
             self.context.begin_turn(len(self.messages))
             self.hooks.trigger("UserPromptSubmit", prompt) #打印日志
             self.context.record_user_prompt(prompt)
-            self._sync_mode_reminder(self.messages)
+            self._sync_permission_reminder(self.messages)
             self.add_user_message(prompt)
 
         with trace_run(
@@ -406,7 +403,7 @@ class Agent:
                     )
                     return result
                 iterations += 1
-                if self.discuss_mode:
+                if self.read_only:
                     reminder = None
                     if self._loop_guard is not None:
                         self._loop_guard.before_model(self.messages)
@@ -580,7 +577,7 @@ class Agent:
             kwargs["system"] = prompt_assembly.system_prompt
         validate_tool_history(kwargs["messages"])
         canonical = kwargs["messages"]
-        self._sync_mode_reminder(canonical)
+        self._sync_permission_reminder(canonical)
         feedback = ""
         if self._loop_guard is not None:
             feedback = self._loop_guard.feedback()
@@ -600,7 +597,7 @@ class Agent:
         )
         # A compaction in preflight may have folded a previously sent reminder.
         # Append it at the safe tail and recheck the complete request budget.
-        reinjected = self._sync_mode_reminder(canonical, effective=kwargs["messages"])
+        reinjected = self._sync_permission_reminder(canonical, effective=kwargs["messages"])
         if self._loop_guard is not None:
             reinjected = self._sync_runtime_reminder("loop_guard", feedback, canonical,
                                                      effective=kwargs["messages"]) or reinjected
@@ -668,21 +665,30 @@ class Agent:
             state.latest_request_estimated = usage.estimated
         return response
 
-    def _sync_mode_reminder(self, canonical: list[Message], *,
+    def _sync_permission_reminder(self, canonical: list[Message], *,
                             effective: list[Message] | None = None) -> bool:
-        mode = self._prompt_mode()
-        if mode not in {PromptMode.NORMAL, PromptMode.DISCUSS}:
+        if self._prompt_mode() is not PromptMode.NORMAL:
             return False
-        assert self.prompt_runtime is not None
-        previous = self.context.state.last_prompt_mode
-        appended = self._sync_runtime_reminder(
-            "mode", self.prompt_runtime.mode_turn_context(mode), canonical, effective=effective,
+        state = self.context.state
+        # Old checkpoints retain mode history. Supersede it once without rewriting
+        # the transcript or silently inheriting authority from historical text.
+        legacy = state.last_prompt_mode is not None or "mode" in state.runtime_reminders
+        if not self.read_only and not legacy and "permission" not in state.runtime_reminders:
+            return False
+        rules = (
+            "当前权限：只读。允许读取、搜索和回答；禁止写文件、写记忆、更新任务、委派或调用未知及外部工具。"
+            "命令仅限单个已知只读命令，不含管道、重定向或脚本；优先使用读取和搜索工具。"
+            if self.read_only else
+            "当前权限：允许在用户授权范围内执行操作。是否需要操作由用户请求决定；可直接回答，不必创建文件或运行工具。"
         )
-        if previous != mode.value:
-            self.event_emitter.emit("agent.mode.changed", {
-                "previous_mode": previous, "mode": mode.value,
-            })
-        self.context.state.last_prompt_mode = mode.value
+        appended = self._sync_runtime_reminder(
+            "permission", "[运行时权限更新]\n" + rules + "\n以本条权限为准，历史权限或模式描述不代表当前状态。",
+            canonical, effective=effective,
+        )
+        if appended:
+            self.event_emitter.emit("agent.permissions.changed", {"read_only": self.read_only})
+        state.last_prompt_mode = None
+        state.runtime_reminders.pop("mode", None)
         return appended
 
     def _sync_runtime_reminder(self, kind: str, value: str, canonical: list[Message], *,
@@ -703,7 +709,7 @@ class Agent:
         validate_tool_history(canonical)
         labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期"}
         text = value or "此前的运行时执行纠偏已解除；继续遵循当前用户目标和权限。"
-        content = text if kind == "mode" else f"[运行时提醒：{labels[kind]}；不改变用户目标或权限]\n{text}"
+        content = text if kind == "permission" else f"[运行时提醒：{labels[kind]}；不改变用户目标或权限]\n{text}"
         message = {"role": "user", "content": content}
         canonical.append({**message, "_context_source": "runtime"})
         state[kind] = {"value_hash": value_hash, "message_hash": fingerprint(message)["hash"],
@@ -775,7 +781,7 @@ class Agent:
 
     def _parallel_kind(self, tool):
         if not self.config.parallel.enabled or self._prompt_mode() not in {
-            PromptMode.NORMAL, PromptMode.DISCUSS, PromptMode.SUBAGENT,
+            PromptMode.NORMAL, PromptMode.SUBAGENT,
         }:
             return None
         if (tool.name == SUBAGENT_TOOL_NAME and tool.input.get("access") == "read_only"
@@ -1250,7 +1256,7 @@ class Agent:
 
         assert self.prompt_runtime is not None
         components = {
-            "mode": ("single_agent" if self._prompt_mode() in {PromptMode.NORMAL, PromptMode.DISCUSS}
+            "mode": ("single_agent" if self._prompt_mode() is PromptMode.NORMAL
                      else self._prompt_mode().value), "tools": tool_request_hash(tool_schemas),
             "rules": self.prompt_runtime.rules_fingerprint(),
             "permissions": fingerprint(self.hooks.permission_snapshot())["hash"],
@@ -1337,7 +1343,7 @@ class Agent:
             return self.memory_manager.select_context(
                 self.messages,
                 current_query=current_query,
-                allow_index_write=not self.discuss_mode,
+                allow_index_write=not self.read_only,
                 client=self._side_query_client("memory_select"),
                 model=model or self.config.model,
                 max_tokens=max_tokens or self.config.max_tokens,
@@ -1400,7 +1406,7 @@ class Agent:
             })
 
     def _after_turn_memory(self, start_index: int = 0) -> None:
-        if self.memory_manager is None or self.discuss_mode:
+        if self.memory_manager is None or self.read_only:
             return
         try:
             memory_client = self._side_query_client("memory_maintenance")

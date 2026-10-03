@@ -162,7 +162,7 @@ CLI 默认启用基础 hooks：
 - `PostToolUse`：大输出提醒
 - `Stop`：工具调用次数统计
 
-普通 Agent、Discuss 和普通子 Agent 默认启用防循环与任务预算，Team 不在本次范围内。
+普通 Agent（含只读权限）和普通子 Agent 默认启用防循环与任务预算，Team 不在本次范围内。
 保护状态独立于上下文压缩；Web checkpoint 保存状态，循环或预算停止会标记为失败，
 CLI 单次执行返回非零退出码。规则、可调阈值、恢复语义和输入识别限制见
 [防循环与执行预算](docs/loop-guard.md)。
@@ -188,49 +188,41 @@ CODEAGENT_WEB_SEARCH_TIMEOUT=20
 - **SDK**：`create_default_registry(web_search_config=env.web_search_config)`；也可从
   `codeagent.tools.web_search` 导入 `WebSearchConfig` 自行配置。
 
-普通编码和 Discuss 均支持，普通子 Agent 继承父请求的选择；Team 会话暂不支持。
+普通会话（含只读权限）均支持，普通子 Agent 继承父请求的选择；Team 会话暂不支持。
 关闭时不注册搜索工具，也不会调用 Tavily。这个开关只控制内置搜索工具，并非整个进程的网络隔离：
 模型 API、既有 shell/MCP 工具仍按原配置工作。搜索词会发送给 Tavily，Key 仅保存在服务端配置中。
 每次搜索默认 5 条、最多 10 条，使用 basic 深度；网络错误、限流或额度不足会明确报告，
 不自动重试收费请求。搜索结果作为外部参考资料处理。
 
-## Discuss：只读讨论模式
+## 只读权限
 
-Code / Discuss 共用稳定的系统提示词和工具定义，两种模式的规则固定存在并按当前模式
-生效。首次请求、切换模式时只在历史尾部追加运行时通知；压缩折叠通知后会补回，普通
-同模式回合不重复注入。仅切换模式不再重写 system 或旧消息，有利于保留前缀缓存。
-旧版提示词快照升级会重建一次；其他规则变更、压缩及服务端缓存状态仍会影响实际命中。
+助手统一按用户请求回答或执行，不再区分 Code / Discuss 交互模式。提问、讨论、创作和
+角色扮演默认在对话中交付；需要文件或代码产物时才操作工作区。
 
-用于代码阅读、审查和架构讨论，不要求先建计划。通过 `PreToolUse` hook 强制限制
-工具执行；即使模型要求写入，也会返回 `tool.blocked`，不会进入审批或执行写工具。
+只读保护是独立的工具权限，不改变助手角色或任务：
 
-- **Web**：点击输入框下方的模式按钮，在向上展开的菜单中选择 `Code · 编码` 或 `Discuss · 只读`；也可输入
-  `/discuss` 切换。运行和排队期间不可切换，停止或完成后可切回编码。
-  每条消息的模式随 Run 保存；重新打开会话时按最近一条用户消息恢复选择。
-  切换模式后的下一条请求会在模型历史尾部追加运行时模式更新，明确旧回复中的模式
-  已经过时；原有对话保持完整。旧版会话首次恢复时同样补充当前模式，之后同模式不重复追加。
-- **CLI**：`python -m codeagent --discuss "解释这个项目的架构"`；交互模式支持
-  `/discuss`、`/discuss on`、`/discuss off`，提示符显示 `[discuss] >`。
-- **SDK**：构造 `Agent(..., prompt_mode=PromptMode.DISCUSS)`，或在普通 Agent
-  空闲时调用 `agent.set_discuss_mode(True/False)`。
-- **API**：`POST /api/conversations/{id}/runs` 的 JSON 支持
-  `{"content":"解释架构","mode":"discuss"}`；省略 `mode` 时仍为 `normal`。
+- **Web**：输入框下勾选“只读保护”。权限随每次请求保存，重新打开会话时恢复最近一次选择；
+  运行或排队期间不能修改当前请求的权限。
+- **CLI**：`python -m codeagent --read-only "解释这个项目的架构"`；交互会话使用
+  `/read-only on`、`/read-only off`，只读时提示符显示 `[read-only] >`。
+- **SDK**：`Agent(..., read_only=True)`；普通 Agent 空闲时可调用 `agent.set_read_only(True/False)`。
+- **API**：`POST /api/conversations/{id}/runs` 支持
+  `{"content":"解释架构","readOnly":true}`，省略时为 `false`。
 
-可使用读取、搜索、技能/记忆加载、`TaskGet`、`TaskList` 和上下文压缩。
-文件写入、编辑、记忆保存、任务/TODO 更新、子 Agent、Team 和所有外部 MCP 工具
-均被阻止，回合后的自动记忆维护也暂停。退出后继续遵守原来的权限策略。
+开启后，`PreToolUse` 在审批和执行前阻止文件/记忆写入、任务更新、委派、未知及外部 MCP
+工具；自动记忆维护暂停，Team 不能启动或接管。读取、搜索、提问和上下文压缩仍可用。
+Shell 仅允许单个已知只读命令及受支持的选项，不允许管道、重定向和脚本。
+`git diff/log/show` 需要 `--no-ext-diff --no-textconv`。
 
-Shell 只接收单条字面量命令和明确允许的选项，例如 `Get-Content -Raw README.md`、
-`Get-ChildItem -Name`、`rg -n pattern codeagent`、`git status --short`。
-`git diff/log/show` 必须加 `--no-ext-diff --no-textconv`，防止执行外部差异转换器。
-复合命令、管道、重定向、脚本、网络命令和未知工具默认拒绝；复杂搜索优先使用原生工具。
+正常新会话不注入模式通知。只读权限启用、改变或压缩丢失提醒时，追加简短的当前权限说明；
+系统提示词和工具定义不因权限切换重建。历史消息保持完整，旧模式提醒被当前权限说明取代。
+旧 API 请求 `mode: "discuss"` 兼容映射为只读；与 `readOnly: false` 冲突时拒绝请求。
+旧消息的 `metadata.mode` 仅用于恢复权限，后续请求使用 `read_only` metadata。
+SDK 的 `PromptMode.DISCUSS` 和旧 `/discuss`、`--discuss` 入口已移除，请使用上述权限接口。
 
-这是 Agent 工具执行策略，不是操作系统沙箱；仍假定本机命令程序及配置可信。
-会话、事件、checkpoint 和工具输出仍按原机制持久化到 Runtime 数据目录。
-Web 的模式是每次请求的快照，不会终止其他会话或已存在的后台程序。
-
-源码研究、原项目 hook 调用链、命令策略局限和本项目接入设计见
-[Discuss 模式实现说明](docs/discuss-mode.md)。
+这是 Agent 工具执行策略，不是操作系统沙箱。会话、事件和检查点仍会保存到运行时数据目录，
+权限变更不影响其他会话或已启动的进程。旧模式的研究与实现背景见
+[历史设计记录](docs/discuss-mode.md)，该文不再代表当前接口。
 
 ## 用户提问：ask_user
 
@@ -248,7 +240,7 @@ CLI 和 Web 的主 Agent 可在需求、偏好或关键决策不明确时调用�
 - CLI 在终端显示问题，接受选项编号或自由文本；空输入继续等待，Ctrl+C 中止。
 - Web 在聊天输入区上方显示问题和回答框，点击选项后仍需提交；可用“停止”取消等待。
   问题和回答保存在 SQLite，刷新页面可恢复；服务重启会中断 Run 并取消未回答问题。
-- Discuss 模式也可提问；Team 和独立子 Agent 工具池不新增交互入口。
+- 只读权限下也可提问；Team 和独立子 Agent 工具池不新增交互入口。
 - 回答作为本次 `ask_user` 的工具结果交回模型，随后继续同一个 Run。
 
 SDK 通过 `create_default_registry(ask_user_fn=handler)` 注入同步回调，签名为
@@ -535,7 +527,7 @@ CLI 和 Web 使用相同的加载规则，切换项目不会切换技能目录�
 
 Markdown 是权威来源，`.retrieval-v1.sqlite3` 是可重建的派生索引。每次查询检查文件清单和
 元数据，通常只重新读取变化文件；默认每 60 秒进行一次按需全文核对（不是后台定时器）。
-索引不可用时降级到内存检索；Discuss、Team 只读期间及手动搜索均不写索引。
+索引不可用时降级到内存检索；普通会话只读权限、Team 只读期间及手动搜索均不写索引。
 `memory.selection.completed` 事件分别记录候选、选中、注入和跳过原因，不包含完整查询或记忆正文。
 具体行为、限制和离线数据见 [长期记忆改造说明](docs/memory-retrieval.md)。
 
@@ -762,7 +754,7 @@ TEAM_WRITE_ENABLED=true
 ```
 
 在编码模式下打开 `Agent Team` 再发送需求，Lead 会提交团队方案；在右侧「团队」页批准
-方案后开始执行。开关按会话独立选择，普通消息不会根据文字自动组队。Discuss 模式不能
+方案后开始执行。开关按会话独立选择，普通消息不会根据文字自动组队。只读权限下不能
 启动团队；团队模式暂不支持联网搜索。已有活跃团队的会话会继续向 Root / Lead 发送指令。
 
 配置示例默认关闭 Team；只有 `TEAM_RUNTIME_ENABLED=true` 时才启动 Supervisor，

@@ -186,7 +186,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, "end_turn")
         self.assertEqual(result.iterations, 2)
         self.assertEqual(
-            agent.messages[3]["content"][0],
+            agent.messages[2]["content"][0],
             {
                 "type": "tool_result",
                 "tool_use_id": "toolu_1",
@@ -252,7 +252,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn("echo", subagent_tool_names)
         self.assertNotIn("subagent", subagent_tool_names)
         self.assertEqual(
-            agent.messages[3]["content"][0],
+            agent.messages[2]["content"][0],
             {
                 "type": "tool_result",
                 "tool_use_id": "toolu_parent",
@@ -299,7 +299,7 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(result.final_text, "parent handled failure")
         self.assertEqual(len(client.calls), 3)
-        tool_result = agent.messages[3]["content"][0]["content"]
+        tool_result = agent.messages[2]["content"][0]["content"]
         self.assertTrue(tool_result.startswith("Error: Subagent failed"))
         child_events = [
             event.type for event in events if event.parent_agent_id == "agent_root"
@@ -370,7 +370,7 @@ class AgentTests(unittest.TestCase):
 
         agent.run("do work")
 
-        self.assertIn("交互式编程助手", client.system_prompt)
+        self.assertIn("交互式助手", client.system_prompt)
         self.assertIn("subagent 工具用于", client.system_prompt)
 
     def test_agent_injects_before_model_call_reminders(self) -> None:
@@ -392,8 +392,8 @@ class AgentTests(unittest.TestCase):
 
         agent.run("do work")
 
-        self.assertIn("<reminder>plan</reminder>", agent.messages[2]["content"])
-        self.assertTrue(agent.messages[2]["content"].startswith("[运行时提醒："))
+        self.assertIn("<reminder>plan</reminder>", agent.messages[1]["content"])
+        self.assertTrue(agent.messages[1]["content"].startswith("[运行时提醒："))
 
     def test_agent_adds_todo_guidance_when_tool_is_available(self) -> None:
         class CaptureClient:
@@ -418,7 +418,7 @@ class AgentTests(unittest.TestCase):
 
         agent.run("do work")
 
-        self.assertIn("交互式编程助手", client.system_prompt)
+        self.assertIn("交互式助手", client.system_prompt)
         self.assertIn("使用 todo_write", client.system_prompt)
 
     def test_agent_adds_skill_catalog_when_available(self) -> None:

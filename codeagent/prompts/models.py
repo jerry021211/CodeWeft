@@ -14,7 +14,6 @@ class PromptMode(str, Enum):
     """System prompt variants used by each independent Agent role."""
 
     NORMAL = "normal"
-    DISCUSS = "discuss"
     SUBAGENT = "subagent"
     TEAM_PLANNER = "team_planner"
     TEAM_LEAD = "team_lead"

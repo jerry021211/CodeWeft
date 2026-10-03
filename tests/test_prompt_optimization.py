@@ -35,6 +35,27 @@ def done(text="完成"):
 
 
 class PromptBudgetTests(unittest.TestCase):
+    def test_every_role_preserves_required_rules_and_rejects_insufficient_budget(self):
+        for mode in PromptMode:
+            with self.subTest(mode=mode):
+                baseline = PromptRuntime(workspace=Path.cwd()).assemble(mode=mode, tool_schemas=[])
+                static = [item for item in baseline.trace if item.section == "static"]
+                dynamic = [item for item in baseline.trace if item.section == "dynamic"]
+                limits = dict(
+                    system_budget_chars=len(baseline.system_prompt),
+                    static_budget_chars=sum(item.chars for item in static) + 2 * (len(static) - 1),
+                    dynamic_budget_chars=sum(item.chars for item in dynamic) + 2 * (len(dynamic) - 1),
+                )
+                runtime = PromptRuntime(workspace=Path.cwd(), config=PromptConfig(**limits))
+                result = runtime.assemble(mode=mode, tool_schemas=[], selected_memory_context="optional " * 1000)
+                self.assertEqual(result.system_prompt, baseline.system_prompt)
+                self.assertFalse(next(item for item in result.trace if item.id == "memory.selected").included)
+                for budget in limits:
+                    with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, "必要片段"):
+                        PromptRuntime(workspace=Path.cwd(), config=PromptConfig(
+                            **(limits | {budget: limits[budget] - 1})
+                        )).assemble(mode=mode, tool_schemas=[])
+
     def test_required_fragments_survive_large_optional_content(self):
         runtime = PromptRuntime(workspace=Path.cwd(), config=PromptConfig(dynamic_budget_chars=400))
         result = runtime.assemble(
@@ -72,7 +93,7 @@ class PromptBudgetTests(unittest.TestCase):
             (root / ".prompts/project.md").write_text("必须保留的规范" * 1000, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "static"):
                 PromptRuntime(workspace=root, config=PromptConfig(static_budget_chars=2000)).assemble(
-                    mode=PromptMode.DISCUSS, tool_schemas=[])
+                    mode=PromptMode.NORMAL, tool_schemas=[])
 
     def test_catalog_requires_loader_and_planning_guidance_is_exclusive(self):
         runtime = PromptRuntime(workspace=Path.cwd())
@@ -84,14 +105,14 @@ class PromptBudgetTests(unittest.TestCase):
         self.assertNotIn("skills.catalog", included)
         self.assertNotIn("不可调用技能", result.system_prompt)
 
-    def test_discuss_receives_shared_rules_with_code_only_execution(self):
+    def test_ordinary_prompt_has_shared_rules_without_mode_branches(self):
         result = PromptRuntime(workspace=Path.cwd()).assemble(
-            mode=PromptMode.DISCUSS, tool_schemas=[{"name": "write_file"}, {"name": "remember"}])
+            mode=PromptMode.NORMAL, tool_schemas=[{"name": "write_file"}, {"name": "remember"}])
         ids = {x.id for x in result.trace if x.included}
         self.assertIn("base.core", ids)
         self.assertIn("base.execution", ids)
         self.assertIn("memory.write", ids)
-        self.assertIn("以下规则仅在 Code 模式适用", result.system_prompt)
+        self.assertNotIn("code_mode_only", result.system_prompt)
         self.assertIn("出现不代表获准执行", result.system_prompt)
 
 

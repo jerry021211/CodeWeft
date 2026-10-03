@@ -13,7 +13,7 @@ from codeagent import Agent, AgentConfig, ModelResponse, create_default_registry
 from codeagent.context import ContextConfig, ContextManager
 from codeagent.events import EventEmitter, ExecutionContext, RecordingEventSink
 from codeagent.messages import ToolUse
-from codeagent.permissions.discuss import discuss_tool_guard
+from codeagent.permissions.read_only import read_only_tool_guard
 from codeagent.runtime import CancellationToken, CancelledError
 from codeagent.runtime.activity import ExecutionActivity
 from codeagent.tools import AskUserTool, terminal_ask_user
@@ -32,7 +32,7 @@ class AskUserTests(unittest.TestCase):
         self.assertEqual(result, "Error: 请先解释")
         self.assertEqual(result.status, "success")
         self.assertEqual(received, [("q", ["A", "B"])])
-        self.assertIsNone(discuss_tool_guard(ToolUse("q", "ask_user", {"question": "q"})))
+        self.assertIsNone(read_only_tool_guard(ToolUse("q", "ask_user", {"question": "q"})))
 
     def test_terminal_reprompts_and_supports_choices_and_free_text(self):
         with patch("builtins.input", side_effect=[" ", "2"]), patch("builtins.print"):
