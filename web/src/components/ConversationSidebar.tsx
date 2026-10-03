@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef } from "react";
-import { Archive, Bot, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, Plus, Search, Trash2, X } from "lucide-react";
+import { Archive, Bot, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, Plus, Search, Settings2, Trash2, X } from "lucide-react";
 import type { Conversation } from "@/types/api";
 import { cx, formatRelativeTime, isRunActive, statusLabel } from "@/lib/utils";
 import { IconButton, Skeleton, StatusDot } from "@/components/ui";
@@ -22,6 +22,7 @@ type Props = {
   onDelete: (conversation: Conversation) => void;
   deletingId?: string;
   onClose?: () => void;
+  onOpenSettings?: () => void;
 };
 
 export function ConversationSidebar(props: Props) {
@@ -182,7 +183,10 @@ export function ConversationSidebar(props: Props) {
           })}
         </nav>
       </div>
-      <footer className="border-t border-white/[0.06] px-4 py-3 text-[10px] text-sidebar-muted">数据仅保存在本机</footer>
+      <footer className="shrink-0 border-t border-white/[0.06] px-3 py-3 text-[10px] text-sidebar-muted">
+        <button type="button" onClick={props.onOpenSettings} className="mb-2 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-xs text-sidebar-ink transition hover:bg-white/5"><Settings2 className="size-4" />模型设置</button>
+        <span className="px-3">数据仅保存在本机</span>
+      </footer>
     </aside>
   );
 }

@@ -42,7 +42,8 @@ from codeagent.web.storage import SQLiteRepository
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the codeagent Anthropic agent.")
+    parser = argparse.ArgumentParser(description="Run the codeagent multi-provider agent.")
+    parser.add_argument("--attach", action="append", default=[], metavar="PATH", help="Attach an image, PDF, UTF-8 text, WAV or MP3; repeat for multiple files.")
     parser.add_argument(
         "query",
         nargs="*",
@@ -93,6 +94,15 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path.cwd()
     data_paths = RuntimeDataPaths(env.data_dir)
     query = " ".join(args.query).strip()
+    from codeagent.multimodal import attachment_from_path
+    from codeagent.speech import prepare_input, validate_input
+    try:
+        attachments = [attachment_from_path(path) for path in args.attach]
+        validate_input(query, attachments, env)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+    if attachments and not query:
+        query = "请分析这些附件。"
     requested_backend = args.planning_mode or env.planning_mode
     planning_backend = resolve_planning_backend(
         requested_backend,
@@ -182,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         task_state_provider=task_state_provider,
     )
     prompt_runtime = PromptRuntime(workspace=workspace, config=env.prompt_config)
-    client = env.create_anthropic_client(
+    client = env.create_model_client(
         stream=stream, on_text=print_stream_token if stream else None,
     )
     tools = create_default_registry(
@@ -248,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if query:
-            result = agent.run(query)
+            result = agent.run(prepare_input(query, attachments, env, check=agent.cancellation.raise_if_cancelled, emitter=agent.event_emitter))
             print_run_result(result, stream=stream)
             return 1 if is_execution_failure(result.stop_reason) else 0
 

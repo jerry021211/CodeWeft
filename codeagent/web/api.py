@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,6 +48,8 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
         RunResponse,
         RuntimeConfigResponse,
         SaveMcpServerRequest,
+        SaveModelSettingsRequest,
+        DiscoverModelsRequest,
         TaskActivityResponse,
         TaskListResponse,
         TaskResourceResponse,
@@ -126,7 +129,7 @@ def create_app(
             from codeagent.web.factory import WebAgentFactory
             from codeagent.web.scheduler import RunScheduler
 
-            runtime_env = runtime_env or EnvironmentConfig.from_env()
+            runtime_env = runtime_env or EnvironmentConfig.from_env(allow_unconfigured=True)
         configured_data_dir = getattr(runtime_env, "data_dir", None)
         data_paths = (
             RuntimeDataPaths(configured_data_dir)
@@ -235,6 +238,71 @@ def create_app(
     app.state.environment = runtime_env
     app.state.team_supervisor = team_supervisor
     app.state.team_worktrees = worktrees
+
+    from codeagent.model_settings import (
+        apply_settings, discover_models, public_settings, read_settings,
+        resolve_keys, write_settings, SettingsConflict,
+    )
+    from codeagent.config import EnvironmentConfig
+    saved_models = read_settings(data_paths.root) if isinstance(runtime_env, EnvironmentConfig) else None
+    settings_revision = saved_models["revision"] if saved_models else "environment"
+    settings_lock = threading.RLock()
+
+    def require_settings_environment():
+        from codeagent.config import EnvironmentConfig
+        if not isinstance(runtime_env, EnvironmentConfig):
+            raise HTTPException(status_code=503, detail="当前运行时未开放模型设置。")
+
+    @app.get("/api/settings/models")
+    def get_model_settings():
+        require_settings_environment()
+        with settings_lock:
+            return public_settings(runtime_env, settings_revision)
+
+    @app.put("/api/settings/models")
+    def save_model_settings(body: SaveModelSettingsRequest):
+        nonlocal runtime_env, settings_revision
+        require_settings_environment()
+        guard = getattr(scheduler, "model_settings_guard", None)
+        if not callable(guard):
+            raise HTTPException(status_code=503, detail="当前调度器不支持在线更新模型配置。")
+        with settings_lock, guard():
+            if body.revision != settings_revision:
+                raise HTTPException(status_code=409, detail="配置已更新，请重新读取后再保存。")
+            services = resolve_keys(body.services.model_dump(), runtime_env)
+            candidate = apply_settings(runtime_env, services)
+            try:
+                revision = write_settings(data_paths.root, services, expected_revision=settings_revision)
+            except SettingsConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except OSError as exc:
+                raise HTTPException(status_code=503, detail="模型配置写入失败，请检查数据目录权限。") from exc
+            scheduler.agent_factory.env = candidate
+            runtime_env = candidate
+            settings_revision = revision
+            app.state.environment = candidate
+            return public_settings(candidate, revision)
+
+    @app.post("/api/settings/models/discover")
+    def list_service_models(body: DiscoverModelsRequest):
+        require_settings_environment()
+        with settings_lock:
+            if body.revision != settings_revision:
+                raise HTTPException(status_code=409, detail="配置已更新，请重新读取后再测试连接。")
+            service = resolve_keys({body.service: body.services.model_dump()[body.service]}, runtime_env)[body.service]
+        protocol = service.get("protocol", "openai_chat")
+        models = discover_models(service, protocol=protocol)
+        return {"models": models, "message": "连接成功，已获取模型列表。" if models else "连接成功，但服务未返回可选模型，请手动填写。"}
+
+    @app.post("/api/settings/models/test")
+    def test_service_model(body: DiscoverModelsRequest):
+        from codeagent.model_probe import probe_model
+        require_settings_environment()
+        with settings_lock:
+            if body.revision != settings_revision:
+                raise HTTPException(status_code=409, detail="配置已更新，请重新读取后再测试连接。")
+            service = resolve_keys({body.service: body.services.model_dump()[body.service]}, runtime_env)[body.service]
+        return probe_model(body.service, service)
 
     @app.middleware("http")
     async def local_security(request: Request, call_next: Any) -> Response:
@@ -691,8 +759,17 @@ def create_app(
     ) -> CreateRunResponse:
         _require_conversation(repo, conversation_id)
         content = body.content.strip()
-        if not content:
+        if not content and not body.attachments:
             raise HTTPException(status_code=422, detail="Run content cannot be blank.")
+        attachments = [item.model_dump() for item in body.attachments]
+        if attachments:
+            from codeagent.speech import validate_input
+            if body.useTeam or repo.get_active_team_run_for_conversation(conversation_id):
+                raise HTTPException(status_code=422, detail="附件目前支持普通会话；请使用普通会话处理后再交给 Team。")
+            try:
+                validate_input(content, attachments, runtime_env)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         if body.readOnly and (
             body.useTeam or repo.get_active_team_run_for_conversation(conversation_id)
         ):
@@ -708,6 +785,8 @@ def create_app(
                 detail="Team 功能已关闭，此会话仍关联未结束的 Team。请新建普通会话；原 Team 记录和现场保持不变。",
             )
         options = {"use_team": body.useTeam}
+        if attachments:
+            options["attachments"] = attachments
         if body.reasoningEffort is not None:
             from codeagent.reasoning import environment_capabilities, validate_effort
             validate_effort(body.reasoningEffort, environment_capabilities(runtime_env))
@@ -840,6 +919,13 @@ def create_app(
     def runtime_config() -> RuntimeConfigResponse:
         from codeagent.reasoning import environment_capabilities
         return RuntimeConfigResponse(
+            model_services={
+                "chat": {"protocol": getattr(runtime_env, "model_protocol", "anthropic"), "model": getattr(runtime_env, "model_id", None)},
+                "speech": {"enabled": bool(getattr(getattr(runtime_env, "speech_config", None), "enabled", False)),
+                           "model": getattr(getattr(runtime_env, "speech_config", None), "model", None)},
+                "embedding": {"enabled": bool(getattr(getattr(runtime_env, "embedding_config", None), "enabled", False)),
+                              "model": getattr(getattr(runtime_env, "embedding_config", None), "model", None)},
+            },
             model=_config_value(runtime_env, "model_id", "model"),
             workspace=str(workspace_path),
             max_tokens=_optional_int(_config_value(runtime_env, "max_tokens")),

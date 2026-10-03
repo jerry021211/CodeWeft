@@ -274,7 +274,7 @@ class WebAgentFactory:
                 reasoning_run = self.task_service.get_run(team.root_run_id)
             if reasoning_run is not None:
                 reasoning_effort = reasoning_run.metadata.get("reasoning_effort")
-        client = self.env.create_anthropic_client(
+        client = self.env.create_model_client(
             stream=self.env.stream,
             event_emitter=event_emitter,
             usage_tracker=usage_tracker,

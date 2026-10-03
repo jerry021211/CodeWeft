@@ -1,5 +1,23 @@
 export type Identifier = string;
-export type ExecutionMode = "normal" | "discuss";
+
+export type Attachment = { name: string; media_type: string; data: string };
+
+export type ModelServiceName = "chat" | "speech" | "embedding";
+export type ModelService = { model: string; base_url: string; has_api_key: boolean };
+export type ModelSettings = {
+  revision: string;
+  configured: boolean;
+  services: {
+    chat: ModelService & { protocol: "anthropic" | "openai_chat" | "openai_responses"; max_tokens: number; stream: boolean;
+      input_modalities: string[] | null; reasoning_levels: string[]; reasoning_effort: string; token_parameter: "max_tokens" | "max_completion_tokens" };
+    speech: ModelService & { enabled: boolean; language: string; timeout_seconds: number };
+    embedding: ModelService & { enabled: boolean; dimensions: number; timeout_seconds: number; batch_size: number };
+  };
+};
+export type ModelSettingsInput = {
+  revision: string;
+  services: { [K in ModelServiceName]: Omit<ModelSettings["services"][K], "has_api_key"> & { api_key: string | null } };
+};
 
 export type RunStatus =
   | "queued"
@@ -75,7 +93,7 @@ export type Message = {
   created_at: string;
   run_id?: Identifier | null;
   status?: "streaming" | "complete" | "failed";
-  metadata?: { mode?: ExecutionMode; web_search_enabled?: boolean; [key: string]: unknown };
+  metadata?: { read_only?: boolean; mode?: "normal" | "discuss"; web_search_enabled?: boolean; [key: string]: unknown };
 };
 
 export type TokenUsage = {

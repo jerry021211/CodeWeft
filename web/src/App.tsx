@@ -3,12 +3,13 @@ import { useMutation, useMutationState, useQuery, useQueryClient } from "@tansta
 import { AlertCircle, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cx, isRunActive } from "@/lib/utils";
-import type { ApprovalDecision, Conversation, ExecutionMode, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
+import type { Attachment, ApprovalDecision, Conversation, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { InspectorPanel } from "@/components/InspectorPanel";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
 import { McpConfigModal } from "@/components/McpConfigModal";
+import { ModelSettingsPage } from "@/components/ModelSettingsPage";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { useConversationActivity } from "@/hooks/useConversationActivity";
 import { useRunStore } from "@/store/runStore";
@@ -31,9 +32,21 @@ type TeamCommand =
 
 export default function App() {
   const queryClient = useQueryClient();
+  const [settingsOpen, setSettingsOpen] = useState(() => window.location.hash === "#settings/models");
+  useEffect(() => {
+    const changed = () => setSettingsOpen(window.location.hash === "#settings/models");
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
+  const openSettings = () => { setLeftOpen(false); window.location.hash = "settings/models"; };
   const [selectedId, setSelectedId] = useState<string | undefined>(() => localStorage.getItem("codeagent.conversation") || undefined);
   const [search, setSearch] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, Attachment[]>>({});
+  const attachments = selectedId ? attachmentDrafts[selectedId] ?? [] : [];
+  const setAttachments = (items: Attachment[]) => {
+    if (selectedId) setAttachmentDrafts(current => ({ ...current, [selectedId]: items }));
+  };
   const draft = selectedId ? drafts[selectedId] ?? "" : "";
   const setDraft = (value: string) => {
     if (selectedId) setDrafts((current) => ({ ...current, [selectedId]: value }));
@@ -51,7 +64,7 @@ export default function App() {
     select: (mutation) => (mutation.state.variables as { targetRunId: string }).targetRunId,
   });
   const sending = Boolean(selectedId && sendingConversations.includes(selectedId));
-  const [modes, setModes] = useState<Record<string, ExecutionMode>>({});
+  const [readOnlyChoices, setReadOnlyChoices] = useState<Record<string, boolean>>({});
   const [teamChoices, setTeamChoices] = useState<Record<string, boolean>>({});
   const [webSearchChoices, setWebSearchChoices] = useState<Record<string, boolean>>({});
   const [reasoningChoices, setReasoningChoices] = useState<Record<string, string>>({});
@@ -104,12 +117,9 @@ export default function App() {
   });
   const runtimeQuery = useQuery({ queryKey: ["runtime-config"], queryFn: api.getRuntimeConfig, staleTime: 60_000 });
   const lastUserMessage = [...(messagesQuery.data ?? [])].reverse().find((message) => message.role === "user");
-  const mode: ExecutionMode = modes[selectedId ?? ""] ?? lastUserMessage?.metadata?.mode ?? "normal";
-  const selectMode = (value: ExecutionMode) => {
-    if (selectedId) setModes((current) => ({ ...current, [selectedId]: value }));
-  };
-  const toggleDiscuss = () => {
-    if (selectedId) setModes((current) => ({ ...current, [selectedId]: mode === "discuss" ? "normal" : "discuss" }));
+  const readOnly = readOnlyChoices[selectedId ?? ""] ?? lastUserMessage?.metadata?.read_only ?? (lastUserMessage?.metadata?.mode === "discuss");
+  const selectReadOnly = (value: boolean) => {
+    if (selectedId) setReadOnlyChoices((current) => ({ ...current, [selectedId]: value }));
   };
   const teamEnabled = Boolean(runtimeQuery.data?.features?.agent_team);
   const teamsQuery = useQuery({
@@ -125,7 +135,7 @@ export default function App() {
       ?? [...teams].sort((left, right) => right.team.updated_at.localeCompare(left.team.updated_at))[0];
   }, [teamsQuery.data]);
   const teamLeadActive = Boolean(team && !["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(team.team.state));
-  const useTeam = teamEnabled && (teamLeadActive || (mode === "normal" && Boolean(teamChoices[selectedId ?? ""])));
+  const useTeam = teamEnabled && (teamLeadActive || (!readOnly && Boolean(teamChoices[selectedId ?? ""])));
   const selectTeam = (enabled: boolean) => {
     if (selectedId) setTeamChoices((current) => ({ ...current, [selectedId]: enabled }));
   };
@@ -271,7 +281,7 @@ export default function App() {
           return next;
         });
       }
-      setModes((current) => {
+      setReadOnlyChoices((current) => {
         const next = { ...current };
         delete next[conversation.id];
         return next;
@@ -291,11 +301,12 @@ export default function App() {
 
   const sendRun = useMutation({
     mutationKey: ["send-run"],
-    mutationFn: async ({ conversationId, content, useTeam, mode: submittedMode, webSearch, reasoningEffort }: { conversationId: string; content: string; useTeam: boolean; mode: ExecutionMode; webSearch: boolean; reasoningEffort: string }) => {
-      const result = await api.createRun(conversationId, content, useTeam, submittedMode, webSearch, reasoningEffort);
-      return { ...result, content, conversationId };
+    mutationFn: async ({ conversationId, content, useTeam, readOnly: submittedReadOnly, webSearch, reasoningEffort, attachments }: { attachments: Attachment[]; conversationId: string; content: string; useTeam: boolean; readOnly: boolean; webSearch: boolean; reasoningEffort: string }) => {
+      const result = await api.createRun(conversationId, content, useTeam, submittedReadOnly, webSearch, reasoningEffort, attachments);
+      return { ...result, content, conversationId, attachments };
     },
     onSuccess: (result) => {
+      setAttachmentDrafts(current => current[result.conversationId] === result.attachments ? { ...current, [result.conversationId]: [] } : current);
       ensureRun(result.run_id, result.status, result.queue_position);
       setRunIds((current) => ({ ...current, [result.conversationId]: result.run_id }));
       setDrafts((current) => current[result.conversationId]?.trim() === result.content
@@ -392,16 +403,17 @@ export default function App() {
   });
 
   const continueTask = (task: TaskResource) => {
-    if (mode === "discuss") {
-      setNotice("请先切回 Code · 编码，再执行任务。");
+    if (readOnly) {
+      setNotice("当前已开启只读保护。执行任务前请先关闭只读保护。");
       return;
     }
     if (!selectedId || sending || liveRun && isRunActive(liveRun.status)) return;
     sendRun.mutate({
+      attachments: [],
       conversationId: selectedId,
       content: `继续处理 Task #${task.task.id}：${task.task.subject}。先读取 TaskGet，按 description 的完成条件执行，并及时用 TaskUpdate 更新状态。`,
       useTeam,
-      mode,
+      readOnly,
       webSearch,
       reasoningEffort,
     });
@@ -410,12 +422,7 @@ export default function App() {
   const send = () => {
     const content = draft.trim();
     if (sending || messagesQuery.isLoading) return;
-    if (!selectedId || !content || liveRun && isRunActive(liveRun.status)) return;
-    if (content.toLowerCase() === "/discuss" && !teamLeadActive) {
-      toggleDiscuss();
-      setDraft("");
-      return;
-    }
+    if (!selectedId || (!content && !attachments.length) || liveRun && isRunActive(liveRun.status)) return;
     const optimistic: Message = {
       id: `optimistic:${Date.now()}`,
       conversation_id: selectedId,
@@ -423,10 +430,10 @@ export default function App() {
       content,
       created_at: new Date().toISOString(),
       status: "complete",
-      metadata: { mode, web_search_enabled: webSearch, reasoning_effort: reasoningEffort },
+      metadata: { read_only: readOnly, web_search_enabled: webSearch, reasoning_effort: reasoningEffort, attachments: attachments.map(({ name, media_type }) => ({ name, media_type })) },
     };
     queryClient.setQueryData<Message[]>(messagesKey(selectedId), (current = []) => [...current, optimistic]);
-    sendRun.mutate({ conversationId: selectedId, content, useTeam, mode, webSearch, reasoningEffort });
+    sendRun.mutate({ conversationId: selectedId, content, useTeam, readOnly, webSearch, reasoningEffort, attachments });
   };
 
   const teamPanelProps = {
@@ -446,20 +453,21 @@ export default function App() {
 
   return (
     <div className="h-dvh min-h-[520px] overflow-hidden bg-canvas text-ink">
+      {settingsOpen ? <ModelSettingsPage onClose={() => { window.location.hash = ""; }} onSaved={() => { setReasoningChoices({}); void queryClient.invalidateQueries({ queryKey: ["runtime-config"] }); }} /> : <>
       <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[264px_minmax(0,1fr)] xl:grid-cols-[264px_minmax(0,1fr)_320px]">
         <div className="hidden min-h-0 lg:block">
-          <ConversationSidebar conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={setSelectedId} onCreateProject={() => setWorkspacePickerOpen(true)} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} />
+          <ConversationSidebar onOpenSettings={openSettings} conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={setSelectedId} onCreateProject={() => setWorkspacePickerOpen(true)} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} />
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} discussMode={mode === "discuss"} onModeChange={selectMode} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
+          <ChatWorkspace onOpenSettings={openSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>
       </div>
 
       <Drawer open={leftOpen} side="left" onClose={() => setLeftOpen(false)}>
-        <ConversationSidebar mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreateProject={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} onClose={() => setLeftOpen(false)} />
+        <ConversationSidebar onOpenSettings={openSettings} mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreateProject={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} onClose={() => setLeftOpen(false)} />
       </Drawer>
       <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onClose={() => setRightOpen(false)} {...teamPanelProps} /></Drawer>
 
@@ -490,6 +498,7 @@ export default function App() {
       />
 
       {notice && <div role="alert" className="fixed bottom-4 left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-xl border border-danger/20 bg-surface px-3 py-2.5 text-xs text-danger shadow-panel"><AlertCircle className="size-4 shrink-0" /><span className="min-w-0">{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice(undefined)}><X className="size-3.5" /></button></div>}
+      </>}
     </div>
   );
 }

@@ -10,6 +10,9 @@ from typing import Any, Callable
 
 from codeagent.agent import AgentConfig
 from codeagent.anthropic_client import AnthropicModelClient
+from codeagent.providers import OpenAIModelClient
+from codeagent.models import ModelClient
+from codeagent.speech import SpeechConfig
 from codeagent.context import ContextConfig
 from codeagent.hooks.loop_guard import LoopGuardConfig
 from codeagent.memory import MemoryConfig
@@ -91,23 +94,51 @@ class EnvironmentConfig:
     web_search_config: WebSearchConfig = field(default_factory=WebSearchConfig)
     embedding_config: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     lsp_config: LspConfig = field(default_factory=LspConfig)
+    model_protocol: str = "anthropic"
+    input_modalities: tuple[str, ...] | None = None
+    reasoning_levels: tuple[str, ...] = ()
+    chat_token_parameter: str = "max_completion_tokens"
+    speech_config: SpeechConfig = field(default_factory=SpeechConfig)
 
     def __post_init__(self) -> None:
+        if self.model_protocol not in {"anthropic", "openai_chat", "openai_responses"}:
+            raise ValueError("MODEL_PROTOCOL must be anthropic, openai_chat or openai_responses")
+        if self.chat_token_parameter not in {"max_tokens", "max_completion_tokens"}:
+            raise ValueError("OPENAI_CHAT_TOKEN_PARAMETER must be max_tokens or max_completion_tokens")
+        if self.input_modalities is not None and (not self.input_modalities or set(self.input_modalities) - {"text", "image", "document", "audio"}):
+            raise ValueError("MODEL_INPUT_MODALITIES contains an unsupported modality")
         if type(self.web_max_concurrent_runs) is not int or self.web_max_concurrent_runs < 1:
             raise ValueError("CODEAGENT_WEB_MAX_CONCURRENT_RUNS must be a positive integer")
 
     @classmethod
-    def from_env(cls) -> "EnvironmentConfig":
+    def from_env(cls, *, allow_unconfigured: bool = False) -> "EnvironmentConfig":
         _load_dotenv()
-        model_id = _required_env("MODEL_ID")
+        from codeagent.model_settings import read_settings, apply_settings
+        saved = read_settings(default_runtime_data_dir())
+        chat = saved["services"]["chat"] if saved else None
+        model_id = chat["model"] if chat else os.getenv("MODEL_ID", "")
+        if not model_id and not allow_unconfigured:
+            raise RuntimeError("Missing required environment variable: MODEL_ID")
         context_mode = os.getenv("CONTEXT_COMPACT_MODE", "model")
         summarization_model = (
-            _required_env("SUMMARIZATION_MODEL_ID")
+            (_optional_env("SUMMARIZATION_MODEL_ID") or model_id)
             if context_mode == "model"
             else ""
         )
-        return cls(
+        config = cls(
             model_id=model_id,
+            model_protocol=chat["protocol"] if chat else os.getenv("MODEL_PROTOCOL", "anthropic"),
+            input_modalities=None if chat else tuple(part.strip() for part in os.environ["MODEL_INPUT_MODALITIES"].split(",")) if os.getenv("MODEL_INPUT_MODALITIES") else None,
+            reasoning_levels=tuple(part.strip() for part in os.getenv("MODEL_REASONING_LEVELS", "").split(",") if part.strip()),
+            chat_token_parameter=chat["token_parameter"] if chat else os.getenv("OPENAI_CHAT_TOKEN_PARAMETER", "max_completion_tokens"),
+            speech_config=SpeechConfig() if saved else SpeechConfig(
+                enabled=_bool_env("CODEAGENT_SPEECH_ENABLED", False),
+                model=_optional_env("CODEAGENT_SPEECH_MODEL") or "",
+                base_url=_optional_env("CODEAGENT_SPEECH_BASE_URL") or "",
+                api_key=_optional_env("CODEAGENT_SPEECH_API_KEY") or "",
+                language=_optional_env("CODEAGENT_SPEECH_LANGUAGE"),
+                timeout_seconds=_float_env("CODEAGENT_SPEECH_TIMEOUT", 120.0),
+            ),
             embedding_config=embedding_config_from_env(),
             lsp_config=LspConfig(
                 enabled=_bool_env("CODEAGENT_LSP_ENABLED", True),
@@ -120,12 +151,12 @@ class EnvironmentConfig:
                 api_key=_optional_env("TAVILY_API_KEY"),
                 timeout_seconds=_float_env("CODEAGENT_WEB_SEARCH_TIMEOUT", 20.0),
             ),
-            api_key=_first_optional_env("API_KEY", "ANTHROPIC_API_KEY"),
-            base_url=_first_optional_env("BASE_URL", "ANTHROPIC_BASE_URL"),
-            max_tokens=_int_env("MAX_TOKENS", 32_000),
+            api_key=_first_optional_env("API_KEY", "ANTHROPIC_API_KEY" if os.getenv("MODEL_PROTOCOL", "anthropic") == "anthropic" else "OPENAI_API_KEY"),
+            base_url=_first_optional_env("BASE_URL", "ANTHROPIC_BASE_URL" if os.getenv("MODEL_PROTOCOL", "anthropic") == "anthropic" else "OPENAI_BASE_URL"),
+            max_tokens=chat["max_tokens"] if chat else _int_env("MAX_TOKENS", 32_000),
             reasoning_effort=_optional_env("REASONING_EFFORT") or "default",
             max_iterations=_int_env("MAX_ITERATIONS", 50),
-            stream=_bool_env("STREAMING", False),
+            stream=chat["stream"] if chat else _bool_env("STREAMING", False),
             enable_skills=_bool_env("ENABLE_SKILLS", True),
             skill_roots=_path_list_env("SKILLS_DIR", (Path("skills"),)),
             context_config=ContextConfig(
@@ -262,6 +293,8 @@ class EnvironmentConfig:
             ),
         )
 
+        return apply_settings(config, saved["services"]) if saved else config
+
     def to_agent_config(
         self,
         *,
@@ -286,7 +319,11 @@ class EnvironmentConfig:
         call_kind: str = "main",
         reasoning_effort: str | None = None,
     ) -> AnthropicModelClient:
-        return AnthropicModelClient(
+        """Legacy factory name, retained for integrations; respects MODEL_PROTOCOL."""
+        client_type = AnthropicModelClient if self.model_protocol == "anthropic" else OpenAIModelClient
+        options = {} if self.model_protocol == "anthropic" else {"protocol": self.model_protocol, "token_parameter": self.chat_token_parameter}
+        client = client_type(
+            **options,
             api_key=self.api_key,
             base_url=self.base_url,
             stream=self.stream if stream is None else stream,
@@ -297,6 +334,12 @@ class EnvironmentConfig:
             reasoning_effort=(reasoning_effort if reasoning_effort is not None else self.reasoning_effort)
             if call_kind in {"main", "subagent"} else "default",
         )
+        client.input_modalities = self.input_modalities
+        return client
+
+    def create_model_client(self, **kwargs: Any) -> ModelClient:
+        """Create the shared conversation model used by all Agent roles."""
+        return self.create_anthropic_client(**kwargs)
 
 
 def _required_env(name: str) -> str:
@@ -308,6 +351,10 @@ def _required_env(name: str) -> str:
 
 def embedding_config_from_env() -> EmbeddingConfig:
     """Read embedding settings only; do not require a chat/summary model."""
+    from codeagent.model_settings import read_settings
+    saved = read_settings(default_runtime_data_dir())
+    if saved:
+        return EmbeddingConfig(**saved["services"]["embedding"], max_chunks=_int_env("CODEAGENT_EMBEDDING_MAX_CHUNKS", 2000))
     return EmbeddingConfig(
         enabled=_bool_env("CODEAGENT_EMBEDDING_ENABLED", False),
         base_url=_optional_env("CODEAGENT_EMBEDDING_BASE_URL") or "",

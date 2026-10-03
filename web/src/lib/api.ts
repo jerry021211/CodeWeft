@@ -1,7 +1,10 @@
 import type {
+  ModelSettings,
+  ModelSettingsInput,
+  ModelServiceName,
+  Attachment,
   UserQuestion,
   ApiList,
-  ExecutionMode,
   ApprovalDecision,
   Conversation,
   CreateRunResponse,
@@ -54,6 +57,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getModelSettings() {
+    return request<ModelSettings>("/settings/models");
+  },
+  saveModelSettings(settings: ModelSettingsInput) {
+    return request<ModelSettings>("/settings/models", { method: "PUT", body: JSON.stringify(settings) });
+  },
+  discoverModels(settings: ModelSettingsInput, service: ModelServiceName) {
+    return request<{ models: string[]; message: string }>("/settings/models/discover", {
+      method: "POST", body: JSON.stringify({ ...settings, service }),
+    });
+  },
+  testModelConnection(settings: ModelSettingsInput, service: ModelServiceName) {
+    return request<{ ok: boolean; message: string; elapsed_ms: number; dimensions?: number }>("/settings/models/test", {
+      method: "POST", body: JSON.stringify({ ...settings, service }),
+    });
+  },
   getTeamIntegrationDiff(teamRunId: string) {
     return request<{ integration_head: string; diff: string; truncated: boolean }>(`/teams/${encodeURIComponent(teamRunId)}/integration-diff`);
   },
@@ -148,10 +167,10 @@ export const api = {
     });
   },
 
-  createRun(conversationId: string, content: string, useTeam = false, mode: ExecutionMode = "normal", webSearch = false, reasoningEffort?: string) {
+  createRun(conversationId: string, content: string, useTeam = false, readOnly = false, webSearch = false, reasoningEffort?: string, attachments: Attachment[] = []) {
     return request<CreateRunResponse>(`/conversations/${encodeURIComponent(conversationId)}/runs`, {
       method: "POST",
-      body: JSON.stringify({ content, useTeam, mode, webSearch, reasoningEffort }),
+      body: JSON.stringify({ content, useTeam, readOnly, webSearch, reasoningEffort, attachments }),
     });
   },
 

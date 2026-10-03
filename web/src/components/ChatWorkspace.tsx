@@ -1,8 +1,8 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, CircleStop, Globe, Menu, Monitor, Moon, PanelRight, Plug, Send, Sparkles, Square, Sun, Users, Wifi, WifiOff } from "lucide-react";
+import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Sparkles, Sun, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Approval, ApprovalDecision, ExecutionMode, Message } from "@/types/api";
+import type { Approval, ApprovalDecision, Message } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatTime, isRunActive, statusLabel } from "@/lib/utils";
 import { getRunAnswer } from "@/lib/runAnswer";
@@ -10,10 +10,14 @@ import { ThinkingProcess } from "@/components/ThinkingProcess";
 import { processAnchors } from "@/lib/conversationProcess";
 import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { EmptyPanel, IconButton, Spinner, StatusDot } from "@/components/ui";
-import { ModeSelector } from "@/components/ModeSelector";
 import { UserQuestions } from "@/components/UserQuestions";
+import { ComposerToolbar } from "@/components/ComposerToolbar";
+import { AttachmentPicker, type AttachmentPickerHandle } from "@/components/AttachmentPicker";
+import type { Attachment } from "@/types/api";
 
 type Props = {
+  attachments?: Attachment[];
+  onAttachments?: (value: Attachment[]) => void;
   title?: string;
   messages: Message[];
   loading?: boolean;
@@ -31,7 +35,7 @@ type Props = {
   teamEnabled?: boolean;
   useTeam?: boolean;
   onTeamChange?: (enabled: boolean) => void;
-  discussMode?: boolean;
+  readOnly?: boolean;
   webSearch?: boolean;
   webSearchAvailable?: boolean;
   reasoningEffort?: string;
@@ -39,7 +43,7 @@ type Props = {
   reasoningDefault?: string | null;
   onReasoningChange?: (effort: string) => void;
   onWebSearchChange?: (enabled: boolean) => void;
-  onModeChange: (mode: ExecutionMode) => void;
+  onReadOnlyChange: (enabled: boolean) => void;
   workspace?: string;
   theme: "system" | "light" | "dark";
   onDraft: (value: string) => void;
@@ -49,14 +53,20 @@ type Props = {
   onOpenLeft: () => void;
   onOpenRight: () => void;
   onOpenMcp: () => void;
+  onOpenSettings?: () => void;
   onToggleTheme: () => void;
 };
 
 export function ChatWorkspace(props: Props) {
+  const attachmentRef = useRef<AttachmentPickerHandle>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [following, setFollowing] = useState(true);
+  const [attachmentsReading, setAttachmentsReading] = useState(false);
   const active = isRunActive(props.run?.status);
+  const busy = Boolean(active || props.sending || props.loading);
+  const attachmentDisabled = Boolean(busy || props.useTeam || props.teamLeadActive);
+  const canSend = Boolean(!busy && !attachmentsReading && (props.draft.trim() || props.attachments?.length));
   const runs = useMemo(() => ({ ...props.historyRuns, ...(props.run ? { [props.run.runId]: props.run } : {}) }), [props.historyRuns, props.run]);
   const anchors = useMemo(() => processAnchors(props.messages, Object.keys(runs)), [props.messages, runs]);
   const process = (id: string) => runs[id] ? <ThinkingProcess key={id} run={runs[id]} /> : null;
@@ -77,7 +87,7 @@ export function ChatWorkspace(props: Props) {
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      props.onSend();
+      if (canSend) props.onSend();
     }
   };
 
@@ -117,7 +127,7 @@ export function ChatWorkspace(props: Props) {
       >
         {!props.loading && props.messages.length === 0 && !props.run && (
           <div className="grid min-h-full place-items-center">
-            <EmptyPanel icon={<Sparkles className="size-5" />} title="准备开始编码" body="描述你希望完成的工作。你可以随时展开 Thinking 查看探索、修改与执行进度。" />
+            <EmptyPanel icon={<Sparkles className="size-5" />} title="有什么可以帮你？" body="提问、讨论、创作或描述你希望完成的工作。" />
           </div>
         )}
         {props.loading && <div className="flex min-h-full items-center justify-center gap-2 text-xs text-ink-muted"><Spinner /> 加载会话…</div>}
@@ -158,69 +168,28 @@ export function ChatWorkspace(props: Props) {
               onDecision={props.onApprovalDecision}
             />
           )}
-          <div className="rounded-2xl border border-line-strong bg-surface p-2 shadow-sm transition focus-within:border-accent/35 focus-within:ring-accent/[0.06]">
+          <div className="rounded-2xl border border-line-strong/80 bg-surface shadow-sm transition focus-within:border-accent/40 focus-within:shadow-[0_0_0_3px_rgb(var(--accent)/0.04)]">
+          {props.onAttachments && <AttachmentPicker ref={attachmentRef} hideTrigger value={props.attachments ?? []} onChange={props.onAttachments} onBusyChange={setAttachmentsReading} disabled={attachmentDisabled} />}
           <textarea
             ref={inputRef}
             value={props.draft}
             onChange={(event) => props.onDraft(event.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
-            disabled={active}
-            placeholder={active ? "Agent 正在工作…" : props.discussMode ? "讨论代码、架构或方案，只读探索…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeAgent 你想实现什么…"}
+            disabled={busy}
+            placeholder={active ? "Agent 正在工作…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeAgent 你想做什么…"}
             aria-label="发送消息"
-            className="scrollbar-thin min-h-11 w-full resize-none bg-transparent px-2.5 py-2 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
+            className="scrollbar-thin min-h-[76px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />
-          <div className="flex items-center justify-between gap-3 px-1 pt-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <ModeSelector mode={props.discussMode ? "discuss" : "normal"} disabled={active || props.sending || props.loading || props.teamLeadActive} onChange={props.onModeChange} />
-              <label className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
-                推理
-                <select aria-label="推理等级" value={props.reasoningEffort ?? "default"}
-                  disabled={active || props.sending || props.loading || props.teamLeadActive || !props.reasoningOptions || props.reasoningOptions.length < 2}
-                  title={props.teamLeadActive ? "团队成员继承启动任务时的推理等级" : "按模型官方档位控制本次任务的思考强度"}
-                  onChange={(event) => props.onReasoningChange?.(event.target.value)}
-                  className="rounded-lg border border-line bg-surface px-2 py-1.5 text-xs text-ink outline-none focus:border-accent disabled:opacity-40">
-                  {(props.reasoningOptions ?? ["default"]).map((effort) => (
-                    <option key={effort} value={effort}>{effort === "default" ? `官方默认${props.reasoningDefault ? ` (${props.reasoningDefault})` : ""}`
-                      : ({ none: "关闭思考", low: "低 (low)", high: "高 (high)", max: "最大 (max)" } as Record<string, string>)[effort] ?? effort}</option>
-                  ))}
-                </select>
-              </label>
-              <button type="button" aria-pressed={Boolean(props.webSearch)} aria-label="联网搜索" disabled={active || props.sending || props.loading || props.useTeam || props.teamLeadActive || !props.webSearchAvailable}
-                title={props.useTeam || props.teamLeadActive ? "团队会话暂不支持联网搜索" : !props.webSearchAvailable ? "请在服务端 .env 配置 TAVILY_API_KEY 并重启" : "允许本次请求使用 Tavily 搜索网页"}
-                onClick={() => props.onWebSearchChange?.(!props.webSearch)}
-                className={cx("inline-flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-40", props.webSearch ? "border-accent/30 bg-accent/10 text-accent" : "border-line text-ink-muted hover:bg-surface-muted")}>
-                <Globe className="size-3.5" />联网搜索{props.webSearch ? "：开" : "：关"}
-              </button>
-              {props.teamEnabled && !props.teamLeadActive && (
-                <button type="button" aria-label="Agent Team" aria-pressed={Boolean(props.useTeam)}
-                  disabled={active || props.sending || props.loading || props.discussMode}
-                  title={props.discussMode ? "请切换到编码模式后启动团队" : "由 Lead 拆分任务，批准方案后启动团队"}
-                  onClick={() => props.onTeamChange?.(!props.useTeam)}
-                  className={cx("inline-flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-40", props.useTeam ? "border-accent/30 bg-accent/10 text-accent" : "border-line text-ink-muted hover:bg-surface-muted")}>
-                  <Users className="size-3.5" />Agent Team{props.useTeam ? "：开" : "：关"}
-                </button>
-              )}
-              {props.teamLeadActive && (
-                <span className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2.5 text-[10px] font-medium text-accent">
-                  <Users className="size-3.5" /> Team 运行中
-                </span>
-              )}
-              <div className="hidden text-[9px] text-ink-faint sm:block"><kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Enter</kbd> 发送 · <kbd className="rounded border border-line bg-surface-muted px-1 py-0.5 font-sans">Shift Enter</kbd> 换行</div>
-            </div>
-            {active ? (
-              <button type="button" onClick={props.onCancel} disabled={props.cancelling || props.run?.status === "cancelling"} className="inline-flex h-9 items-center gap-2 rounded-xl border border-danger/20 bg-danger/5 px-3 text-xs font-medium text-danger transition hover:bg-danger/10 disabled:opacity-50">
-                {props.cancelling || props.run?.status === "cancelling" ? <><Spinner className="size-3.5 text-danger" /> 等待当前步骤结束</> : <><Square className="size-3.5 fill-current" /> 停止</>}
-              </button>
-            ) : (
-              <button type="button" onClick={props.onSend} disabled={!props.draft.trim() || props.sending || props.loading} className="grid size-9 place-items-center rounded-xl bg-accent text-white shadow-md shadow-accent/20 transition hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40">
-                {props.sending ? <Spinner className="text-white" /> : <Send className="size-4" />}
-                <span className="sr-only">发送</span>
-              </button>
-            )}
-          </div>
+          <ComposerToolbar busy={busy} active={active} cancelling={Boolean(props.cancelling || props.run?.status === "cancelling")}
+            sending={props.sending} canSend={canSend} readOnly={props.readOnly} useTeam={props.useTeam} teamEnabled={props.teamEnabled} teamLeadActive={props.teamLeadActive}
+            runtimeModel={props.runtimeModel} reasoningEffort={props.reasoningEffort} reasoningOptions={props.reasoningOptions} reasoningDefault={props.reasoningDefault}
+            webSearch={props.webSearch} webSearchAvailable={props.webSearchAvailable} attachmentDisabled={attachmentDisabled} attachmentsReading={attachmentsReading}
+            onReadOnlyChange={props.onReadOnlyChange} onTeamChange={props.onTeamChange} onReasoningChange={props.onReasoningChange} onWebSearchChange={props.onWebSearchChange}
+            onOpenSettings={props.onOpenSettings} onAttach={props.onAttachments ? () => attachmentRef.current?.open() : undefined} onSend={props.onSend} onCancel={props.onCancel} />
           </div>
         </div>
+        <p className="mx-auto mt-2 hidden max-w-4xl px-1 text-right text-[10px] text-ink-faint sm:block">Enter 发送 · Shift + Enter 换行</p>
         {props.run?.status === "cancelling" && <div className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-ink-muted"><CircleStop className="size-3" /> 取消将在当前安全边界生效</div>}
       </div>
     </main>
@@ -229,15 +198,17 @@ export function ChatWorkspace(props: Props) {
 
 const ChatMessage = memo(function ChatMessage({ message }: { message: Message }) {
   const user = message.role === "user";
+  const attachments = Array.isArray(message.metadata?.attachments) ? message.metadata.attachments as { name: string }[] : [];
   if (message.role === "system") return <div className="mx-auto max-w-lg rounded-full border border-line bg-surface-muted px-3 py-1 text-center text-[10px] text-ink-muted">{message.content}</div>;
   return (
     <article className={cx("flex gap-3", user && "justify-end")}>
       {!user && <div className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-xl border border-accent/20 bg-accent/10 text-accent"><Bot className="size-4" /></div>}
       <div className={cx("min-w-0", user ? "max-w-[88%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-2.5 text-user-bubble-ink shadow-sm sm:max-w-[82%]" : "flex-1")}>
         {user ? (
-          <p className="whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>
+          <><p className="whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>
+            {attachments.length > 0 && <p className="mt-1 text-xs opacity-70">附件：{attachments.map(item => item.name).join("、")}</p>}</>
         ) : (
-          <div className="markdown text-sm leading-7 text-ink"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>{message.status === "streaming" && <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-middle motion-reduce:animate-none" />}</div>
+          <div className="markdown answer-markdown text-ink"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>{message.status === "streaming" && <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-middle motion-reduce:animate-none" />}</div>
         )}
         <div className={cx("mt-1 text-[9px]", user ? "text-user-bubble-ink/55" : "text-ink-faint")}>{formatTime(message.created_at)}</div>
       </div>

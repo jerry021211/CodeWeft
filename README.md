@@ -6,7 +6,7 @@
 
 - agent loop 保持简单稳定：模型响应、执行工具、追加 `tool_result`、继续循环。
 - 工具、权限、hooks、memory、subagent、skills、MCP 等能力放在 loop 外侧扩展。
-- `Agent` 直接使用 Anthropic SDK client，保持 Anthropic 的 messages/tools 格式。
+- `Agent` 使用统一模型客户端合同；内部保留规范化消息和工具块，传输层支持 Anthropic Messages、OpenAI Chat Completions 和 Responses。
 
 ## 当前结构
 
@@ -15,6 +15,9 @@ codeagent/
   agent.py          # 核心 Agent 类和 loop
   config.py         # 从环境变量读取模型和运行配置
   anthropic_client.py  # Anthropic SDK 调用与 streaming
+  providers.py        # OpenAI Chat Completions / Responses 协议适配
+  multimodal.py       # 图片、PDF、文本和音频附件规范化
+  speech.py           # 独立语音识别模型与输入处理
   models.py         # 模型响应结构
   messages.py       # message/tool_use 规范化
   tools/            # 工具定义与注册表
@@ -39,6 +42,10 @@ codeagent/
 `worktrees/` 为代码任务提供独立工作区。
 
 ## Web 工作台
+
+侧栏底部的 **模型设置** 页面可配置对话模型协议、服务地址与密钥，并独立配置语音识别和向量模型。
+支持获取模型列表、保存后立即生效和重启恢复；首次启动 Web 也可以在页面完成模型配置。
+详细用法见 [模型服务配置](docs/model-services.md#在网页中配置)。
 
 项目现在包含一个本机单用户 Coding Cockpit：左侧管理会话，中间显示对话、
 流式回复和 Agent 动作，右侧展示 Token、持久化任务、子 Agent、恢复记录、文件改动与
@@ -84,6 +91,11 @@ Web 运行时有以下边界：
 - 调试面板不会展示完整 system prompt 或隐藏推理内容，事件 payload 会截断和脱敏。
 
 ## 环境配置
+
+已支持按能力组合模型：对话模型负责 Agent、子 Agent、摘要和记忆；语音识别模型负责
+音频转文字；现有 embedding 模型负责代码向量检索。三者可以使用不同服务商、地址和
+密钥。Web 可添加附件，CLI 支持重复 `--attach PATH`。
+配置、协议能力和完整示例见 [多接口与多模态模型组合](docs/model-services.md)。
 
 推理等级可通过 `.env` 的 `REASONING_EFFORT` 设置，也可以在输入框旁的“推理”下拉框
 逐次选择。
@@ -147,7 +159,7 @@ from codeagent import (
 
 env = EnvironmentConfig.from_env()
 agent_config = env.to_agent_config()
-client = env.create_anthropic_client(stream=True, on_text=print)
+client = env.create_model_client(stream=True, on_text=print)
 todo_store = TodoStore()
 tools = create_default_registry(todo_store=todo_store)
 hooks = create_default_hooks(todo_store=todo_store)

@@ -17,6 +17,50 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
 
+class ModelServiceSettings(ApiModel):
+    model: str = Field(max_length=256)
+    base_url: str = Field(max_length=2048)
+    api_key: str | None = Field(default=None, max_length=4096)
+
+
+class ChatModelSettings(ModelServiceSettings):
+    protocol: Literal["anthropic", "openai_chat", "openai_responses"]
+    max_tokens: int = Field(ge=1, le=2_000_000)
+    stream: bool
+    input_modalities: list[Literal["text", "image", "document", "audio"]] | None = None
+    reasoning_levels: list[str] = Field(default_factory=list, max_length=20)
+    reasoning_effort: str = Field(default="default", min_length=1, max_length=32)
+    token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_completion_tokens"
+
+
+class SpeechModelSettings(ModelServiceSettings):
+    enabled: bool
+    language: str = Field(default="", max_length=32)
+    timeout_seconds: float = Field(gt=0, le=600)
+
+
+class EmbeddingModelSettings(ModelServiceSettings):
+    enabled: bool
+    dimensions: int = Field(ge=0, le=65536)
+    timeout_seconds: float = Field(gt=0, le=600)
+    batch_size: int = Field(ge=1, le=2048)
+
+
+class ModelServicesSettings(ApiModel):
+    chat: ChatModelSettings
+    speech: SpeechModelSettings
+    embedding: EmbeddingModelSettings
+
+
+class SaveModelSettingsRequest(ApiModel):
+    revision: str = Field(min_length=1, max_length=64)
+    services: ModelServicesSettings
+
+
+class DiscoverModelsRequest(SaveModelSettingsRequest):
+    service: Literal["chat", "speech", "embedding"]
+
+
 class CreateConversationRequest(ApiModel):
     title: str = Field(default="新对话", min_length=1, max_length=200)
     workspace: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -27,8 +71,15 @@ class UpdateConversationRequest(ApiModel):
     archived: bool | None = None
 
 
+class AttachmentRequest(ApiModel):
+    name: str = Field(min_length=1, max_length=255)
+    media_type: str = Field(min_length=1, max_length=100)
+    data: str = Field(min_length=1, max_length=13_981_016)
+
+
 class CreateRunRequest(ApiModel):
-    content: str = Field(min_length=1, max_length=200_000)
+    content: str = Field(default="", max_length=200_000)
+    attachments: list[AttachmentRequest] = Field(default_factory=list, max_length=8)
     useTeam: bool = False
     readOnly: bool = False
     webSearch: bool | None = None
@@ -210,6 +261,7 @@ class ApprovalResponse(ApiModel):
 
 
 class RuntimeConfigResponse(ApiModel):
+    model_services: dict[str, Any] = Field(default_factory=dict)
     model: str | None = None
     workspace: str
     max_tokens: int | None = None

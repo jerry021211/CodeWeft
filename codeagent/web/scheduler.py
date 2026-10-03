@@ -6,6 +6,7 @@ import logging
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -72,6 +73,7 @@ class _RunJob:
     web_search_enabled: bool = False
     reasoning_effort: str | None = None
     agent: Any = None
+    attachments: list[dict] | None = None
 
 
 class RunScheduler:
@@ -102,6 +104,19 @@ class RunScheduler:
         self._stopping = threading.Event()
         self._stop_lock = threading.Lock()
         self._closed = False
+
+    @contextmanager
+    def model_settings_guard(self):
+        """Serialize configuration changes against root admission and queued work."""
+        with self._lock:
+            if self._controls or self.repository.list_runs(statuses=list(ACTIVE_RUN_STATUSES), limit=1):
+                raise StorageConflictError("有任务正在运行或排队，请待任务结束后再保存模型配置。")
+            terminal = {"completed", "closed_with_unmerged_candidates", "failed", "cancelled"}
+            if any(team.state.value not in terminal for team in self.repository.list_team_runs()):
+                raise StorageConflictError("存在未结束的 Team，请结束团队任务后再保存模型配置。")
+            if self._stopping.is_set():
+                raise StorageConflictError("服务正在关闭，暂时无法保存配置。")
+            yield
 
     def cancel_subagent(self, run_id: str, subagent_id: str) -> dict[str, Any]:
         record = self.repository.get_subagent_run(run_id, subagent_id)
@@ -157,20 +172,31 @@ class RunScheduler:
         read_only: bool = False,
         web_search_enabled: bool | None = None,
         reasoning_effort: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> RunRecord:
         # Admission, queue order and shutdown share one short critical section.
         with self._lock:
             self.start()
             return self._submit(conversation_id, content, use_team=use_team, read_only=read_only,
-                                web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort)
+                                web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort, attachments=attachments)
 
     def _submit(
         self, conversation_id: str, content: str, *, use_team: bool,
         read_only: bool,
         web_search_enabled: bool | None = None,
         reasoning_effort: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> RunRecord:
         env = getattr(self.agent_factory, "env", None)
+        if env is not None and hasattr(env, "model_id") and not env.model_id:
+            raise ValueError("请先在模型设置页面配置对话模型。")
+        if attachments:
+            from codeagent.multimodal import validate_attachments
+            from codeagent.speech import validate_input
+            attachments = validate_attachments(attachments)
+            validate_input(content, attachments, env)
+            if use_team or self.repository.get_active_team_run_for_conversation(conversation_id):
+                raise ValueError("附件目前仅支持普通会话")
         if reasoning_effort is None:
             reasoning_effort = getattr(env, "reasoning_effort", None)
         if reasoning_effort not in {None, "default"}:
@@ -186,8 +212,10 @@ class RunScheduler:
         ):
             raise ValueError("Read-only permissions cannot start or control a Team")
         prompt = str(content).strip()
-        if not prompt:
+        if not prompt and not attachments:
             raise ValueError("Message content cannot be empty")
+        if not prompt:
+            prompt = "请分析这些附件。"
         conversation = self.repository.get_conversation(conversation_id)
         if conversation is None:
             raise RecordNotFoundError(f"Conversation not found: {conversation_id}")
@@ -217,7 +245,8 @@ class RunScheduler:
             content=prompt,
             run_id=run.id,
             metadata={"status": "complete", "read_only": read_only, "web_search_enabled": web_search_enabled,
-                      "reasoning_effort": reasoning_effort or "default"},
+                      "reasoning_effort": reasoning_effort or "default",
+                      "attachments": [{"name": item["name"], "media_type": item["media_type"]} for item in attachments or []]},
         )
         emitter = EventEmitter(
             RecordingEventSink(self.repository),
@@ -277,6 +306,7 @@ class RunScheduler:
             conversation_id=conversation_id,
             workspace=conversation.workspace,
             prompt=prompt,
+            attachments=attachments,
             use_team=bool(use_team),
             read_only=read_only,
             emitter=emitter,
@@ -813,7 +843,12 @@ class RunScheduler:
                         job.run_id, current.status,
                         metadata={**current.metadata, "tool_checkpoint_required": True},
                     )
-            result = agent.run(job.prompt)
+            prompt = job.prompt
+            if job.attachments:
+                from codeagent.speech import prepare_input
+                prompt = prepare_input(job.prompt, job.attachments, getattr(workspace_factory, "env", None),
+                                       check=job.cancellation.raise_if_cancelled, emitter=job.emitter)
+            result = agent.run(prompt)
             job.cancellation.raise_if_cancelled()
             terminal_status = (
                 "failed" if is_execution_failure(result.stop_reason)

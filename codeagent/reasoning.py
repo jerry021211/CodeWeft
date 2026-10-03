@@ -31,6 +31,10 @@ def reasoning_capabilities(*, base_url: str | None, model: str, api_key: str | N
 
 
 def environment_capabilities(env) -> dict:
+    if getattr(env, "model_protocol", "anthropic") != "anthropic":
+        levels = list(getattr(env, "reasoning_levels", ()))
+        return {"supported_levels": [level for level in levels if level != "none"], "default_level": None,
+                "supports_disabled": "none" in levels, "source": "configuration" if levels else "unavailable"}
     return reasoning_capabilities(base_url=getattr(env, "base_url", None),
                                   model=getattr(env, "model_id", ""), api_key=getattr(env, "api_key", None))
 

@@ -2,6 +2,8 @@
 
 from codeagent.agent import Agent, AgentConfig, AgentResult
 from codeagent.anthropic_client import AnthropicModelClient
+from codeagent.providers import OpenAIModelClient
+from codeagent.speech import SpeechConfig
 from codeagent.config import EnvironmentConfig
 from codeagent.context import ContextConfig, ContextManager, RuntimeState
 from codeagent.events import (
@@ -37,6 +39,8 @@ from codeagent.runtime.parallel import ParallelConfig
 from codeagent.tools import TodoStore, ToolDefinition, ToolRegistry, create_default_registry
 
 __all__ = [
+    "OpenAIModelClient",
+    "SpeechConfig",
     "Agent",
     "AgentConfig",
     "AgentResult",

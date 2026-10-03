@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from codeagent.anthropic_client import AnthropicModelClient
+from codeagent.models import ModelClient
 from codeagent.context import ContextManager, HistoryObserver
 from codeagent.context.budget import BoundModelClient
 from codeagent.context.observation import emit_request_observation, fingerprint, observe_request
@@ -91,7 +91,7 @@ class Agent:
     only provides the operational environment and feeds results back.
     """
 
-    client: AnthropicModelClient
+    client: ModelClient
     tools: ToolRegistry
     config: AgentConfig
     hooks: HookManager = field(default_factory=HookManager)
@@ -132,6 +132,7 @@ class Agent:
             self.tool_admission = Admission(self.config.parallel.max_tools)
         self.context.cancellation_check = self._check_cancelled
         self.context.summary_credentials_scope = hashlib.sha256(json.dumps([
+            getattr(self.client, "protocol", "anthropic"),
             getattr(self.client, "base_url", None),
             self.context.config.summarization_api_key or getattr(self.client, "api_key", None),
         ], default=str).encode("utf-8")).hexdigest()
@@ -230,10 +231,10 @@ class Agent:
         self.recovery_runtime.activity = activity
         if self.permission_broker is not None:
             self.permission_broker.execution_activity = activity
-        if isinstance(self.client, AnthropicModelClient):
+        if hasattr(self.client, "activity"):
             self.client.activity = activity
 
-    def run(self, prompt: str | None = None, *, execution_id: str | None = None) -> AgentResult:
+    def run(self, prompt: str | list[dict[str, Any]] | None = None, *, execution_id: str | None = None) -> AgentResult:
         """Compatibility wrapper that runs a normal Agent to completion."""
 
         result = None
@@ -302,7 +303,7 @@ class Agent:
 
         self._yield_reason = str(reason).strip() or "waiting"
 
-    def _run(self, prompt: str | None, *, allow_yield: bool) -> AgentResult:
+    def _run(self, prompt: str | list[dict[str, Any]] | None, *, allow_yield: bool) -> AgentResult:
         """Run until the model stops requesting tools or the iteration limit hits."""
 
         self._check_cancelled()
@@ -325,11 +326,13 @@ class Agent:
             },
         )
         if prompt is not None:
+            prompt_content = prompt
+            prompt = extract_text(prompt_content)
             self.context.begin_turn(len(self.messages))
             self.hooks.trigger("UserPromptSubmit", prompt) #打印日志
             self.context.record_user_prompt(prompt)
             self._sync_permission_reminder(self.messages)
-            self.add_user_message(prompt)
+            self.add_user_message(prompt_content)
 
         with trace_run(
             "agent.run",
@@ -1377,14 +1380,16 @@ class Agent:
 
     def _context_client(self) -> Any:
         if self.context.config.summarization_api_key:
-            client = AnthropicModelClient(
+            client = replace(self.client,
                 api_key=self.context.config.summarization_api_key,
+                sdk_client=None,
                 base_url=self.client.base_url,
                 stream=False,
                 on_text=None,
                 event_emitter=self.event_emitter,
                 usage_tracker=self.usage_tracker,
                 call_kind="context_summary",
+                reasoning_effort="default",
                 activity=self.execution_activity,
                 request_timeout=self.context.config.summary_timeout_seconds,
             )
@@ -1392,7 +1397,7 @@ class Agent:
             return BudgetedClient(client, self._loop_guard.budget) if self._loop_guard is not None else client
         client = self._side_query_client("context_summary")
         raw_client = client.client if isinstance(client, BudgetedClient) else client
-        if isinstance(raw_client, AnthropicModelClient):
+        if hasattr(raw_client, "request_timeout"):
             raw_client.request_timeout = self.context.config.summary_timeout_seconds
         return client
 

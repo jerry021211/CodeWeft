@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 
-def models_url(base_url: str) -> str:
+def models_url(base_url: str, *, protocol: str = "anthropic") -> str:
     parts = urlsplit(base_url)
     if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
         raise ValueError("Invalid provider URL")
@@ -23,6 +23,8 @@ def models_url(base_url: str) -> str:
     # DeepSeek's Messages compatibility prefix is not its model discovery API.
     if parts.hostname == "api.deepseek.com" and path in {"", "/v1", "/anthropic", "/anthropic/v1"}:
         path = "/models"
+    elif protocol != "anthropic":
+        path += "/models"
     else:
         path = path + ("/models" if path.endswith("/v1") else "/v1/models")
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
@@ -35,24 +37,26 @@ class ModelWindowCache:
         self._entries: OrderedDict[tuple[str, str, str], tuple[float, dict]] = OrderedDict()
         self._lock = Lock()
 
-    def resolve(self, *, base_url: str, api_key: str, model: str) -> dict:
+    def resolve(self, *, base_url: str, api_key: str, model: str, protocol: str = "anthropic") -> dict:
         def unknown(reason: str) -> dict:
             return {"context_window_tokens": 0, "context_window_source": "unavailable", "context_window_reason": reason}
 
         if not api_key or not model:
             return unknown("missing_credentials")
         try:
-            endpoint = models_url(base_url)
+            endpoint = models_url(base_url, protocol=protocol)
         except ValueError:
             return unknown("invalid_endpoint")
-        key = (endpoint, sha256(api_key.encode()).hexdigest(), model)
+        key = (endpoint + "#" + protocol, sha256(api_key.encode()).hexdigest(), model)
         # Coalesce concurrent first requests and share results across run clients.
         with self._lock:
             entry = self._entries.get(key)
             if entry and self._clock() < entry[0]:
                 self._entries.move_to_end(key)
                 return dict(entry[1])
-            headers = {"Authorization": f"Bearer {api_key}", "x-api-key": api_key, "anthropic-version": "2023-06-01"}
+            headers = {"Authorization": f"Bearer {api_key}"}
+            if protocol == "anthropic":
+                headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
             try:
                 response = self._get(endpoint, headers=headers, timeout=3.0, follow_redirects=False)
                 if response.status_code in {401, 403}:

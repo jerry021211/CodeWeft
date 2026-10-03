@@ -36,6 +36,7 @@ class AnthropicModelClient:
     activity: ExecutionActivity | None = None
     request_timeout: float | None = None
     reasoning_effort: str = "default"
+    input_modalities: tuple[str, ...] | None = None
     _client: Any = field(init=False, repr=False)
     _request_baselines: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _request_metadata: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
@@ -100,6 +101,9 @@ class AnthropicModelClient:
         tools: list[dict[str, Any]],
         max_tokens: int | None = None,
     ) -> ModelResponse:
+        from codeagent.multimodal import anthropic_messages, validate_modalities
+        validate_modalities(messages, "anthropic", self.input_modalities)
+        messages = anthropic_messages(messages)
         call_id = f"call_{uuid4().hex}"
         started_at = time.monotonic()
         params = {
@@ -252,6 +256,7 @@ class AnthropicModelClient:
             activity=self.activity,
             request_timeout=self.request_timeout,
             reasoning_effort=self.reasoning_effort if (call_kind or self.call_kind) in {"main", "subagent"} else "default",
+            input_modalities=self.input_modalities,
         )
 
     def _create_streaming_message(
