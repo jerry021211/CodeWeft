@@ -229,6 +229,8 @@ class OpenAIModelClient(AnthropicModelClient):
         timeout = self.request_timeout or 600.0
         if self.activity is not None:
             timeout = min(timeout, self.activity.request_timeout())
+        if timeout == float("inf"):
+            timeout = None  # Explicit search policy; HTTPX's no-deadline value.
         url = self.base_url.rstrip("/") + ("/responses" if self.protocol == "openai_responses" else "/chat/completions")
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         with trace_run(f"llm.{self.protocol}.create_message", run_type="llm", inputs=payload, metadata=info) as trace, (

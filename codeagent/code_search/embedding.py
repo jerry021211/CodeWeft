@@ -18,7 +18,7 @@ class EmbeddingProvider(Protocol):
     dimensions: int
 
     def embed(self, texts: list[str], *, check, timeout: float) -> list[list[float]]:
-        """Return ordered vectors; honor the deadline and cooperative check."""
+        """Honor cooperative check; timeout=inf explicitly disables time limits."""
         ...
 
 
@@ -52,7 +52,9 @@ class RemoteEmbeddingProvider:
         self.dimensions = config.dimensions
 
     def embed(self, texts, *, check, timeout):
-        return asyncio.run(self._embed(texts, check, min(timeout, self.config.timeout_seconds)))
+        # An unbounded search overrides the provider's legacy short timeout.
+        limit = timeout if timeout == float("inf") else min(timeout, self.config.timeout_seconds)
+        return asyncio.run(self._embed(texts, check, limit))
 
     async def _embed(self, texts, check, timeout):
         deadline = time.monotonic() + timeout
@@ -76,7 +78,7 @@ class RemoteEmbeddingProvider:
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = "Bearer " + self.config.api_key
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=None if timeout == float("inf") else timeout) as client:
             async def fetch():
                 async with client.stream('POST', self.config.base_url.rstrip('/') + '/embeddings',
                         json={'model': self.model, 'input': texts, 'encoding_format': 'float'}, headers=headers) as response:

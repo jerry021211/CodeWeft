@@ -55,7 +55,7 @@ class VectorIndex:
     def _embed(self, texts, check, remaining):
         self.stats['requests'] += 1
         try:
-            values = self.provider.embed(texts, check=check, timeout=min(10., remaining()))
+            values = self.provider.embed(texts, check=check, timeout=remaining())
         except BaseException:
             self.stats['usage_complete'] = False
             self.stats['failed_requests'] += 1
@@ -121,7 +121,19 @@ class VectorIndex:
                         raise
                     if not batch:
                         continue
-                    values = self._embed([keyed[k][1] for k in batch], check, remaining)
+                    renewed_at = time.monotonic()
+
+                    def check_lease():
+                        nonlocal renewed_at
+                        check()
+                        # Long requests still own their batches. Cancellation
+                        # polling renews leases without another heartbeat thread.
+                        if time.monotonic() - renewed_at >= 10:
+                            with conn:
+                                conn.execute('UPDATE jobs SET expires=? WHERE owner=?', (time.time() + 30, owner))
+                            renewed_at = time.monotonic()
+
+                    values = self._embed([keyed[k][1] for k in batch], check_lease, remaining)
                     valid = {}
                     for key in batch:
                         doc = keyed[key][0]

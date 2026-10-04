@@ -151,12 +151,14 @@ class AnthropicModelClient:
                 # Per-request options do not mutate/close the shared SDK client.
                 client = self._client
                 if self.activity is not None:
-                    client = client.with_options(
-                        max_retries=0, timeout=min(self.activity.request_timeout(), self.request_timeout)
-                        if self.request_timeout is not None else self.activity.request_timeout()
-                    )
+                    timeout = self.activity.request_timeout()
+                    if self.request_timeout is not None:
+                        timeout = min(timeout, self.request_timeout)
+                    client = client.with_options(max_retries=0,
+                        timeout=None if timeout == float("inf") else timeout)
                 elif self.request_timeout is not None:
-                    client = client.with_options(max_retries=0, timeout=self.request_timeout)
+                    client = client.with_options(max_retries=0,
+                        timeout=None if self.request_timeout == float("inf") else self.request_timeout)
                 if self.stream:
                     stream_params = {**params, "extra_body": reasoning} if reasoning else params
                     self._observe_request(stream_params, call_id)

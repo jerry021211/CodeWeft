@@ -55,7 +55,13 @@ class ToolRegistry:
             owner = getattr(registered.handler, "__self__", None)
             bind = getattr(owner, "bind_runtime", None)
             if callable(bind):
-                bind(cancellation_check=cancellation_check, remaining_seconds=remaining_seconds)
+                bind(cancellation_check=cancellation_check,
+                     remaining_seconds=(lambda: float("inf"))
+                     if registered.definition.unlimited_time else remaining_seconds)
+
+    def unlimited_time(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        return bool(tool and tool.definition.unlimited_time)
 
     def input_state(self, name: str, args: dict[str, Any]) -> ToolInputState:
         registered = self._tools.get(name)

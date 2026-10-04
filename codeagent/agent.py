@@ -783,6 +783,10 @@ class Agent:
         return results
 
     def _parallel_kind(self, tool):
+        # A search owns its activity scope, including nested model calls. Keep
+        # that scope out of the shared parallel-reader activity stack.
+        if self.tools.unlimited_time(tool.name):
+            return None
         if not self.config.parallel.enabled or self._prompt_mode() not in {
             PromptMode.NORMAL, PromptMode.SUBAGENT,
         }:
@@ -837,7 +841,9 @@ class Agent:
                 timeout = self._loop_guard.budget.remaining_seconds()
             with (activity.operation(
                 "user_input" if tool.name == "ask_user" else "tool",
-                float("inf") if tool.name == "ask_user" else activity.clock() + timeout + 5,
+                float("inf") if tool.name == "ask_user" or self.tools.unlimited_time(tool.name)
+                else activity.clock() + timeout + 5,
+                unlimited_time=self.tools.unlimited_time(tool.name),
             ) if activity is not None else nullcontext()):
                 self._check_cancelled()
                 execution["status"] = "unknown"

@@ -25,6 +25,7 @@ class ToolDefinition:
     # Harness metadata, deliberately excluded from the provider schema.
     effect: str = "exclusive"
     reentrant: bool = False
+    unlimited_time: bool = False
 
     def to_schema(self) -> dict[str, Any]:
         return {

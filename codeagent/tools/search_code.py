@@ -18,7 +18,7 @@ class SearchCodeTool:
             "path": {"type": "string", "description": "工作区内目录或文件，默认 ."},
             "top_k": {"type": "integer", "minimum": 1, "maximum": CODE_SEARCH_RESULTS, "default": CODE_SEARCH_RESULTS, "description": "返回不同代码实体数，默认20，1至20"},
             "keywords": {"type": "array", "items": {"type": "string"}, "description": "可选，至多三组简短搜索词；原始 query 始终保留"},
-        }, "required": ["query"]}, effect="read", reentrant=True)
+        }, "required": ["query"]}, effect="read", reentrant=True, unlimited_time=True)
 
     def __init__(self, workspace, index_dir, *, client=None, model=None, event_emitter=None,
                  embedding_provider=None, embedding_config=None):

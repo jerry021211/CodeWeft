@@ -22,6 +22,7 @@ class _Operation:
     last_response: float
     receiving: bool = False
     close: Callable[[], None] | None = None
+    unlimited_time: bool = False
 
 
 class ExecutionActivity:
@@ -57,15 +58,15 @@ class ExecutionActivity:
         self._last_label = ""
 
     @contextmanager
-    def operation(self, kind: str, deadline: float) -> Iterator[None]:
-        operation = _Operation(kind, deadline, self.clock())
+    def operation(self, kind: str, deadline: float, *, unlimited_time: bool = False) -> Iterator[None]:
+        operation = _Operation(kind, deadline, self.clock(), unlimited_time=unlimited_time)
         with self._lock:
             self._operations.append(operation)
         try:
             self.touch()
             self.check()
             with (self.execution_budget.paused() if self.execution_budget is not None
-                  and kind in {"approval", "user_input"} else nullcontext()):
+                  and (unlimited_time or kind in {"approval", "user_input"}) else nullcontext()):
                 yield
             self.check()
         finally:
@@ -77,13 +78,15 @@ class ExecutionActivity:
     def model_request(self) -> Iterator[None]:
         with self._lock:
             covered = bool(self._operations and self._operations[-1].kind == "model")
+            unlimited = bool(self._operations and self._operations[-1].unlimited_time)
         if covered:
             self.check()
             yield
             self.check()
         else:
             # Direct calls such as context compression still have a deadline.
-            with self.operation("model", self.clock() + self.model_timeout):
+            with self.operation("model", float("inf") if unlimited else self.clock() + self.model_timeout,
+                                unlimited_time=unlimited):
                 yield
 
     def touch(self, *, response: bool = False) -> None:
@@ -125,6 +128,7 @@ class ExecutionActivity:
                 current = self._operations[-1]
                 if (
                     current.kind == "model"
+                    and not current.unlimited_time
                     and now - current.last_response >= self.response_timeout
                 ):
                     return "model_response_timeout"
@@ -151,7 +155,9 @@ class ExecutionActivity:
         """Also bound blocking SDK I/O, including non-streaming requests."""
         self.check()
         with self._lock:
-            remaining = min(op.deadline for op in self._operations) - self.clock()
+            remaining = min((op.deadline for op in self._operations), default=float("inf")) - self.clock()
+            if self._operations and self._operations[-1].unlimited_time:
+                return max(0.001, remaining)
         if self.execution_budget is not None:
             remaining = min(remaining, self.execution_budget.remaining_seconds())
         return max(0.001, min(self.response_timeout, remaining))

@@ -124,6 +124,12 @@ Team 成员继承启动任务的选择。摘要、记忆和搜索改写等辅助
 4 个并行读取、3 个子 Agent；另有进程级请求限额。写入、shell、MCP、`search_code`
 和未声明并发合同的自定义工具仍串行。关闭 `CODEAGENT_PARALLEL_ENABLED` 可回退。
 
+`search_code` 单独采用无时间上限策略：索引扫描、向量构建/查询和关键词改写不受工具期限、
+模型响应期限或短 HTTP 超时限制，执行期间不累计本分支的活跃时间预算。手动取消、Token
+预算和每次向量构建的块数限制仍有效；其他工具和主模型调用保留原有时限。
+独立索引命令 `python -m codeagent.code_search index --workspace <目录>` 也默认不限时，
+需要限制时可显式传入 `--timeout <秒数>`。修改后需重启 CodeAgent 后端生效，已有索引可继续复用。
+
 旧的 `subagent(description)` 保持前台串行行为。独立调查可使用
 `subagent(description, access="read_only")`，同轮多个调用可以同时执行；再传
 `run_in_background=true` 可让主 Agent 继续独立读取。`subagent_result` 查询或有限等待，

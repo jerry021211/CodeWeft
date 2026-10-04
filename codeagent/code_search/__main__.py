@@ -1,6 +1,7 @@
 """Explicit local index maintenance, independent of Agent/chat credentials."""
 import argparse
 import json
+import math
 from pathlib import Path
 import time
 from codeagent.code_intelligence.models import QueryContext
@@ -15,11 +16,11 @@ def main():
     parser.add_argument('--workspace', type=Path, default=Path.cwd())
     parser.add_argument('--embedding', action='store_true', help='Explicitly build vectors using configured remote provider')
     parser.add_argument('--max-chunks', type=int, default=2000, help='Per-invocation resumable embedding budget')
-    parser.add_argument('--timeout', type=float, default=120)
+    parser.add_argument('--timeout', type=float, help='Optional time limit in seconds; unlimited by default')
     args = parser.parse_args()
-    if args.timeout <= 0 or args.max_chunks <= 0:
+    if (args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0)) or args.max_chunks <= 0:
         parser.error('timeout and max-chunks must be positive')
-    deadline = time.monotonic() + args.timeout
+    deadline = time.monotonic() + args.timeout if args.timeout is not None else float('inf')
     context = QueryContext(remaining_seconds=lambda: deadline - time.monotonic())
     index = CodeIndex(args.workspace, RuntimeDataPaths.default().code_index_dir(args.workspace))
     try:
