@@ -39,6 +39,18 @@ def done():
 
 
 class LoopGuardConfigTests(unittest.TestCase):
+    def test_retired_call_limit_environment_values_are_ignored(self):
+        from dataclasses import asdict
+        for value in ("0", "1", "80", "200", "invalid-retired-setting"):
+            with self.subTest(value=value), patch.dict(os.environ, {
+                "MODEL_ID": "fake", "CODEAGENT_RUN_MAX_MODEL_CALLS": value,
+                "CODEAGENT_RUN_MAX_TOOL_CALLS": value,
+            }, clear=True), patch("codeagent.config._load_dotenv"):
+                config = EnvironmentConfig.from_env().loop_guard_config
+                self.assertNotIn("max_model_calls", asdict(config))
+                self.assertNotIn("max_tool_calls", asdict(config))
+                self.assertEqual(config.max_active_seconds, 1800)
+
     def test_environment_values_reach_agent_config(self):
         settings = {
             "MODEL_ID": "fake",
@@ -60,7 +72,7 @@ class LoopGuardConfigTests(unittest.TestCase):
         self.assertEqual(env.loop_guard_config, LoopGuardConfig(
             window_size=16, repeat_failure_limit=4, parameter_error_limit=3,
             blocked_attempt_limit=5, empty_response_limit=3, tool_max_retries=0,
-            retry_delay_seconds=0.5, max_model_calls=90, max_tool_calls=250,
+            retry_delay_seconds=0.5,
             max_total_tokens=123456, max_active_seconds=600,
         ))
         self.assertIs(env.to_agent_config().loop_guard, env.loop_guard_config)
@@ -76,7 +88,6 @@ class LoopGuardConfigTests(unittest.TestCase):
         for name, value in (
             ("CODEAGENT_LOOP_WINDOW", "0"),
             ("CODEAGENT_LOOP_TOOL_MAX_RETRIES", "-1"),
-            ("CODEAGENT_RUN_MAX_MODEL_CALLS", "0"),
             ("CODEAGENT_RUN_MAX_TOTAL_TOKENS", "-1"),
             ("CODEAGENT_RUN_MAX_ACTIVE_SECONDS", "0"),
         ):
@@ -202,8 +213,8 @@ class LoopGuardWebTests(unittest.TestCase):
         self.assertEqual(messages[-1].metadata["status"], "failed")
 
     def test_checkpoint_restores_budget_for_same_run_but_new_run_is_fresh(self):
-        client = ScriptedClient(done(), done())
-        factory = self.factory(max_model_calls=1)
+        client = ScriptedClient(done(), done(), done())
+        factory = self.factory()
         scheduler = RunScheduler(self.repository, factory)
         with patch.object(EnvironmentConfig, "create_anthropic_client", return_value=client):
             try:
@@ -213,7 +224,7 @@ class LoopGuardWebTests(unittest.TestCase):
                 scheduler.stop()
             self.assertEqual(run.status, "completed")
             checkpoint = self.repository.get_checkpoint_for_run(run.id)
-            for run_id, expected_calls, failed in ((run.id, 1, True), ("fresh-run", 2, False)):
+            for run_id, expected_calls, failed in ((run.id, 2, False), ("fresh-run", 3, False)):
                 with self.subTest(run_id=run_id):
                     restored = factory.create(
                         event_emitter=EventEmitter(context=ExecutionContext(
@@ -222,7 +233,8 @@ class LoopGuardWebTests(unittest.TestCase):
                         cancellation=CancellationToken(), permission_broker=WaitingPermissionBroker(),
                         checkpoint=checkpoint,
                     )
-                    result = restored.run(None if failed else "new request")
+                    result = restored.run(None if run_id == run.id else "new request")
+                    self.assertEqual(restored.export_execution_state()["budget"]["model_calls"], 2 if run_id == run.id else 1)
                     self.assertEqual(result.stop_reason.startswith("budget_exceeded:"), failed)
                     self.assertEqual(len(client.calls), expected_calls)
 

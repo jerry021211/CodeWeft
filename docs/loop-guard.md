@@ -26,7 +26,7 @@ Shell 结果在截断前计算签名，仅过滤 pytest/unittest 标准汇总行
 
 **普通 shell 的输入依赖默认未知。** 仅凭相同命令、退出码、Git HEAD 或工作区修改
 版本，无法确认测试依赖没有变化。没有可信输入状态提供者时，重复 shell 诊断只提醒，
-最终由调用次数和时间预算兜底；不会承诺识别所有测试的依赖图。测试断言失败和编译
+最终由固定轮数和时间预算兜底；不会承诺识别所有测试的依赖图。测试断言失败和编译
 错误是有效诊断，不是 shell 工具故障，不会自动重试到通过。
 
 已有权限或 Discuss Hook 拒绝的请求不计为真实执行失败。被拦截的请求仍写入合法
@@ -48,8 +48,6 @@ CLI 和 Web 通过 `EnvironmentConfig.loop_guard_config` 读取以下环境变�
 | `CODEAGENT_LOOP_EMPTY_RESPONSE_LIMIT` | `empty_response_limit` | 2 |
 | `CODEAGENT_LOOP_TOOL_MAX_RETRIES` | `tool_max_retries` | 2 |
 | `CODEAGENT_LOOP_RETRY_DELAY_SECONDS` | `retry_delay_seconds` | 0.25 |
-| `CODEAGENT_RUN_MAX_MODEL_CALLS` | `max_model_calls` | 80 |
-| `CODEAGENT_RUN_MAX_TOOL_CALLS` | `max_tool_calls` | 200 |
 | `CODEAGENT_RUN_MAX_TOTAL_TOKENS` | `max_total_tokens` | 0（不限） |
 | `CODEAGENT_RUN_MAX_ACTIVE_SECONDS` | `max_active_seconds` | 1800 |
 
@@ -57,15 +55,18 @@ CLI 和 Web 通过 `EnvironmentConfig.loop_guard_config` 读取以下环境变�
 测试或离线运行时关闭退避等待；累计 Token 上限默认关闭（`max_total_tokens=0`），
 用量仍照常累计，其余兜底继续生效。需要限制时可显式设置正整数；已有环境变量中的
 正数配置仍然有效。这些是初始调优参数：12 条限制局部检测成本，3 次失败与
-2 次参数错误给模型纠正机会；80 次模型请求、200 次工具请求和 30 分钟限制单次
+2 次参数错误给模型纠正机会；200 轮和 30 分钟活动时间限制单次
 本地开发任务的消耗。它们不是经过本项目任务集验证的最佳值。
 
-现有 `MAX_ITERATIONS=50` 仍有效。轮数与模型请求次数口径不同：基础设施重试、
-续写等请求也需要预算，不能把 50 轮理解为最多 50 次请求。
+每次逻辑执行固定最多 200 轮，第 185 轮开始提醒模型收尾，旧 `MAX_ITERATIONS` 不再覆盖。
+模型和工具调用次数只做统计，不再设置硬上限；旧 `CODEAGENT_RUN_MAX_MODEL_CALLS`、
+`CODEAGENT_RUN_MAX_TOOL_CALLS` 环境变量被忽略，对应字段已从 `LoopGuardConfig` 删除。
+轮数与请求次数不同：重试、续写和辅助调用仍计入统计，但不因累计达到 80/200 次而停止。
+独立评测程序通过 `evals.execution_budget.EvaluationBudget` 保留其显式试验额度，不作用于生产 Agent。
 
 Token 口径是 provider 报告的普通输入、缓存创建输入、缓存读取输入与输出之和，
 不是仅新增 Token，也不是费用。缺少 usage 的调用保持未知，不按真实消耗为零解释；
-已知部分仍累计，模型请求次数和时间限制仍有效。显式启用上限时，Token 检查在响应返回后生效，
+已知部分仍累计，活动时间限制仍有效。显式启用上限时，Token 检查在响应返回后生效，
 可能超出最多一个在途响应的消耗；不能作为预付费硬额度。
 
 工具仅在结果明确标记为临时故障且安全重放时有限重试，默认额外 2 次、共 3 次，
@@ -91,6 +92,9 @@ Token 口径是 provider 报告的普通输入、缓存创建输入、缓存读�
 `metadata['execution_guard']` 中保存这一数据；旧 checkpoint 缺少该字段时保持兼容。
 Web 默认使用 `event_emitter.context.run_id` 标识执行作用域，同一个 Run 恢复会
 保留保护状态，新的 Run 不继承旧执行的封禁。该接入不新增自动恢复或重放机制。
+
+显式恢复旧检查点时，仅清除已废弃的 `budget_exceeded:model_calls` / `budget_exceeded:tool_calls`
+停止锁存，保留历史计数、轮数及已完成结果；活动时间、Token、循环检测等其他停止原因不清除。
 
 SDK 在同一逻辑执行中传同一个 `execution_id`，或用 `agent.run(None)` 继续已有
 执行。提供新 prompt 且没有显式 ID、也没有 Web run ID 时，创建新的执行作用域。

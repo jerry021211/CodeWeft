@@ -141,10 +141,13 @@ MODEL_ID=claude-3-5-sonnet-latest
 API_KEY=your_api_key_here
 BASE_URL=
 MAX_TOKENS=32000
-MAX_ITERATIONS=50
 STREAMING=false
 CODEAGENT_PLANNING_MODE=auto
 ```
+
+主 Agent 和子 Agent 的每次逻辑执行固定最多 200 轮，第 185 轮调用模型前提醒收尾。暂停和恢复沿用已用轮数，不调用第 201 轮；第 200 轮已产生的工具调用仍完成结果保存。旧 `MAX_ITERATIONS` 配置不再覆盖该固定值。模型调用次数和工具调用次数仅统计，不设执行次数上限，旧 `CODEAGENT_RUN_MAX_MODEL_CALLS`、`CODEAGENT_RUN_MAX_TOOL_CALLS` 不再生效；活动时间预算、可选总 Token 预算、单次操作超时和循环检测继续生效。
+
+一轮按主执行循环计数；摘要请求和同轮供应商重试计入模型调用统计，不额外增加轮数。收尾提醒作为运行时消息进入模型上下文，压缩后若提醒不在发送内容中会重新附加，再做完整请求预算校验。
 
 代码里可通过 `EnvironmentConfig.from_env()` 构建运行配置：
 

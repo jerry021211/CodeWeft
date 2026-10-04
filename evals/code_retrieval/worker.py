@@ -15,6 +15,7 @@ from codeagent.context import ContextConfig, ContextManager
 from codeagent.events import EventEmitter, UsageTracker
 from codeagent.events.sink import CallbackEventSink
 from codeagent.hooks.loop_guard import LoopGuardConfig
+from evals.execution_budget import EvaluationBudget
 from codeagent.prompts import PromptMode, PromptRuntime
 from codeagent.recovery import RecoveryConfig, RecoveryRuntime
 from codeagent.tools import ToolRegistry, tool_schema_hash
@@ -95,10 +96,11 @@ def main():
             if tool.definition.name != "search_code":
                 raise ValueError("Candidate factory must return a tool named search_code")
             registry.register(tool)
-        agent = Agent(client=client, tools=registry, config=AgentConfig(
+        guard_config = LoopGuardConfig(max_total_tokens=p["max_total_tokens"], max_active_seconds=p["timeout_seconds"])
+        trial_budget = EvaluationBudget(guard_config, model_calls=p["max_api_calls"], tool_calls=p["max_tool_calls"])
+        agent = Agent(execution_budget=trial_budget, client=client, tools=registry, config=AgentConfig(
             model=p["model"], max_tokens=p["max_tokens"], max_iterations=p["max_api_calls"],
-            loop_guard=LoopGuardConfig(max_model_calls=p["max_api_calls"], max_tool_calls=p["max_tool_calls"],
-                                       max_total_tokens=p["max_total_tokens"], max_active_seconds=p["timeout_seconds"])),
+            loop_guard=guard_config),
             context=ContextManager(config=ContextConfig(mode="off", context_window_tokens=p["context_window_tokens"],
                                                   transcript_dir=trial / "runtime/transcripts",
                                                   tool_output_dir=trial / "runtime/tool-results")),

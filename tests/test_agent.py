@@ -236,7 +236,7 @@ class AgentTests(unittest.TestCase):
         result = agent.run("delegate this")
 
         self.assertEqual(result.final_text, "parent final")
-        self.assertEqual(agent.subagent_max_iterations, 30)
+        self.assertEqual(agent.subagent_max_iterations, 200)
         subagent_fork = next(
             call for call in client.fork_calls if call.get("call_kind") == "subagent"
         )
@@ -677,7 +677,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(env.api_key, "test-key")
         self.assertEqual(env.base_url, "https://example.test")
         self.assertEqual(env.to_agent_config().max_tokens, 1234)
-        self.assertEqual(env.to_agent_config().max_iterations, 7)
+        self.assertEqual(env.to_agent_config().max_iterations, 200)
         self.assertFalse(env.enable_skills)
         self.assertEqual([str(path) for path in env.skill_roots], ["project-skills"])
         self.assertEqual(env.context_config.mode, "model")

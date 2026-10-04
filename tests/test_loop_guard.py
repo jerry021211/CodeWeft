@@ -689,33 +689,24 @@ class LoopGuardIntegrationTests(unittest.TestCase):
         self.assertEqual(snapshot["budget"]["tool_calls"], 20)
         self.assertFalse(self.events_of("agent.loop_warning"))
 
-    def test_tool_budget_stops_mid_batch_and_pairs_unexecuted_results(self):
+    def test_large_tool_batch_does_not_trigger_old_count_budget(self):
         self.register_read()
         agent, client = self.make_agent([
-            tools(*(call(f"read-{i}", "read_file", {"file_path": "implementation.py"}) for i in range(4))),
-        ], max_tool_calls=2)
-        result = agent.run("Read code")
-        self.assertEqual(result.stop_reason, "budget_exceeded:tool_calls")
-        self.assertEqual(len(self.executed), 2)
-        self.assertEqual(len(client.calls), 1)
-        results = self.results(agent)
-        self.assertEqual(len(results), 4)
-        for identifier in ("read-2", "read-3"):
-            self.assertTrue(results[identifier]["is_error"])
-            self.assertIn("未执行", results[identifier]["content"])
-
-    def test_model_budget_limits_unknown_usage_and_programmatic_finalization(self):
-        self.register_read()
-        agent, client = self.make_agent([
-            tools(call(f"read-{i}", "read_file", {"file_path": "implementation.py"})) for i in range(2)
-        ], max_model_calls=2)
-        result = agent.run("Read code")
-        self.assertEqual(result.stop_reason, "budget_exceeded:model_calls")
+            tools(*(call(f"read-{i}", "read_file", {"file_path": "implementation.py"}) for i in range(201))), done(),
+        ])
+        self.assertEqual(agent.run("Read code").stop_reason, "end_turn")
+        self.assertEqual(len(self.executed), 201)
         self.assertEqual(len(client.calls), 2)
-        self.assertEqual(len(self.executed), 2)
-        self.assertEqual(agent._loop_guard.budget.state.unknown_usage_calls, 2)
-        self.assertIn("用量未知", result.final_text)
-        self.assertFalse(self.events_of("agent.completed"))
+        self.assertEqual(len(self.results(agent)), 201)
+
+    def test_more_than_80_model_calls_with_unknown_usage_can_complete(self):
+        self.register_read()
+        agent, client = self.make_agent([
+            tools(call(f"read-{i}", "read_file", {"file_path": "implementation.py"})) for i in range(80)
+        ] + [done()])
+        self.assertEqual(agent.run("Read code").stop_reason, "end_turn")
+        self.assertEqual(len(client.calls), 81)
+        self.assertEqual(agent._loop_guard.budget.state.unknown_usage_calls, 81)
 
     def test_reported_tokens_enforce_budget_before_next_tool_starts(self):
         self.register_read()

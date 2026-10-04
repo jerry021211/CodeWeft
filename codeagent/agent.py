@@ -37,7 +37,8 @@ from codeagent.permissions.broker import permission_execution, permission_tool
 from codeagent.recovery import RecoveryRuntime
 from codeagent.runtime import CancellationToken
 from codeagent.runtime.activity import ExecutionActivity
-from codeagent.runtime.execution import BudgetedClient, ExecutionStopped, RunBudget, is_execution_failure
+from codeagent.runtime.execution import (BudgetedClient, ExecutionStopped, RunBudget, RoundBudget,
+                                         MAX_EXECUTION_ROUNDS, is_execution_failure)
 from codeagent.runtime.parallel import Admission, ParallelConfig, admission
 from codeagent.runtime.subagents import SubagentRuntime
 from codeagent.runtime.tool_executor import batches, submit
@@ -65,10 +66,14 @@ class AgentConfig:
 
     model: str
     max_tokens: int = 32_000
-    max_iterations: int = 50
+    # Compatibility field; the execution limit is fixed in code.
+    max_iterations: int = MAX_EXECUTION_ROUNDS
     planning_backend: PlanningBackend = PlanningBackend.TODO
     loop_guard: LoopGuardConfig | None = field(default_factory=LoopGuardConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
+
+    def __post_init__(self) -> None:
+        self.max_iterations = MAX_EXECUTION_ROUNDS
 
 
 @dataclass(slots=True)
@@ -105,7 +110,7 @@ class Agent:
     cancellation: CancellationToken | None = None
     messages: list[Message] = field(default_factory=list)
     allow_subagents: bool = True
-    subagent_max_iterations: int = 30
+    subagent_max_iterations: int = MAX_EXECUTION_ROUNDS
     subagent_environment_factory: Callable[[], SubagentEnvironment] | None = None
     subagent_log: Callable[[str], None] | None = None
     skill_catalog: str = ""
@@ -119,6 +124,7 @@ class Agent:
     execution_budget: RunBudget | None = None
     tool_admission: Admission | None = None
     _loop_guard: LoopGuard | None = field(default=None, init=False, repr=False)
+    _round_budget: RoundBudget = field(default_factory=RoundBudget, init=False, repr=False)
     _compact_requested: bool = field(default=False, init=False)
     _tool_schema_changed: bool = field(default=False, init=False)
     _yield_reason: str | None = field(default=None, init=False, repr=False)
@@ -127,6 +133,7 @@ class Agent:
     _request_reasons: list[str] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.subagent_max_iterations = MAX_EXECUTION_ROUNDS
         self._independent_child_hooks = self.subagent_environment_factory is not None or not self.hooks.has_handlers
         if self.tool_admission is None:
             self.tool_admission = Admission(self.config.parallel.max_tools)
@@ -185,7 +192,7 @@ class Agent:
         }:
             self._loop_guard = LoopGuard(
                 self.config.loop_guard, tools=lambda: self.tools, emit=self.event_emitter.emit,
-                budget=self.execution_budget, max_iterations=self.config.max_iterations,
+                budget=self.execution_budget,
             )
             self._loop_guard.install(self.hooks)
             if self.cancellation is None:
@@ -260,27 +267,29 @@ class Agent:
             self.tools.close_workspace_tools()
 
     def export_execution_state(self) -> dict[str, Any]:
-        return self._loop_guard.snapshot() if self._loop_guard is not None else {}
+        snapshot = self._loop_guard.snapshot() if self._loop_guard is not None else {}
+        return {**snapshot, 'round_budget': asdict(self._round_budget)}
 
     def restore_execution_state(self, payload: dict[str, Any]) -> None:
-        if self._loop_guard is not None:
+        if self._loop_guard is not None and 'state' in payload:
             self._loop_guard.restore(payload)
+        saved = payload.get('round_budget') or payload.get('state', {})
+        self._round_budget = RoundBudget(scope_id=saved.get('scope_id', ''), rounds=saved.get('rounds', 0))
 
     def _guarded_run(self, prompt: str | None, *, allow_yield: bool,
                      execution_id: str | None = None) -> AgentResult:
         guard = self._loop_guard
-        if guard is None:
-            return self._run(prompt, allow_yield=allow_yield)
         self._check_cancelled()
         if self.execution_activity is not None:
             self.execution_activity.cancellation = self.cancellation
-        scope = execution_id or (guard.state.scope_id if prompt is None
-                                 else self.event_emitter.context.run_id or uuid4().hex)
-        guard.max_iterations = self.config.max_iterations
-        guard.begin(scope)
+        scope = execution_id or ((self._round_budget.scope_id or (guard.state.scope_id if guard else '') or uuid4().hex)
+                                 if prompt is None else self.event_emitter.context.run_id or uuid4().hex)
+        self._round_budget.begin(scope)
+        if guard is not None:
+            guard.begin(scope)
         usage_before = self.usage_tracker.snapshot()
-        start_rounds = guard.state.rounds
-        with guard.budget.running():
+        start_rounds = self._round_budget.rounds
+        with guard.budget.running() if guard else nullcontext():
             try:
                 self._check_execution()
                 return self._run(prompt, allow_yield=allow_yield)
@@ -288,8 +297,9 @@ class Agent:
                 self._check_cancelled()
                 validate_tool_history(self.messages)
                 result = self._make_result(
-                    final_text=guard.finish(exc.reason), stop_reason=exc.reason,
-                    iterations=guard.state.rounds - start_rounds, usage_before=usage_before,
+                    final_text=guard.finish(exc.reason) if guard else f'本次执行已停止，未标记为完成。原因：{exc.reason}。已完成的工具结果和改动保留。',
+                    stop_reason=exc.reason,
+                    iterations=self._round_budget.rounds - start_rounds, usage_before=usage_before,
                 )
                 self.event_emitter.emit(
                     "agent.budget_exceeded" if exc.reason.startswith(("budget_exceeded", "max_iterations"))
@@ -304,7 +314,7 @@ class Agent:
         self._yield_reason = str(reason).strip() or "waiting"
 
     def _run(self, prompt: str | list[dict[str, Any]] | None, *, allow_yield: bool) -> AgentResult:
-        """Run until the model stops requesting tools or the iteration limit hits."""
+        """Run until completion, cancellation, yield, or an independent execution guard stops it."""
 
         self._check_cancelled()
         validate_tool_history(self.messages)
@@ -320,7 +330,7 @@ class Agent:
             "agent.started",
             {
                 "model": self.config.model,
-                "max_iterations": self.config.max_iterations,
+                "max_iterations": MAX_EXECUTION_ROUNDS,
                 "max_tokens": self.config.max_tokens,
                 "is_subagent": not self.allow_subagents,
             },
@@ -340,12 +350,11 @@ class Agent:
             inputs={"prompt": prompt, "message_count": len(self.messages)},
             metadata={
                 "model": self.config.model,
-                "max_iterations": self.config.max_iterations,
+                "max_iterations": MAX_EXECUTION_ROUNDS,
                 "max_tokens": self.config.max_tokens,
             },
         ) as run_trace:
             iterations = 0
-            last_stop_reason = "not_started"
             assert self.recovery_runtime is not None
             recovery_state = self.recovery_runtime.create_state(
                 model=self.config.model,
@@ -372,7 +381,7 @@ class Agent:
                         ],
                     }
 
-            while iterations < self.config.max_iterations:
+            while True:
                 self._collect_subagents()
                 self._check_execution()
                 if self.boundary_callback is not None:
@@ -405,6 +414,7 @@ class Agent:
                         }
                     )
                     return result
+                self._round_budget.admit()
                 iterations += 1
                 if self.read_only:
                     reminder = None
@@ -507,7 +517,6 @@ class Agent:
                     if response_decision.action == "retry":
                         self.add_user_message(response_decision.message, source="runtime")
                         continue
-                last_stop_reason = response.stop_reason
                 tool_uses = normalize_tool_uses(response.content)
                 if tool_uses and (any(not item.id for item in tool_uses) or len({item.id for item in tool_uses}) != len(tool_uses)):
                     raise ValueError("模型返回了空或重复的工具调用 ID")
@@ -549,27 +558,6 @@ class Agent:
                         event_emitter=self.event_emitter,
                     )
 
-            if self._loop_guard is not None:
-                raise ExecutionStopped(f"max_iterations:{last_stop_reason}")
-            self._after_turn_memory(memory_start)
-            result = self._make_result(
-                final_text="",
-                stop_reason=f"max_iterations:{last_stop_reason}",
-                iterations=iterations,
-                usage_before=usage_before,
-            )
-            self._emit_agent_terminal("agent.failed", result)
-            run_trace.end(
-                outputs={
-                    "final_text": result.final_text,
-                    "stop_reason": result.stop_reason,
-                    "iterations": result.iterations,
-                    "message_count": len(result.messages),
-                },
-                error=result.stop_reason,
-            )
-            return result
-
     def _create_message(self, *, prompt_assembly: PromptAssemblyResult | None = None,
                         iteration: int | None = None, **kwargs: Any) -> Any:
         if prompt_assembly is not None:
@@ -581,6 +569,8 @@ class Agent:
         validate_tool_history(kwargs["messages"])
         canonical = kwargs["messages"]
         self._sync_permission_reminder(canonical)
+        round_reminder = self._round_budget.reminder()
+        self._sync_runtime_reminder('round_budget', round_reminder, canonical)
         feedback = ""
         if self._loop_guard is not None:
             feedback = self._loop_guard.feedback()
@@ -601,6 +591,8 @@ class Agent:
         # A compaction in preflight may have folded a previously sent reminder.
         # Append it at the safe tail and recheck the complete request budget.
         reinjected = self._sync_permission_reminder(canonical, effective=kwargs["messages"])
+        reinjected = self._sync_runtime_reminder('round_budget', round_reminder, canonical,
+                                                effective=kwargs['messages']) or reinjected
         if self._loop_guard is not None:
             reinjected = self._sync_runtime_reminder("loop_guard", feedback, canonical,
                                                      effective=kwargs["messages"]) or reinjected
@@ -710,8 +702,10 @@ class Agent:
         if kind == "date" and previous.get("system_value_hash") == value_hash:
             return False
         validate_tool_history(canonical)
-        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期"}
+        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期", 'round_budget': '收尾提醒'}
         text = value or "此前的运行时执行纠偏已解除；继续遵循当前用户目标和权限。"
+        if kind == 'round_budget' and not value:
+            text = '本次是新的逻辑执行，轮数重新计数；上一执行的收尾提醒不再适用。'
         content = text if kind == "permission" else f"[运行时提醒：{labels[kind]}；不改变用户目标或权限]\n{text}"
         message = {"role": "user", "content": content}
         canonical.append({**message, "_context_source": "runtime"})
@@ -1114,7 +1108,7 @@ class Agent:
                 inputs={"description": task_description},
                 metadata={
                     "model": self.config.model,
-                    "max_iterations": self.subagent_max_iterations,
+                    "max_iterations": MAX_EXECUTION_ROUNDS,
                 },
             ) as subagent_trace:
                 subagent = self._create_subagent(child_emitter)
@@ -1193,7 +1187,6 @@ class Agent:
             config=AgentConfig(
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
-                max_iterations=self.subagent_max_iterations,
                 loop_guard=self.config.loop_guard,
                 parallel=self.config.parallel,
             ),

@@ -73,7 +73,7 @@ class CodeSearch:
         if isinstance(client, BudgetedClient):
             budget = client.budget
         # Keep one model call for the parent Agent to judge and explain the evidence.
-        if self.context.remaining_seconds() < 3 or (budget and budget.state.model_calls >= budget.config.max_model_calls - 1):
+        if self.context.remaining_seconds() < 3:
             return [], "budget_skipped", 0
         attempts = 0
         try:

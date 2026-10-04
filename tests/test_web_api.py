@@ -166,6 +166,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(body["model"], "test-model")
         self.assertEqual(body["workspace"], str(self.workspace.resolve()))
         self.assertEqual(body["max_tokens"], 4096)
+        self.assertEqual(body["max_iterations"], 200)
         self.assertTrue(body["features"]["sse"])
         self.assertFalse(body["features"]["agent_team"])
         disabled = self.client.get("/api/teams")

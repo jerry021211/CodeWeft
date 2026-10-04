@@ -17,6 +17,7 @@ from codeagent.context import ContextConfig, ContextManager
 from codeagent.events import EventEmitter, UsageTracker
 from codeagent.events.sink import CallbackEventSink
 from codeagent.hooks.loop_guard import LoopGuardConfig
+from evals.execution_budget import EvaluationBudget
 from codeagent.lsp import LspConfig
 from codeagent.prompts import PromptRuntime, PromptMode
 from codeagent.recovery import RecoveryConfig, RecoveryRuntime
@@ -73,8 +74,10 @@ def build(env,root,trial,registry,*,fault=None):
     emitter=EventEmitter(CallbackEventSink(lambda event:append_record(trial/'events.jsonl',event.to_dict())))
     tracker=UsageTracker()
     client=EvaluationClient(sdk_client=recorder,base_url=env.base_url,stream=False,event_emitter=emitter,usage_tracker=tracker)
-    agent=Agent(client=client,tools=registry,config=AgentConfig(model=env.model_id,max_tokens=1800,max_iterations=7 if fault else 6,
-        loop_guard=LoopGuardConfig(max_model_calls=7 if fault else 6,max_tool_calls=18,max_total_tokens=60000,max_active_seconds=120)),
+    guard_config=LoopGuardConfig(max_total_tokens=60000,max_active_seconds=120)
+    trial_budget=EvaluationBudget(guard_config,model_calls=7 if fault else 6,tool_calls=18)
+    agent=Agent(execution_budget=trial_budget,client=client,tools=registry,config=AgentConfig(model=env.model_id,max_tokens=1800,max_iterations=7 if fault else 6,
+        loop_guard=guard_config),
         context=ContextManager(config=ContextConfig(mode='off',context_window_tokens=64000,
             transcript_dir=trial/'runtime/transcripts',tool_output_dir=trial/'runtime/tool-results')),
         prompt_runtime=PromptRuntime(workspace=root),prompt_mode=PromptMode.NORMAL,allow_subagents=False,

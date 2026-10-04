@@ -8,6 +8,33 @@ from dataclasses import asdict, dataclass
 from threading import RLock, get_ident
 from typing import Any, Callable, Iterator
 
+MAX_EXECUTION_ROUNDS = 200
+WRAP_UP_ROUND = 185
+RETIRED_CALL_LIMIT_REASONS = frozenset({"budget_exceeded:model_calls", "budget_exceeded:tool_calls"})
+
+
+@dataclass(slots=True)
+class RoundBudget:
+    """One logical execution, retained across yields and checkpoints."""
+    scope_id: str = ''
+    rounds: int = 0
+
+    def begin(self, scope_id: str) -> None:
+        if scope_id != self.scope_id:
+            self.scope_id, self.rounds = scope_id, 0
+
+    def admit(self) -> None:
+        if self.rounds >= MAX_EXECUTION_ROUNDS:
+            raise ExecutionStopped(f'max_iterations:{MAX_EXECUTION_ROUNDS}')
+        self.rounds += 1
+
+    def reminder(self) -> str:
+        if self.rounds < WRAP_UP_ROUND:
+            return ''
+        return (f'本次执行已进入第 {WRAP_UP_ROUND} 轮开始的收尾阶段，总上限为 {MAX_EXECUTION_ROUNDS} 轮。'
+                '请停止扩展任务范围，优先完成必要验证、整理已完成修改、明确未完成项和阻碍，'
+                '并在剩余轮数内向用户提交最终答复。不要为了收尾虚报完成或跳过必要验证。')
+
 
 class ExecutionStopped(BaseException):
     """Control flow: ordinary tool/provider error recovery must not retry it."""
@@ -109,9 +136,7 @@ class RunBudget:
         with self._lock:
             self.check()
             name = f"{kind}_calls"
-            if getattr(self.state, name) >= getattr(self.config, f"max_{name}"):
-                self.state.stop_reason = f"budget_exceeded:{name}"
-                raise ExecutionStopped(self.state.stop_reason)
+            # Calls remain observable, but are no longer an admission limit.
             setattr(self.state, name, getattr(self.state, name) + 1)
 
     def invoke(self, client: Any, **kwargs: Any) -> Any:
@@ -138,6 +163,8 @@ class RunBudget:
     def restore(self, payload: dict[str, Any]) -> None:
         with self._lock:
             self.state = BudgetState(**payload)
+            if self.state.stop_reason in RETIRED_CALL_LIMIT_REASONS:
+                self.state.stop_reason = ""
             self._last_tick = self.clock()
 
 

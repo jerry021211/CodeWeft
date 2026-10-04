@@ -50,29 +50,28 @@ class ExecutionBudgetTests(unittest.TestCase):
                      context=ContextManager(config=ContextConfig(mode="off")), hooks=hooks or HookManager(),
                      recovery_runtime=RecoveryRuntime(RecoveryConfig(sleep_enabled=False)), **kwargs)
 
-    def test_tool_budget_stops_mid_batch_and_preserves_pairing(self):
+    def test_more_than_200_tools_complete_and_preserve_pairing(self):
         executed = []
         tools = ToolRegistry()
         tools.register_handler(ToolDefinition("probe", "", {}), lambda: executed.append(1) or "saved")
-        client = Client(calls("probe", "probe", "probe"), final())
-        agent = self.agent(client, tools=tools, limits=LoopGuardConfig(max_tool_calls=2))
+        client = Client(calls(*(["probe"] * 205)), final())
+        agent = self.agent(client, tools=tools)
         result = agent.run("start")
-        self.assertEqual(result.stop_reason, "budget_exceeded:tool_calls")
-        self.assertEqual(len(executed), 2)
-        self.assertEqual(len(client.calls), 1)
-        results = agent.messages[-1]["content"]
-        self.assertEqual([r["tool_use_id"] for r in results], ["call-0", "call-1", "call-2"])
-        self.assertEqual(results[0]["content"], "saved")
-        self.assertIn("未执行", results[-1]["content"])
+        self.assertEqual(result.stop_reason, "end_turn")
+        self.assertEqual(len(executed), 205)
+        self.assertEqual(agent.export_execution_state()["budget"]["tool_calls"], 205)
+        results = [b for m in agent.messages if isinstance(m['content'], list)
+                   for b in m['content'] if b.get('type') == 'tool_result']
+        self.assertEqual([r['tool_use_id'] for r in results], [f'call-{i}' for i in range(205)])
+        self.assertTrue(all(not r.get('is_error') for r in results))
         validate_tool_history(agent.messages)
 
-    def test_provider_retry_is_charged_and_cannot_retry_budget_stop(self):
+    def test_provider_retry_is_still_charged_without_call_limit(self):
         client = Client(RuntimeError("temporary"), RuntimeError("temporary"), final())
-        agent = self.agent(client, limits=LoopGuardConfig(max_model_calls=2))
-        result = agent.run("start")
-        self.assertEqual(result.stop_reason, "budget_exceeded:model_calls")
-        self.assertEqual(len(client.calls), 2)
-        self.assertEqual(agent.export_execution_state()["budget"]["unknown_usage_calls"], 2)
+        agent = self.agent(client)
+        self.assertEqual(agent.run("start").stop_reason, "end_turn")
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(agent.export_execution_state()["budget"]["unknown_usage_calls"], 3)
 
     def test_safe_transient_retry_is_bounded_and_charged(self):
         executed = []
@@ -88,14 +87,14 @@ class ExecutionBudgetTests(unittest.TestCase):
         self.assertEqual(len(executed), 3)
         self.assertEqual(agent.export_execution_state()["budget"]["tool_calls"], 3)
 
-    def test_retry_cannot_exceed_tool_budget(self):
+    def test_tool_retry_still_obeys_retry_limit(self):
         executed = []
         tools = ToolRegistry()
         tools.register_handler(ToolDefinition("probe", "", {}), lambda: executed.append(1) or ToolOutput(
             "Error: temporary", status="error", outcome="transient", retryable=True, retry_safe=True))
-        agent = self.agent(Client(calls("probe")), tools=tools,
-                           limits=LoopGuardConfig(max_tool_calls=2, retry_delay_seconds=0))
-        self.assertEqual(agent.run("start").stop_reason, "budget_exceeded:tool_calls")
+        agent = self.agent(Client(calls("probe"), final()), tools=tools,
+                           limits=LoopGuardConfig(tool_max_retries=1, retry_delay_seconds=0))
+        self.assertEqual(agent.run("start").stop_reason, "end_turn")
         self.assertEqual(len(executed), 2)
         validate_tool_history(agent.messages)
 
@@ -121,16 +120,14 @@ class ExecutionBudgetTests(unittest.TestCase):
         self.assertIn("11", result.final_text)
         self.assertEqual(len(client.calls), 1)
 
-    def test_missing_usage_is_unknown_and_count_limit_still_ends(self):
-        tools = ToolRegistry()
-        tools.register_handler(ToolDefinition("probe", "", {}), lambda: "ok")
-        agent = self.agent(Client(calls("probe"), final()), tools=tools,
-                           limits=LoopGuardConfig(max_model_calls=1))
-        result = agent.run("start")
-        self.assertEqual(result.stop_reason, "budget_exceeded:model_calls")
-        self.assertIn("用量未知", result.final_text)
+    def test_missing_usage_remains_unknown_without_count_limit(self):
+        agent = self.agent(Client(final()))
+        self.assertEqual(agent.run("start").stop_reason, "end_turn")
+        state = agent.export_execution_state()['budget']
+        self.assertEqual(state['unknown_usage_calls'], 1)
+        self.assertEqual(state['total_tokens'], 0)
 
-    def test_unlimited_tokens_still_account_usage_and_enforce_call_limit(self):
+    def test_unlimited_tokens_still_account_usage_without_call_limit(self):
         usage = TokenUsage(input_tokens=400_000, cache_read_input_tokens=100_000, output_tokens=4)
         for limits in (LoopGuardConfig(), LoopGuardConfig(max_total_tokens=0)):
             with self.subTest(limits=limits):
@@ -144,18 +141,18 @@ class ExecutionBudgetTests(unittest.TestCase):
         tools.register_handler(ToolDefinition("probe", "", {}), lambda: "ok")
         response = ModelResponse("tool_use", calls("probe").content, usage=usage)
         agent = self.agent(Client(response, final()), tools=tools,
-                           limits=LoopGuardConfig(max_total_tokens=0, max_model_calls=1))
-        self.assertEqual(agent.run("start").stop_reason, "budget_exceeded:model_calls")
+                           limits=LoopGuardConfig(max_total_tokens=0))
+        self.assertEqual(agent.run("start").stop_reason, "end_turn")
 
-    def test_side_client_and_forks_share_root_budget(self):
-        agent = self.agent(Client(final(), final(), final()), limits=LoopGuardConfig(max_model_calls=2))
+    def test_side_client_and_forks_share_statistics_above_old_limit(self):
+        agent = self.agent(Client(*(final() for _ in range(81))))
         side = agent._side_query_client("context_summary")
         request = dict(model="fake", system="", messages=[], tools=[], max_tokens=10)
-        side.create_message(**request)
-        side.fork(call_kind="memory").create_message(**request)
-        with self.assertRaises(ExecutionStopped):
+        for _ in range(80):
             side.create_message(**request)
-        self.assertEqual(len(agent.client.calls), 2)
+        side.fork(call_kind="memory").create_message(**request)
+        self.assertEqual(len(agent.client.calls), 81)
+        self.assertEqual(agent.export_execution_state()['budget']['model_calls'], 81)
 
     def test_last_memory_call_cannot_exceed_budget_and_report_success(self):
         class Memory:
@@ -185,18 +182,18 @@ class ExecutionBudgetTests(unittest.TestCase):
                 budget.invoke(FailingClient())
         self.assertEqual(budget.snapshot()["unknown_usage_calls"], 1)
 
-    def test_subagent_cannot_escape_root_tool_budget(self):
+    def test_subagent_keeps_shared_call_statistics(self):
         executed = []
         tools = ToolRegistry()
         tools.register_handler(ToolDefinition("probe", "", {}), lambda: executed.append(1) or "ok")
         child = ModelResponse("tool_use", [{"type": "tool_use", "id": "spawn", "name": "subagent",
                                            "input": {"description": "investigate"}}])
-        agent = self.agent(Client(child, calls("probe")), tools=tools,
-                           limits=LoopGuardConfig(max_tool_calls=1))
+        agent = self.agent(Client(child, calls("probe"), final(), final()), tools=tools)
         result = agent.run("delegate")
-        self.assertEqual(result.stop_reason, "budget_exceeded:tool_calls")
-        self.assertEqual(executed, [])
-        self.assertEqual(agent.export_execution_state()["budget"]["model_calls"], 2)
+        self.assertEqual(result.stop_reason, "end_turn")
+        self.assertEqual(executed, [1])
+        self.assertEqual(agent.export_execution_state()["budget"]["model_calls"], 4)
+        self.assertEqual(agent.export_execution_state()["budget"]["tool_calls"], 2)
         validate_tool_history(agent.messages)
 
     def test_time_budget_preserves_returned_tool_facts(self):
@@ -223,18 +220,46 @@ class ExecutionBudgetTests(unittest.TestCase):
             agent.run("start")
         self.assertEqual(agent.client.calls, [])
 
-    def test_denied_calls_consume_budget_but_not_failure_records(self):
+    def test_denied_calls_are_counted_but_not_failure_records(self):
         tools = ToolRegistry()
         tools.register_handler(ToolDefinition("probe", "", {}), lambda: self.fail("not allowed"))
         hooks = HookManager()
         hooks.register("PreToolUse", lambda _: "Permission denied")
-        agent = self.agent(Client(calls("probe", "probe", "probe")), tools=tools, hooks=hooks,
-                           limits=LoopGuardConfig(max_tool_calls=2))
-        self.assertEqual(agent.run("start").stop_reason, "budget_exceeded:tool_calls")
+        agent = self.agent(Client(calls("probe", "probe", "probe"), final()), tools=tools, hooks=hooks)
+        self.assertEqual(agent.run("start").stop_reason, "end_turn")
         self.assertEqual(agent.export_execution_state()["state"]["recent"], [])
+        self.assertEqual(agent.export_execution_state()["budget"]["tool_calls"], 3)
 
 
 class RunBudgetTests(unittest.TestCase):
+    def test_restore_clears_only_retired_call_stops_and_preserves_statistics(self):
+        for reason in ("budget_exceeded:model_calls", "budget_exceeded:tool_calls",
+                       "budget_exceeded:active_time", "budget_exceeded:tokens", "loop_detected:repeat"):
+            with self.subTest(reason=reason):
+                budget = RunBudget(LoopGuardConfig())
+                saved = budget.snapshot()
+                saved.update(model_calls=80, tool_calls=200, total_tokens=123,
+                             active_seconds=12, stop_reason=reason)
+                budget.restore(saved)
+                if reason in {"budget_exceeded:model_calls", "budget_exceeded:tool_calls"}:
+                    budget.reserve("model")
+                    budget.reserve("tool")
+                    self.assertEqual((budget.state.model_calls, budget.state.tool_calls), (81, 201))
+                    self.assertEqual(budget.state.stop_reason, "")
+                else:
+                    with self.assertRaises(ExecutionStopped):
+                        budget.reserve("model")
+                self.assertEqual(budget.state.total_tokens, 123)
+                self.assertEqual(budget.state.active_seconds, 12)
+
+    def test_explicit_evaluation_quotas_are_isolated_from_production(self):
+        from evals.execution_budget import EvaluationBudget
+        for kind in ("model", "tool"):
+            budget = EvaluationBudget(LoopGuardConfig(), model_calls=1, tool_calls=1)
+            budget.reserve(kind)
+            with self.assertRaisesRegex(ExecutionStopped, f"evaluation_{kind}_calls"):
+                budget.reserve(kind)
+
     def test_cli_approval_wait_does_not_consume_active_budget(self):
         now = [0.0]
         clock = lambda: now[0]
@@ -273,8 +298,8 @@ class RunBudgetTests(unittest.TestCase):
             with self.assertRaises(ExecutionStopped):
                 restored.check()
 
-    def test_atomic_reservations_do_not_oversubscribe(self):
-        budget = RunBudget(LoopGuardConfig(max_tool_calls=5))
+    def test_atomic_call_statistics_do_not_lose_concurrent_increments(self):
+        budget = RunBudget(LoopGuardConfig())
         accepted = []
         def reserve():
             try:
@@ -282,13 +307,13 @@ class RunBudgetTests(unittest.TestCase):
                 accepted.append(1)
             except ExecutionStopped:
                 pass
-        threads = [threading.Thread(target=reserve) for _ in range(20)]
+        threads = [threading.Thread(target=reserve) for _ in range(220)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
-        self.assertEqual(len(accepted), 5)
-        self.assertEqual(budget.snapshot()["tool_calls"], 5)
+        self.assertEqual(len(accepted), 220)
+        self.assertEqual(budget.snapshot()["tool_calls"], 220)
 
 
 if __name__ == "__main__":

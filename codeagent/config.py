@@ -21,6 +21,7 @@ from codeagent.prompts import PromptConfig
 from codeagent.recovery import RecoveryConfig
 from codeagent.runtime.data_paths import default_runtime_data_dir
 from codeagent.runtime.parallel import ParallelConfig
+from codeagent.runtime.execution import MAX_EXECUTION_ROUNDS
 from codeagent.tools.web_search import WebSearchConfig
 from codeagent.code_search.embedding import EmbeddingConfig
 from codeagent.lsp.registry import LspConfig, configured_servers
@@ -72,7 +73,7 @@ class EnvironmentConfig:
     base_url: str | None = None
     max_tokens: int = 32_000
     reasoning_effort: str = "default"
-    max_iterations: int = 50
+    max_iterations: int = MAX_EXECUTION_ROUNDS  # Fixed; old overrides are ignored.
     stream: bool = False
     enable_skills: bool = True
     skill_roots: tuple[Path, ...] = (Path("skills"),)
@@ -101,6 +102,7 @@ class EnvironmentConfig:
     speech_config: SpeechConfig = field(default_factory=SpeechConfig)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, 'max_iterations', MAX_EXECUTION_ROUNDS)
         if self.model_protocol not in {"anthropic", "openai_chat", "openai_responses"}:
             raise ValueError("MODEL_PROTOCOL must be anthropic, openai_chat or openai_responses")
         if self.chat_token_parameter not in {"max_tokens", "max_completion_tokens"}:
@@ -155,7 +157,6 @@ class EnvironmentConfig:
             base_url=_first_optional_env("BASE_URL", "ANTHROPIC_BASE_URL" if os.getenv("MODEL_PROTOCOL", "anthropic") == "anthropic" else "OPENAI_BASE_URL"),
             max_tokens=chat["max_tokens"] if chat else _int_env("MAX_TOKENS", 32_000),
             reasoning_effort=_optional_env("REASONING_EFFORT") or "default",
-            max_iterations=_int_env("MAX_ITERATIONS", 50),
             stream=chat["stream"] if chat else _bool_env("STREAMING", False),
             enable_skills=_bool_env("ENABLE_SKILLS", True),
             skill_roots=_path_list_env("SKILLS_DIR", (Path("skills"),)),
@@ -265,8 +266,6 @@ class EnvironmentConfig:
                 parameter_error_limit=_int_env("CODEAGENT_LOOP_PARAMETER_ERROR_LIMIT", 2),
                 blocked_attempt_limit=_int_env("CODEAGENT_LOOP_BLOCKED_ATTEMPT_LIMIT", 3),
                 empty_response_limit=_int_env("CODEAGENT_LOOP_EMPTY_RESPONSE_LIMIT", 2),
-                max_model_calls=_int_env("CODEAGENT_RUN_MAX_MODEL_CALLS", 80),
-                max_tool_calls=_int_env("CODEAGENT_RUN_MAX_TOOL_CALLS", 200),
                 max_total_tokens=_int_env("CODEAGENT_RUN_MAX_TOTAL_TOKENS", 0),
                 max_active_seconds=_float_env("CODEAGENT_RUN_MAX_ACTIVE_SECONDS", 1800.0),
                 tool_max_retries=_int_env("CODEAGENT_LOOP_TOOL_MAX_RETRIES", 2),

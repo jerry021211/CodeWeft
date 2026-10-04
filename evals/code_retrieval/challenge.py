@@ -24,6 +24,7 @@ from codeagent.context import ContextConfig, ContextManager
 from codeagent.events import EventEmitter, UsageTracker
 from codeagent.events.sink import CallbackEventSink
 from codeagent.hooks.loop_guard import LoopGuardConfig
+from evals.execution_budget import EvaluationBudget
 from codeagent.prompts import PromptRuntime, PromptMode
 from codeagent.recovery import RecoveryConfig, RecoveryRuntime
 from codeagent.tools import ToolRegistry
@@ -147,8 +148,10 @@ def build(env,root,trial,registry,limits):
     emitter=EventEmitter(CallbackEventSink(lambda e:append_record(trial/'events.jsonl',e.to_dict())))
     tracker=UsageTracker()
     client=EvaluationClient(sdk_client=recorder,base_url=env.base_url,stream=False,event_emitter=emitter,usage_tracker=tracker)
-    agent=Agent(client=client,tools=registry,config=AgentConfig(model=env.model_id,max_tokens=limits['max_output_tokens'],max_iterations=limits['model_requests'],
-        loop_guard=LoopGuardConfig(max_model_calls=limits['model_requests'],max_tool_calls=limits['tools'],max_total_tokens=limits['tokens'],max_active_seconds=limits['seconds'])),
+    guard_config=LoopGuardConfig(max_total_tokens=limits['tokens'],max_active_seconds=limits['seconds'])
+    trial_budget=EvaluationBudget(guard_config,model_calls=limits['model_requests'],tool_calls=limits['tools'])
+    agent=Agent(execution_budget=trial_budget,client=client,tools=registry,config=AgentConfig(model=env.model_id,max_tokens=limits['max_output_tokens'],max_iterations=limits['model_requests'],
+        loop_guard=guard_config),
         context=ContextManager(config=ContextConfig(mode='off',context_window_tokens=100000,transcript_dir=trial/'runtime/transcripts',tool_output_dir=trial/'runtime/outputs')),
         prompt_runtime=PromptRuntime(workspace=root),prompt_mode=PromptMode.NORMAL,allow_subagents=False,event_emitter=emitter,usage_tracker=tracker,
         recovery_runtime=RecoveryRuntime(RecoveryConfig(max_retries=1,side_query_max_retries=0,max_continuations=0,escalated_max_tokens=limits['max_output_tokens'])))

@@ -14,7 +14,7 @@ from uuid import uuid4
 from codeagent.events.redaction import redact_payload
 from codeagent.hooks.manager import HookDecision, HookManager
 from codeagent.messages import ToolUse, _field, extract_text
-from codeagent.runtime.execution import ExecutionStopped, RunBudget
+from codeagent.runtime.execution import ExecutionStopped, RunBudget, RETIRED_CALL_LIMIT_REASONS
 from codeagent.tools.base import ToolOutput
 
 
@@ -25,8 +25,6 @@ class LoopGuardConfig:
     parameter_error_limit: int = 2
     blocked_attempt_limit: int = 3
     empty_response_limit: int = 2
-    max_model_calls: int = 80
-    max_tool_calls: int = 200
     max_total_tokens: int = 0
     max_active_seconds: float = 1800.0
     tool_max_retries: int = 2
@@ -34,7 +32,7 @@ class LoopGuardConfig:
 
     def __post_init__(self) -> None:
         for name in ("window_size", "repeat_failure_limit", "parameter_error_limit",
-                     "blocked_attempt_limit", "empty_response_limit", "max_model_calls", "max_tool_calls"):
+                     "blocked_attempt_limit", "empty_response_limit"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("max_total_tokens", "tool_max_retries"):
@@ -77,13 +75,13 @@ def _diagnostic(output: ToolOutput) -> str:
 class LoopGuard:
     def __init__(self, config: LoopGuardConfig, *, tools: Callable[[], Any],
                  emit: Callable[..., Any], budget: RunBudget | None = None,
-                 max_iterations: int = 50) -> None:
+                 max_iterations: int | None = None) -> None:
         self.config = config
         self.tools = tools
         self.emit = emit
         self.budget = budget or RunBudget(config)
         self.owns_budget = budget is None
-        self.max_iterations = max_iterations
+        # max_iterations is accepted only for older callers, never enforced.
         self.state = GuardState(scope_id=uuid4().hex)
         self._pending: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
@@ -102,8 +100,8 @@ class LoopGuard:
                 self._pending.clear()
                 if self.owns_budget:
                     self.budget.reset()
-            elif self.state.stop_reason.startswith("max_iterations:") and self.state.rounds < self.max_iterations:
-                # An explicit SDK limit increase authorizes more rounds, not a counter reset.
+            elif self.state.stop_reason.startswith(("max_iterations:", "budget_exceeded:iterations")):
+                # Old round-limit checkpoints can resume without resetting usage.
                 self.state.stop_reason = ""
 
     def before_model(self, messages: Any) -> None:
@@ -111,8 +109,6 @@ class LoopGuard:
         with self._lock:
             if self.state.stop_reason:
                 raise ExecutionStopped(self.state.stop_reason)
-            if self.state.rounds >= self.max_iterations:
-                raise ExecutionStopped("budget_exceeded:iterations")
             self.state.rounds += 1
 
     def feedback(self) -> str:
@@ -281,6 +277,12 @@ class LoopGuard:
             raise ValueError("Unsupported execution guard checkpoint version")
         with self._lock:
             self.state = GuardState(**payload["state"])
+            if self.state.stop_reason in RETIRED_CALL_LIMIT_REASONS:
+                reason = self.state.stop_reason
+                self.state.stop_reason = ""
+                self.emit("agent.retired_budget_cleared", {"reason": reason})
+            if self.state.stop_reason.startswith(("max_iterations:", "budget_exceeded:iterations")):
+                self.state.stop_reason = ""
             self.state.recent[:] = self.state.recent[-self.config.window_size:]
             self.state.issues = dict(list(self.state.issues.items())[-self.config.window_size:])
             self.state.changed_files[:] = self.state.changed_files[-50:]

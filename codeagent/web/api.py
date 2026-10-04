@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from codeagent.runtime.execution import MAX_EXECUTION_ROUNDS
 
 try:  # Keep the core/CLI package importable without optional web dependencies.
     from fastapi import FastAPI, Header, HTTPException, Query, Request, status
@@ -929,9 +930,7 @@ def create_app(
             model=_config_value(runtime_env, "model_id", "model"),
             workspace=str(workspace_path),
             max_tokens=_optional_int(_config_value(runtime_env, "max_tokens")),
-            max_iterations=_optional_int(
-                _config_value(runtime_env, "max_iterations")
-            ),
+            max_iterations=MAX_EXECUTION_ROUNDS,
             planning_backend="tasks",
             reasoning_effort=getattr(runtime_env, "reasoning_effort", "default"),
             reasoning=environment_capabilities(runtime_env),

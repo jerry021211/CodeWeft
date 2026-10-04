@@ -125,7 +125,7 @@ class CodeSearchTests(unittest.TestCase):
 
     def test_rewrite_shared_budget_and_agent_keywords(self):
         self.write('queue.py', 'def discard_pending():\n    pending.clear()\n')
-        budget = RunBudget(LoopGuardConfig(max_model_calls=3))
+        budget = RunBudget(LoopGuardConfig())
 
         class Client:
             activity = SimpleNamespace(execution_budget=budget)
@@ -146,8 +146,11 @@ class CodeSearchTests(unittest.TestCase):
         self.assertEqual(client.kind, 'code_search_rewrite')
         self.search('清除等待中的操作', keywords=['discard pending'])
         self.assertEqual(client.calls, 1)
-        budget.state.model_calls = 2
-        self.assertEqual(self.search('不存在的行为')['rewrite_status'], 'budget_skipped')
+        budget.state.model_calls = 800
+        self.assertEqual(self.search('不存在的行为')['rewrite_status'], 'completed')
+        self.assertEqual(budget.state.model_calls, 801)
+        self.tool.bind_runtime(remaining_seconds=lambda: 2)
+        self.assertEqual(self.search('仍然没有的行为')['rewrite_status'], 'budget_skipped')
 
     def test_plain_english_words_do_not_suppress_chinese_rewrite(self):
         self.write('widget.py', 'def suppress_failed_widget():\n    return "failure"\n\ndef display_fault_banner():\n    return "fault"\n')
