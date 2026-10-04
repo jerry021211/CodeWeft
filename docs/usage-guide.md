@@ -1,0 +1,765 @@
+# CodeAgent 使用指南
+
+[返回项目首页](../README.md)
+
+本文集中说明配置、工具、SDK 和运行行为。首次使用请先阅读 [快速开始](../README.md#快速开始)。除非另有说明，命令均在仓库根目录执行。
+
+## 目录
+
+- [当前结构](#当前结构)
+- [Web 工作台](#web-工作台)
+- [环境配置](#环境配置)
+- [可选联网搜索](#可选联网搜索)
+- [只读权限](#只读权限)
+- [用户提问：ask_user](#用户提问ask_user)
+- [规划能力：todo_write](#规划能力todo_write)
+- [Task System：当前会话直接执行](#task-system当前会话直接执行)
+- [子 Agent：subagent](#子-agentsubagent)
+- [运行平台与命令 Shell](#运行平台与命令-shell)
+- [运行时 System Prompt 组装](#运行时-system-prompt-组装)
+- [错误恢复：Error Recovery](#错误恢复error-recovery)
+- [按需能力：Skill Loading](#按需能力skill-loading)
+- [长期记忆：Memory](#长期记忆memory)
+- [上下文压缩与工具结果](#上下文压缩与工具结果)
+- [接入外部 MCP 工具](#接入外部-mcp-工具)
+- [Agent Team](#agent-team)
+- [运行测试](#运行测试)
+
+## 当前结构
+
+```text
+codeagent/
+  agent.py          # 核心 Agent 类和 loop
+  config.py         # 从环境变量读取模型和运行配置
+  anthropic_client.py  # Anthropic SDK 调用与 streaming
+  providers.py        # OpenAI Chat Completions / Responses 协议适配
+  multimodal.py       # 图片、PDF、文本和音频附件规范化
+  speech.py           # 独立语音识别模型与输入处理
+  models.py         # 模型响应结构
+  messages.py       # message/tool_use 规范化
+  tools/            # 工具定义与注册表
+  permissions/      # 工具执行权限策略
+  hooks/            # agent lifecycle hooks
+  context/          # 上下文预算、压缩与 checkpoint 状态
+  prompts/          # system prompt 动态组装
+  skills/           # skill catalog 与按需加载
+  memory/           # Markdown 长期记忆与模型选择
+  tasks/            # 持久化 Task 领域模型
+  runtime/          # 取消、活动监测、运行数据目录与 Team Supervisor
+  teams/            # 团队规划、消息、Session、候选交付与执行权限
+  worktrees/        # Git worktree 隔离、候选快照与现场校验
+  mcp/              # 外部 MCP Server 配置、连接与工具适配
+  recovery/         # 分类、退避、fallback 与续写恢复
+  events/           # 结构化运行事件与 Token 计量
+  web/              # SQLite、FIFO 调度器与 FastAPI/SSE transport
+```
+
+说明：Web 运行时、MCP、Team 和 Worktree 均已有实际实现。显式启用 Team 后，
+`runtime/background.py` 中的 `TeamSupervisor` 负责调度团队执行，`teams/` 负责团队协作，
+`worktrees/` 为代码任务提供独立工作区。
+
+## Web 工作台
+
+侧栏底部的 **模型设置** 页面可配置对话模型协议、服务地址与密钥，并独立配置语音识别和向量模型。
+支持获取模型列表、保存后立即生效和重启恢复；首次启动 Web 也可以在页面完成模型配置。
+详细用法见 [模型服务配置](model-services.md#在网页中配置)。
+
+项目现在包含一个本机单用户 Coding Cockpit：左侧管理会话，中间显示对话、
+流式回复和 Agent 动作，右侧展示 Token、持久化任务、子 Agent、恢复记录、文件改动与
+脱敏后的调试事件。消息、Run、审批、模型调用用量、事件流和 checkpoint 持久化在
+CodeAgent 外部数据目录的 `state/state.db`。新建对话时可以从页面选择任意已有的本机项目
+目录；每个对话永久绑定自己的工作区，后续执行使用该目录专属的 Agent 和工具状态。
+
+安装并构建：
+
+```powershell
+python -m pip install -e ".[web]"
+Set-Location web
+npm.cmd install
+npm.cmd run build
+Set-Location ..
+```
+
+启动（只监听本机）：
+
+```powershell
+codeagent-web --workspace . --port 8765
+```
+
+然后访问 `http://127.0.0.1:8765`。开发前端时，可另开终端运行
+`npm.cmd run dev`；Vite 会把 `/api` 代理到 8765 端口。
+
+Web 运行时有以下边界：
+
+- `--workspace` 是数据存储位置和新对话的默认目录，不再是唯一可打开的项目。
+- 所有文件和搜索工具限制在当前对话绑定的工作区内，并防止符号链接逃逸。
+- 根任务使用 FIFO 队列，默认最多 4 个会话并行；同一会话只能有一个排队或运行中的
+  任务。`CODEAGENT_WEB_MAX_CONCURRENT_RUNS` 可设置正整数并发上限，设为 `1` 恢复
+  串行执行。此上限不包含 Team 内部 worker；不同 Run 不共享可变的 Agent/Tool/CWD 状态。
+- 等待回答、审批或模型重试仍占一个并发名额。多个会话可操作同一项目目录，但项目文件
+  仍然共享，涉及重叠修改时应使用独立工作区/worktree。
+- 工作区浏览 API 只列出本机目录名，不读取文件内容，并拒绝 UNC/网络路径。
+- 危险操作通过页面审批；取消在模型调用、工具调用和退避等待之间的安全边界生效。
+- SSE 事件带持久化序号，断线后可以继续回放；未完成 Run 在进程重启后标记为
+  `interrupted`，不会盲目重放可能产生副作用的操作。
+- Token 使用量来自 provider 返回的真实 usage，并按主模型、memory、context、
+  子 Agent 等 `call_kind` 汇总；界面同时展示缓存读取量和缓存命中率，provider
+  不返回 usage 时明确标记为不可用。
+- 调试面板不会展示完整 system prompt 或隐藏推理内容，事件 payload 会截断和脱敏。
+
+## 环境配置
+
+已支持按能力组合模型：对话模型负责 Agent、子 Agent、摘要和记忆；语音识别模型负责
+音频转文字；现有 embedding 模型负责代码向量检索。三者可以使用不同服务商、地址和
+密钥。Web 可添加附件，CLI 支持重复 `--attach PATH`。
+配置、协议能力和完整示例见 [多接口与多模态模型组合](model-services.md)。
+
+推理等级可通过 `.env` 的 `REASONING_EFFORT` 设置，也可以在输入框旁的“推理”下拉框
+逐次选择。
+CLI 也可使用 `codeagent --reasoning-effort max "分析这个项目"` 覆盖环境配置。
+当前适配 DeepSeek 官方 Anthropic 兼容接口，优先读取 `/models` 的真实档位；
+元数据不可用时，对已核实的 DeepSeek 模型使用官方定义的 `low`、`high`、`max`。
+`none` 关闭思考，`default` 省略推理参数并使用官方默认（目前 DeepSeek 为 `high`）。
+未知模型或未适配的供应商仅提供官方默认，显式传入不支持的档位会报错。
+
+`POST /api/conversations/{conversation_id}/runs` 支持可选字段 `reasoningEffort`，例如：
+
+```json
+{"content": "分析并修复这个问题", "reasoningEffort": "max"}
+```
+
+省略或传 `null` 使用环境配置；显式传 `"default"` 覆盖环境配置、恢复官方默认。
+选择会随消息和 Run metadata 持久化，并固定用于本次任务的模型调用、重试和子 Agent；
+Team 成员继承启动任务的选择。摘要、记忆和搜索改写等辅助调用使用官方默认。
+流式与非流式请求均发送官方 `thinking` / `output_config.effort` 字段。
+推理等级与 `MAX_TOKENS` 独立；输出上限过低仍可能截断高强度推理的响应。
+
+官方协议依据：[思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)、
+[模型元数据](https://api-docs.deepseek.com/api/list-models/)。
+
+普通 Agent 现在支持同一 Run 内的读取工具与只读子 Agent 并行。默认每个 Run 最多
+4 个并行读取、3 个子 Agent；另有进程级请求限额。写入、shell、MCP、`search_code`
+和未声明并发合同的自定义工具仍串行。关闭 `CODEAGENT_PARALLEL_ENABLED` 可回退。
+
+`search_code` 单独采用无时间上限策略：索引扫描、向量构建/查询和关键词改写不受工具期限、
+模型响应期限或短 HTTP 超时限制，执行期间不累计本分支的活跃时间预算。手动取消、Token
+预算和每次向量构建的块数限制仍有效；其他工具和主模型调用保留原有时限。
+独立索引命令 `python -m codeagent.code_search index --workspace <目录>` 也默认不限时，
+需要限制时可显式传入 `--timeout <秒数>`。修改后需重启 CodeAgent 后端生效，已有索引可继续复用。
+
+旧的 `subagent(description)` 保持前台串行行为。独立调查可使用
+`subagent(description, access="read_only")`，同轮多个调用可以同时执行；再传
+`run_in_background=true` 可让主 Agent 继续独立读取。`subagent_result` 查询或有限等待，
+`subagent_cancel` 停止单项；Web 的 Agent 面板也提供结果和停止入口。
+
+子 Agent 只有明确允许的读取和私有归档工具，不再委派。后台结果在安全边界通知主 Agent，
+写入前和最终回答前收齐当前 Run 的后台任务。取消一个 child 不影响兄弟；进程重启后未完成
+任务标记为 interrupted，不自动重放。多个会话或外部编辑器仍可能修改共享目录，这不是文件快照隔离。
+配置和实现边界见 [普通 Agent 并行说明](parallel-execution.md)。
+
+复制 `.env.example` 为 `.env`，按你的模型服务填写：
+
+```bash
+MODEL_ID=claude-3-5-sonnet-latest
+API_KEY=your_api_key_here
+BASE_URL=
+MAX_TOKENS=32000
+STREAMING=false
+CODEAGENT_PLANNING_MODE=auto
+```
+
+主 Agent 和子 Agent 的每次逻辑执行固定最多 200 轮，第 185 轮调用模型前提醒收尾。暂停和恢复沿用已用轮数，不调用第 201 轮；第 200 轮已产生的工具调用仍完成结果保存。旧 `MAX_ITERATIONS` 配置不再覆盖该固定值。模型调用次数和工具调用次数仅统计，不设执行次数上限，旧 `CODEAGENT_RUN_MAX_MODEL_CALLS`、`CODEAGENT_RUN_MAX_TOOL_CALLS` 不再生效；活动时间预算、可选总 Token 预算、单次操作超时和循环检测继续生效。
+
+一轮按主执行循环计数；摘要请求和同轮供应商重试计入模型调用统计，不额外增加轮数。收尾提醒作为运行时消息进入模型上下文，压缩后若提醒不在发送内容中会重新附加，再做完整请求预算校验。
+
+代码里可通过 `EnvironmentConfig.from_env()` 构建运行配置：
+
+```python
+from codeagent import (
+    Agent,
+    EnvironmentConfig,
+    TodoStore,
+    create_default_hooks,
+    create_default_registry,
+)
+
+env = EnvironmentConfig.from_env()
+agent_config = env.to_agent_config()
+client = env.create_model_client(stream=True, on_text=print)
+todo_store = TodoStore()
+tools = create_default_registry(todo_store=todo_store)
+hooks = create_default_hooks(todo_store=todo_store)
+agent = Agent(client=client, tools=tools, config=agent_config, hooks=hooks)
+```
+
+CLI 默认启用基础 hooks：
+
+- `UserPromptSubmit`：记录工作目录
+- `BeforeModelCall`：TODO 计划过久未更新时注入 reminder
+- `PreToolUse`：权限检查和工具调用日志
+- `PostToolUse`：大输出提醒
+- `Stop`：工具调用次数统计
+
+普通 Agent（含只读权限）和普通子 Agent 默认启用防循环与任务预算，Team 不在本次范围内。
+保护状态独立于上下文压缩；Web checkpoint 保存状态，循环或预算停止会标记为失败，
+CLI 单次执行返回非零退出码。规则、可调阈值、恢复语义和输入识别限制见
+[防循环与执行预算](loop-guard.md)。
+
+## 可选联网搜索
+
+内置 `web_search` 工具使用 [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)，
+返回标题、来源 URL 和摘要供 Agent 引用。无需安装额外搜索 SDK。
+在启动目录的 `.env` 中配置后重启后端：
+
+```dotenv
+TAVILY_API_KEY=你的_Tavily_API_Key
+CODEAGENT_WEB_SEARCH_ENABLED=false
+CODEAGENT_WEB_SEARCH_TIMEOUT=20
+```
+
+- **Web**：输入框下方的「联网搜索：关 / 开」控制下一次请求。默认关闭；发送后保存选择，
+  重新打开会话时恢复，运行中不能修改。未配置 Key 时按钮禁用并提示配置方法。
+- **CLI**：`python -m codeagent --web-search "搜索 Python 最新发布信息"` 开启，
+  `python -m codeagent --no-web-search "分析当前项目"` 关闭。省略参数时使用环境默认值。
+- **API**：`POST /api/conversations/{id}/runs` 支持 `{"content":"搜索资料","webSearch":true}`；
+  `false` 强制关闭，省略或 `null` 使用环境默认值。缺少 Key 时开启请求返回 422。
+- **SDK**：`create_default_registry(web_search_config=env.web_search_config)`；也可从
+  `codeagent.tools.web_search` 导入 `WebSearchConfig` 自行配置。
+
+普通会话（含只读权限）均支持，普通子 Agent 继承父请求的选择；Team 会话暂不支持。
+关闭时不注册搜索工具，也不会调用 Tavily。这个开关只控制内置搜索工具，并非整个进程的网络隔离：
+模型 API、既有 shell/MCP 工具仍按原配置工作。搜索词会发送给 Tavily，Key 仅保存在服务端配置中。
+每次搜索默认 10 条、最多 10 条，正文最多 48,000 字符，使用 basic 深度；网络错误、限流或额度不足会明确报告，
+不自动重试收费请求。搜索结果作为外部参考资料处理。
+
+## 只读权限
+
+助手统一按用户请求回答或执行，不再区分 Code / Discuss 交互模式。提问、讨论、创作和
+角色扮演默认在对话中交付；需要文件或代码产物时才操作工作区。
+
+只读保护是独立的工具权限，不改变助手角色或任务：
+
+- **Web**：输入框下勾选“只读保护”。权限随每次请求保存，重新打开会话时恢复最近一次选择；
+  运行或排队期间不能修改当前请求的权限。
+- **CLI**：`python -m codeagent --read-only "解释这个项目的架构"`；交互会话使用
+  `/read-only on`、`/read-only off`，只读时提示符显示 `[read-only] >`。
+- **SDK**：`Agent(..., read_only=True)`；普通 Agent 空闲时可调用 `agent.set_read_only(True/False)`。
+- **API**：`POST /api/conversations/{id}/runs` 支持
+  `{"content":"解释架构","readOnly":true}`，省略时为 `false`。
+
+开启后，`PreToolUse` 在审批和执行前阻止文件/记忆写入、任务更新、委派、未知及外部 MCP
+工具；自动记忆维护暂停，Team 不能启动或接管。读取、搜索、提问和上下文压缩仍可用。
+Shell 仅允许单个已知只读命令及受支持的选项，不允许管道、重定向和脚本。
+`git diff/log/show` 需要 `--no-ext-diff --no-textconv`。
+
+正常新会话不注入模式通知。只读权限启用、改变或压缩丢失提醒时，追加简短的当前权限说明；
+系统提示词和工具定义不因权限切换重建。历史消息保持完整，旧模式提醒被当前权限说明取代。
+旧 API 请求 `mode: "discuss"` 兼容映射为只读；与 `readOnly: false` 冲突时拒绝请求。
+旧消息的 `metadata.mode` 仅用于恢复权限，后续请求使用 `read_only` metadata。
+SDK 的 `PromptMode.DISCUSS` 和旧 `/discuss`、`--discuss` 入口已移除，请使用上述权限接口。
+
+这是 Agent 工具执行策略，不是操作系统沙箱。会话、事件和检查点仍会保存到运行时数据目录，
+权限变更不影响其他会话或已启动的进程。旧模式的研究与实现背景见
+[历史设计记录](discuss-mode.md)，该文不再代表当前接口。
+
+## 用户提问：ask_user
+
+CLI 和 Web 的主 Agent 可在需求、偏好或关键决策不明确时调用：
+
+```json
+{"question": "导出文件需要哪种格式？", "options": ["CSV", "JSON"]}
+```
+
+`options` 可省略，用户始终可以自由回答。调用会阻塞当前 Agent，直到收到非空回答；
+等待没有自动超时，不会替用户选择答案或继续模型循环。当前 Run 占用一个并发名额，
+其他名额可以继续执行其他会话；所有名额都在等待时，新任务排队。HTTP 服务仍可处理
+回答和取消请求。多会话调度设计与验证见 [多会话并发说明](concurrent-sessions.md)。
+
+- CLI 在终端显示问题，接受选项编号或自由文本；空输入继续等待，Ctrl+C 中止。
+- Web 在聊天输入区上方显示问题和回答框，点击选项后仍需提交；可用“停止”取消等待。
+  问题和回答保存在 SQLite，刷新页面可恢复；服务重启会中断 Run 并取消未回答问题。
+- 只读权限下也可提问；Team 和独立子 Agent 工具池不新增交互入口。
+- 回答作为本次 `ask_user` 的工具结果交回模型，随后继续同一个 Run。
+
+SDK 通过 `create_default_registry(ask_user_fn=handler)` 注入同步回调，签名为
+`handler(question: str, options: list[str]) -> str`；未注入时不暴露提问工具。
+终端处理器可从 `codeagent.tools` 导入 `terminal_ask_user`。
+
+Web 接口：`GET /api/runs/{run_id}/questions` 查看问题，
+`POST /api/runs/{run_id}/questions/{question_id}/answer` 提交 `{"answer":"JSON"}`。
+空回答返回 422；重复提交相同回答幂等，冲突回答或已取消问题返回 409。
+
+## 规划能力：todo_write
+
+规划后端由 `CODEAGENT_PLANNING_MODE=auto|tasks|todo` 控制。`auto` 下 Web 和
+交互式 CLI 使用持久化 Task System，单次 CLI、SDK 默认注册表和普通子 Agent
+继续使用 TodoWrite；同一个 Agent 不会同时获得两套规划工具。
+
+默认工具池包含 `todo_write`。它只维护当前进程内的一份 TODO
+计划，不读文件、不运行命令、不写工作区。它的作用是让模型在多步骤任务前
+先拆清楚步骤，并在执行过程中持续更新状态。
+
+TODO 项只有三个状态：
+
+- `pending`：还没开始
+- `in_progress`：正在做，最多只能有一个
+- `completed`：已经完成
+
+当默认工具池里存在 `todo_write` 时，`Agent` 会自动在 system prompt 后追加
+规划规则：多步骤任务、代码修改任务、或需要多次工具调用的任务，应先调用
+`todo_write`，再使用 `read_file`、`bash`、`write_file`、`edit_file` 等执行类
+工具。
+
+默认 hooks 还会注册 reminder：如果模型连续 3 轮没有更新 TODO，就会在下一次
+模型调用前注入一条 `<reminder>...</reminder>` 消息，提醒它更新计划或确认
+下一步。这个机制只影响对话上下文，不会替 Agent 执行任何实际动作。
+
+CLI 会在 `todo_write` 更新计划时打印用户可见的任务表：
+
+- 第一次创建计划时打印 `[todo created]` 和完整任务表。
+- 任务状态或内容发生变化时打印 `[todo updated]`、变化项和当前任务表。
+- 所有任务完成时打印 `[todo completed]`。
+- Agent 停止时如果仍有未完成任务，打印一次 `[todo final]`。
+- 如果模型提交的 TODO 和当前任务表完全相同，不重复打印。
+
+任务表使用固定状态标记：
+
+```text
+[ ] pending
+[>] in_progress
+[x] completed
+```
+
+如果一个进程里创建多个 Agent 或 subagent，应为每个 Agent 创建独立的
+`TodoStore`，并把同一个 store 同时传给 `create_default_registry()` 和
+`create_default_hooks()`。这样每个 Agent 的 TODO 计划互不污染。
+
+## Task System：当前会话直接执行
+
+交互式会话注册 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。Task 持久化在
+CodeAgent 外部数据目录的 `state/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
+任务业务对象保持九字段：`id`、`subject`、`description`、`activeForm`、`owner`、
+`status`、`blocks`、`blockedBy`、`metadata`；TaskList、revision 和时间戳位于
+独立持久化外壳中。
+
+`TaskList` 只返回 `id`、`subject`、`status`、`owner`、`blocks`、`blockedBy` 六个摘要字段，
+用于浏览和选择任务；执行选中的任务前，用 `TaskGet(taskId)` 获取完整描述、验收条件和
+metadata。`TaskGet` 返回完整九字段，`TaskList` 不携带描述、进度文案或 metadata。
+
+Task 默认在当前 Conversation 中直接执行。开始 Ready 任务时用 `TaskUpdate` 设置
+`in_progress`，完成代码和验证后设置 `completed`，不会为每个任务创建独立对话。
+Web 右侧“任务”页可查看 Ready、Blocked、进行中和已完成任务，也可以创建任务，
+或把指定任务作为普通 Run 继续交给当前会话。
+
+## 子 Agent：subagent
+
+`subagent` 是一个委派工具，由 `SubagentTool(spawn_fn=...)` 实现。工具层只保存 schema
+和被注入的 `spawn_fn`，不 import `Agent`，因此不会形成循环依赖。`Agent` 默认
+会给自身注入 `SubagentTool(spawn_fn=self._spawn_subagent)`。模型调用 `subagent` 时，父
+Agent 会创建一个新的子 Agent：
+
+- 子 Agent 使用全新的 `messages` 列表，只包含父 Agent 传入的子任务描述。
+- 子 Agent 跑自己的 agent loop，可承担独立且边界清晰的调查、实现、修复、重构或验证，
+  并继续调用读文件、搜索、bash、写入、编辑、`todo_write` 等工具。
+- 子 Agent 的工具表会移除 `subagent`，避免递归生成子 Agent。
+- 父 Agent 的上下文只收到子 Agent 的最终文本结论，不接收其中间消息和工具历史。
+- 子任务描述只有明确要求修改代码时，子 Agent 才会编辑文件。
+- 父 Agent 负责持久化 Task 状态、最终集成和验证，不把整个模糊目标交给子 Agent。
+- 子 Agent 内部使用流式模型请求；失败会作为失败事件和 `Error:` 工具结果返回，
+  父 Agent 不应原样重复提交同一个失败任务。
+
+CLI 默认会给子 Agent 创建独立的 `TodoStore`、默认工具池和默认 hooks；权限检查
+仍通过 hooks 执行，因此子 Agent 不会绕过权限策略。代码中如需自定义子 Agent
+环境，可在构造 `Agent` 时传入 `subagent_environment_factory`，固定返回子 Agent 的
+`ToolRegistry`、`HookManager` 和 `ContextManager`。
+
+CLI 会在进入和退出子 Agent 时输出显式标志：
+
+```text
+[subagent enter] ...
+[subagent exit] returned to parent agent
+```
+
+可以用下面的命令测试一次子 Agent 调用：
+
+```bash
+python -m codeagent --no-stream "请必须调用 subagent 工具，让子 Agent 读取 README.md 并总结这个项目的用途；拿到子 Agent 结果后，再用一句话告诉我结论。"
+```
+
+## 运行平台与命令 Shell
+
+进程首次创建 Agent 或命令工具时会检测宿主操作系统，并缓存检测结果：
+
+- Windows 优先使用 PowerShell（`pwsh` 或 Windows PowerShell），不可用时回退到
+  `cmd.exe`。
+- Linux 和 macOS 优先使用 Bash，不可用时回退到 POSIX `sh`。
+- 命令工具会显式调用检测到的 shell，不再依赖 `subprocess` 的隐式平台默认值。
+- 当前操作系统、实际 shell 和对应命令风格会作为运行时提醒发送给模型，避免在
+  Windows 生成 POSIX-only 命令，或在 Linux/macOS 生成 PowerShell、cmd 命令。
+
+为了兼容现有工具协议，工具名仍为 `bash`，但其描述会标明当前实际使用的 shell。
+
+## 运行时 System Prompt 组装
+
+Agent 不再在 `agent.py` 里硬编码 todo、subagent、skill、memory 等 prompt 文案。
+每次模型调用前会通过 `PromptRuntime` 运行时组装 system prompt：
+
+```text
+Agent 收集真实运行状态
+-> PromptRuntime 按固定顺序选择当前能力需要的模板
+-> 按 static/dynamic 分区和 budget 组装
+-> 返回 system prompt + trace/hash
+```
+
+System prompt 的顺序是：
+
+- `static`：稳定身份和执行规则。
+- `dynamic`：工具、todo、subagent、skill、memory 指引等能力信息。
+- system 尾层：当前日期、工作区、操作系统和 shell 等运行时事实。
+
+这些 system 内容保持稳定顺序；工具循环只在历史消息尾部追加 assistant/tool result，
+不再临时插入并删除 `<system-reminder>` 用户消息。LLM memory 每个外部用户回合只选择
+一次，选中内容随该回合用户消息持久化。DeepSeek 的上下文缓存自动生效，不发送会被
+忽略的 `cache_control`；命中率按 provider 返回的缓存读取 token / prompt 输入 token
+计算。
+
+内置模板在：
+
+```text
+codeagent/prompts/templates/
+```
+
+普通 Agent 的身份提示只维护在 `templates/identity.md`；子 Agent 使用
+`templates/subagent.md`。不再通过 `SYSTEM_PROMPT` 环境变量重复配置身份提示。
+
+项目只能通过一个追加文件提供项目级说明，不能覆盖 Root、Lead 或 Teammate 的
+核心身份和安全规则：
+
+```text
+.prompts/project.md
+```
+
+`PROMPT_TEMPLATE_DIR` 是部署者显式配置的完整模板目录，只应指向受信任位置。
+
+可配置项：
+
+```bash
+PROMPT_TEMPLATE_DIR=.prompts
+SYSTEM_PROMPT_BUDGET_CHARS=120000
+SYSTEM_PROMPT_STATIC_BUDGET_CHARS=50000
+SYSTEM_PROMPT_DYNAMIC_BUDGET_CHARS=70000
+SKILL_CATALOG_BUDGET_CHARS=12000
+PROMPT_TRACE=false
+```
+
+打开 `PROMPT_TRACE=true` 后，CLI 会打印每次组装的 prompt hash、字符数和包含的
+fragment，方便调试和复现。
+
+## 错误恢复：Error Recovery
+
+Agent 使用独立的 `RecoveryRuntime` 保护模型调用。它不是简单 `try/except`，
+而是把异常或特殊 `stop_reason` 分类成 `RecoveryReason`，再根据当前
+`RecoveryState` 做恢复决策。
+
+覆盖的主要路径：
+
+- `429 rate limit`：指数退避 + jitter 后重试，尊重 `Retry-After`。
+- `529 overloaded`：指数退避；连续多次 overloaded 后可切换 `FALLBACK_MODEL_ID`。
+- `timeout/network/5xx`：有限重试。
+- `prompt too long/context length/413`：触发 `ContextManager.reactive_compact()` 后重试。
+- `max_tokens`：第一次提升输出 token 上限；仍截断时追加 continuation prompt 续写。
+- `401/403/invalid request/invalid model/schema error`：不可恢复，快速失败。
+
+主模型调用使用完整 recovery；memory selection side-query 使用轻量 recovery，失败时返回空
+memory context，不影响主任务。工具执行错误不进入 recovery，而是作为 `tool_result`
+返回给模型自我修正。
+
+常用配置：
+
+```bash
+RECOVERY_ENABLED=true
+FALLBACK_MODEL_ID=
+RECOVERY_TRACE=false
+```
+
+高级配置：
+
+```bash
+RECOVERY_MAX_RETRIES=10
+RECOVERY_BASE_DELAY_MS=500
+RECOVERY_MAX_DELAY_MS=32000
+RECOVERY_JITTER_RATIO=0.25
+RECOVERY_MAX_CONTINUATIONS=3
+RECOVERY_ESCALATED_MAX_TOKENS=64000
+RECOVERY_OVERLOAD_FALLBACK_AFTER=3
+RECOVERY_SIDE_QUERY_MAX_RETRIES=2
+```
+
+## 按需能力：Skill Loading
+
+默认启用两级 Skill Loading：
+
+- 所有项目、工作区及 Team Worktree 共用同一份全局技能库，不扫描项目内的 `.skills`。
+- 启动时扫描 `SKILLS_DIR` 指定的目录，默认是 `CODEAGENT_DATA_DIR/skills`。
+- 相对路径统一相对于 CodeAgent 数据目录解析；也支持指定全局技能库的绝对路径。
+- 每个 skill 放在独立目录中，并提供 `SKILL.md`。
+- Agent 的 system prompt 只注入 skill catalog：名称、描述和适用场景。
+- 完整 `SKILL.md` 不会常驻 system prompt；模型需要时调用 `load_skill(name)` 按需加载。
+- `load_skill` 只能按已注册 skill 名称加载，不能传任意路径。
+
+示例目录：
+
+```text
+<CODEAGENT_DATA_DIR>/skills/
+  code-review/
+    SKILL.md
+  python-refactor/
+    SKILL.md
+  agent-harness/
+    SKILL.md
+```
+
+`SKILL.md` 使用简单 frontmatter：
+
+```markdown
+---
+name: python-refactor
+description: Refactor Python code with type hints, docstrings, compatibility, and focused tests.
+when_to_use: Use for Python refactors, type hints, docstrings, main guards, API cleanup, or behavior-preserving edits.
+---
+
+# Python Refactor Skill
+
+...
+```
+
+全局技能库可存放以下 skill：
+
+- `code-review`：代码审查、风险、测试缺口。
+- `python-refactor`：Python 重构、类型标注、docstring、main guard。
+- `agent-harness`：修改或解释本项目的 agent loop、tools、hooks、todo、subagent、skill loading。
+
+可通过环境变量关闭或改目录：
+
+```bash
+ENABLE_SKILLS=true
+SKILLS_DIR=skills
+```
+
+Windows 默认技能目录为 `%LOCALAPPDATA%\CodeAgent\data\skills`。
+CLI 和 Web 使用相同的加载规则，切换项目不会切换技能目录。
+升级旧配置时，将 `SKILLS_DIR=.skills` 改为 `SKILLS_DIR=skills`，并把原有技能目录
+复制到全局技能库；程序不会自动导入新打开项目中的技能。
+
+## 长期记忆：Memory
+
+默认启用长期记忆，每个新用户回合执行一次选择，工具循环中不重复执行：
+
+1. 以本轮明确请求构建查询；长请求保留头尾，简短续问可补充上一条用户意图。
+2. 从完整 Markdown 记忆库的 SQLite FTS5 索引中按 BM25 召回候选，默认最多 50 条。
+   中文使用相邻双字词项，代码符号保留完整形式及拆分词项。
+3. 选择模型读取标题、描述及命中的正文片段，返回最多 5 个文件名，允许选空。
+4. 校验候选白名单，重新读取 Markdown；选择期间发生变化或消失的记录跳过。
+5. 按默认 60,000 字符预算注入完整记录，与当前用户请求一起进入历史。
+   超预算的整条跳过，继续尝试后续记录。候选为空时不调用选择模型。
+
+Markdown 是权威来源，`.retrieval-v1.sqlite3` 是可重建的派生索引。每次查询检查文件清单和
+元数据，通常只重新读取变化文件；默认每 60 秒进行一次按需全文核对（不是后台定时器）。
+索引不可用时降级到内存检索；普通会话只读权限、Team 只读期间及手动搜索均不写索引。
+`memory.selection.completed` 事件分别记录候选、选中、注入和跳过原因，不包含完整查询或记忆正文。
+具体行为、限制和离线数据见 [长期记忆改造说明](memory-retrieval.md)。
+
+你的项目使用 `deepseek-v4-pro` 时，这个 side-query 也会走同一个 Anthropic-compatible
+客户端和同一个 `MODEL_ID`，不会硬编码 Sonnet。
+
+内置三个 memory 工具：
+
+- `search_memory(query)`：按关键词搜索记忆摘要。
+- `load_memory(name)`：按精确名称加载完整记忆。
+- `remember(name, type, description, content)`：保存稳定、可复用的长期记忆。
+
+记忆按项目保存在 `CODEAGENT_DATA_DIR/workspaces/<workspace-id>/memory/`，不会写入
+用户 Git 工作区或 Team Worktree。每条记忆是一个 markdown 文件；只有存在记忆记录时
+才生成 `MEMORY.md` 索引。
+
+推荐记忆内容：
+
+- 用户长期偏好，例如“回答时先给结论，再给关键理由”。
+- 项目约定，例如“子 Agent 默认不能再委托子 Agent”。
+- 重要决策，例如“memory 使用 markdown store，暂不引入向量库”。
+- 可复用参考，例如“某类任务应优先加载某个 skill”。
+
+不推荐保存：
+
+- API key、token、密码等秘密。
+- 当前任务的临时状态。
+- 大段工具输出或大段代码。
+
+普通单 Agent 默认拥有读写 memory 的工具；同步子 Agent 默认只读，确实需要时可通过
+`MEMORY_ALLOW_SUBAGENT_WRITE=true` 开放。任一非终态 Agent Team 存在期间，同一项目的
+Root、Lead 和 Teammate 全部只读；Team 进入终态后 Root 自动恢复写权限。Team 执行结果
+不会在结束后被自动回填进 Memory。
+
+可配置项：
+
+```bash
+CODEAGENT_DATA_DIR=                 # 留空时使用系统用户数据目录
+ENABLE_MEMORY=true
+MEMORY_DIR=.memory                 # 旧工作区 Memory 的一次性只读导入位置
+MEMORY_MAX_ITEMS_IN_PROMPT=50
+MEMORY_MAX_LOADED_ITEMS=5
+MEMORY_SESSION_BUDGET_CHARS=60000
+MEMORY_MAX_MEMORY_BYTES=50000
+MEMORY_SELECTION_MODE=llm
+MEMORY_RETRIEVAL_MODE=indexed       # indexed | legacy；legacy 保留旧排序候选作对照
+MEMORY_INDEX_VERIFY_SECONDS=60     # 全文核对间隔；0 表示每次核对
+MEMORY_AUTO_EXTRACT=false
+MEMORY_EXTRACT_RECENT_MESSAGES=12
+MEMORY_CONSOLIDATE_THRESHOLD=30
+MEMORY_CONSOLIDATE_MODE=simple   # simple | model
+MEMORY_ALLOW_SUBAGENT_WRITE=false
+```
+
+`MEMORY_AUTO_EXTRACT=true` 时，Agent 会在每轮结束后让模型从最近对话中抽取稳定记忆。
+默认关闭，是为了避免把临时对话误写成长期状态。`MEMORY_CONSOLIDATE_MODE=model`
+会在记忆数量超过阈值后让模型合并重复记忆；默认 `simple` 不调用合并模型。
+`MEMORY.md` 人工目录在保存记忆时更新，回合结束不再为它重复扫描所有正文；检索索引按查询刷新。
+
+可以用下面的 query 测试手动记忆：
+
+```bash
+python -m codeagent --no-stream "请记住：这个项目里解释代码时先讲调用链，再讲关键函数。保存成长期记忆，然后告诉我保存的 memory 名称。"
+```
+
+也可以测试按需读取：
+
+```bash
+python -m codeagent --no-stream "按照我之前记录过的项目讲解偏好，解释 codeagent/agent.py 的主循环。"
+```
+
+## 上下文压缩与工具结果
+
+工具正文、元数据、归档和批次额度统一在 `codeagent/tools/output_limits.py` 定义。旧字符额度配置不再覆盖工具页面；不再提供环境变量、CLI 或设置页调节这些额度。完整额度与分页示例见 [工具输出策略](tool-output-policy.md)。
+
+每条元数据最多 2,000 字符；每个模型响应对应的工具结果批次软上限为 300,000 字符。先保留完整技能正文和必要元数据，再为错误、显式读取及其他结果分配正文。缩页调用各工具自己的分页器，保留真实状态及恢复游标，不重跑工具。生成输出每次最多保存 32 MiB；超过后仍排空命令管道，明确标记原始输出不完整。
+
+请求输入预算为 `I = W - O - S`：W 沿用现有窗口发现与配置，O 为实际 `max_tokens`，S 沿用各调用路径的既有余量（无余量配置时为 0）。估算输入达到 I 的 85% 时记录预警，90% 时主动整理，目标不高于 70%；整理未达目标但不超 I 时仍可发送。未知窗口不猜数值。自动整理关闭时仍检查硬预算。
+
+摘要最终最多 16,000 字符，每次摘要调用固定预留 32,768 tokens。一次整理共用 180 秒截止时间，最多 16 个原始材料块，每块最多 32,000 估算 tokens。允许连续拆分大字段，不再使用有损首尾摘录；块与合并请求均检查摘要模型窗口。超长最终摘要仅重写一次，失败不截断提交。
+
+候选仍遵守最近 12 条消息、最近 2 轮、最少 4 条消息、最多 200 条且 12 轮的合法边界。提交必须满足字符节省至少 `max(256, 5%)` 且输入 token 估算下降；原文进入不可变历史分段，检查点只在验证成功后更新。失败冷却保持 90 秒，请求前最多 3 次整理，供应商超窗恢复最多 1 次。
+
+窗口、权限、执行超时、模型服务凭据和原有传输限制仍使用原项目机制。旧的 80k/12k/200k 工具额度、摘要 4k/8192/45 秒等配置键不再生效，不自动改写用户配置。
+
+```bash
+CONTEXT_COMPACT_MODE=model
+SUMMARIZATION_MODEL_ID=your-summary-model
+CONTEXT_TRANSCRIPT_DIR=.transcripts
+CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results
+CONTEXT_WINDOW_TOKENS=0
+CONTEXT_MODEL_WINDOWS_JSON={}
+CONTEXT_SUMMARY_WINDOW_TOKENS=0
+CONTEXT_READ_REFERENCE_ENABLED=true
+```
+
+权限策略参考 `s03_permission` 的三道闸门：
+
+- 硬拒绝：`sudo`、`rm -rf /`、`shutdown` 等直接拒绝
+- 需确认：`rm `、写入 `/etc/`、`chmod 777`、写工作区外文件
+- 默认允许：普通读文件、搜索、工作区内写入和非危险命令
+
+## 接入外部 MCP 工具
+
+项目现在是一个轻量 MCP Host：现有 `bash`、文件读写等工具保持不变，外部 MCP
+Server 提供的工具会额外注册到 Agent。首版只接入 MCP Tools，不处理 Resources、
+Prompts 和 Sampling，保持边界简单。
+
+1. 复制示例配置：
+
+```powershell
+Copy-Item mcp.json.example mcp.json
+```
+
+2. 把 `command` 和 `args` 改成你的 MCP Server 启动命令。配置格式与 Claude Code
+常用的 `mcpServers` 格式一致：
+
+```json
+{
+  "mcpServers": {
+    "my-plugin": {
+      "command": "python",
+      "args": ["path/to/mcp_server.py"],
+      "env": {
+        "PLUGIN_API_KEY": "${PLUGIN_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+远程 Streamable HTTP 服务也可以直接配置：
+
+```json
+{
+  "mcpServers": {
+    "remote-plugin": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PLUGIN_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+3. 正常启动 CLI 或 Web。外部工具名称会显示为
+`mcp__服务名__工具名`，例如 `mcp__github__search_repositories`。每次执行外部 MCP
+工具都会走现有的用户审批流程；没有 `mcp.json` 时 MCP 自动关闭，不影响任何内置功能。
+
+Web 工作台标题栏提供插头形状的“MCP 插件配置”按钮，可以直接添加本地命令或远程
+HTTP Server、套用常用模板并删除已有配置。保存或删除后会自动刷新对应工作区的 MCP
+缓存，下一条消息直接生效；如果当时有任务正在运行，页面会提示重启 CodeAgent。
+对话 checkpoint 会持久化当前 `tool_schema_hash`。恢复旧对话时如果发现工具定义已经
+变化，系统提示会明确要求模型以本轮注册工具为准，忽略历史消息中过时的工具可用性判断。
+
+如需把配置放到其他位置，可在 `.env` 中设置：
+
+```bash
+MCP_CONFIG=config/mcp.json
+```
+
+## Agent Team
+
+Web 输入框提供 `Agent Team` 开关。先在本地 `.env` 启用所需能力，再重启后端：
+
+```dotenv
+TEAM_RUNTIME_ENABLED=true
+TEAM_WRITE_ENABLED=true
+```
+
+第一项启用团队运行时，第二项允许代码任务。打开 Team 开关并发送需求后，Lead 提交团队方案；用户批准方案后才创建成员、Attempt 和代码 Worktree。只读保护下不能启动 Team，团队模式暂不支持内置联网搜索。
+
+新 Team 默认采用 `managed` 模式：候选通过审查和验证后，Runtime 在内部集成工作区合并、执行组合验证，并在全部任务完成后进行本地交付。交付会核对用户同期修改，保留用户 HEAD 与暂存区，将成果作为未暂存修改写回。冲突或验证失败不会推进版本，也不会自动推送到远程仓库。
+
+旧 Team 保留 `manual` 模式。配置开关、审批和本地交付不能替代项目自身的验证命令；具体工作流与失败恢复以 [Team 自动集成与本地交付](team-managed-integration.md) 和 [Team 协作边界](team-collaboration-boundaries.md) 为准。
+
+Team 模型响应与调用期限分别由 `TEAM_MODEL_RESPONSE_TIMEOUT` 和 `TEAM_MODEL_CALL_TIMEOUT` 控制。模型超时后保留任务、工作区和安全上下文，未知写操作不自动重放；恢复仍需检查已有执行现场。
+
+## 运行测试
+
+单次运行：
+
+```bash
+python -m codeagent "读取 README.md，并用一句话总结这个项目"
+```
+
+不传 query 会进入交互模式：
+
+```bash
+python -m codeagent
+```
+
+```bash
+python -m unittest discover -s tests
+```
