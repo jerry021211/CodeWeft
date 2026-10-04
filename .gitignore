@@ -14,6 +14,7 @@ mcp.json
 .transcripts/
 .task_outputs/
 .codeagent/
+/.claude/
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
