@@ -184,7 +184,8 @@ class NonTeamContextRegressions(unittest.TestCase):
         result = self.agent(client, context=context, recovery=recovery).run("current user request")
         self.assertTrue(result.stop_reason.startswith("recovery_failed"))
         self.assertEqual([call[1]["model"] for call in client.calls], ["main"])
-        self.assertIn("positive input space", result.final_text)
+        self.assertIn("RequestBudgetError", result.final_text)
+        self.assertIn("window budget 500", result.final_text)
         self.assertEqual(context.state.summary_revision, 0)
 
     def test_default_subagents_own_compact_callbacks_and_private_archive_readers(self):
