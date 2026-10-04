@@ -1,5 +1,7 @@
 <h1 align="center">CodeAgent</h1>
 
+<p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
+
 <p align="center"><strong>在本地项目中理解代码、执行修改、验证结果的 AI 编程工作台。</strong></p>
 
 <p align="center">Web 工作台 · 命令行 · Python SDK</p>
