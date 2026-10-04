@@ -15,6 +15,7 @@ from typing import Any
 from codeagent.context.observation import fingerprint
 from codeagent.context.projection import READ_REFERENCE_MARKER
 from codeagent.messages import Message, ToolUse, _field
+from codeagent.tools.output_limits import READ_SOURCE_LINES
 
 
 def record_read(state: dict[str, Any], tool: ToolUse, output: str) -> dict[str, Any]:
@@ -87,8 +88,8 @@ def project_read_references(messages: list[Message], state: dict[str, Any]) -> t
                     or _field(call, "name") != "read_file" or not _valid(receipt)
                     or not isinstance(arguments, dict)
                     or receipt.get("arguments_hash") != fingerprint(arguments)["hash"]
-                    or any(receipt[key] != arguments.get(key, default)
-                           for key, default in (("offset", 1), ("limit", 2000), ("force_full", False)))
+                    or any(receipt.get(key, default) != arguments.get(key, default)
+                           for key, default in (("offset", 1), ("limit", READ_SOURCE_LINES), ("char_offset", 0), ("force_full", False)))
                     or receipt["output_hash"] != hashlib.sha256(text.encode("utf-8")).hexdigest()):
                 continue
             identity = fingerprint({key: receipt[key] for key in
@@ -104,10 +105,13 @@ def project_read_references(messages: list[Message], state: dict[str, Any]) -> t
                 "文件字节及读取范围已核对，未变化；原文仍在本次上下文中。\n"
                 f"source_tool_use_id: {json.dumps(source, ensure_ascii=False)}\n"
                 f"offset: {receipt['offset']}; limit: {receipt['limit']}\n"
+                + (f"page: {json.dumps(receipt['actual_range'], ensure_ascii=False, separators=(',', ':'))}\n"
+                   if receipt.get('actual_range') else '') +
                 "如需重新展开此范围，使用 read_file 并设置 force_full=true。\n"
                 "[/codeagent:file-read-reference:v1]"
             )
-            if (len(text) - len(reference) < 256
+            if (receipt.get('actual_range', {}).get('body_chars', len(text)) < 512
+                    or len(text) - len(reference) < 256
                     or len(text.encode("utf-8")) - len(reference.encode("utf-8")) < 256):
                 continue
             if projected is messages:

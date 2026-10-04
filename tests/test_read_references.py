@@ -115,7 +115,8 @@ class ReadReferenceTests(unittest.TestCase):
         self.file.write_bytes(content.replace(b'evidence 0399', b'CHANGED! 0399'))
         os.utime(self.file, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         second = self.read('second', limit=100)
-        self.assertEqual(str(first), str(second))  # Visible range did not change.
+        self.assertEqual(str(first).split('\n', 1)[1], str(second).split('\n', 1)[1])
+        self.assertNotEqual(first.read_page['metadata']['source_version'], second.read_page['metadata']['source_version'])
         self.assertNotEqual(first.file_read_snapshot['file_hash'], second.file_read_snapshot['file_hash'])
         self.assertNotIn(READ_REFERENCE_MARKER, results(self.manager.project_messages(self.history))['second'])
 
@@ -133,7 +134,7 @@ class ReadReferenceTests(unittest.TestCase):
         self.read('first')
         self.file.unlink()
         self.read('missing')
-        self.assertTrue(results(self.manager.project_messages(self.history))['missing'].startswith('Error:'))
+        self.assertIn('Error:', results(self.manager.project_messages(self.history))['missing'])
         self.assertNotIn('missing', self.manager.state.read_references['receipts'])
 
     def test_edit_tool_changes_invalidate_the_next_read(self):
@@ -165,8 +166,8 @@ class ReadReferenceTests(unittest.TestCase):
         self.read('archived1', manager=other, history=history)
         self.read('archived2', manager=other, history=history)
         view = results(other.project_messages(history))
-        self.assertIn('[tool output stored]', view['archived1'])
-        self.assertNotIn(READ_REFERENCE_MARKER, view['archived2'])
+        self.assertNotIn('[tool output stored]', view['archived1'])
+        self.assertIn(READ_REFERENCE_MARKER, view['archived2'])
 
     def test_cleanup_of_anchor_rehydrates_surviving_duplicate(self):
         body = str(self.read('first'))
@@ -181,19 +182,20 @@ class ReadReferenceTests(unittest.TestCase):
         self.assertEqual(results(view)['first'], '[older evidence cleared]')
         validate_tool_history(view)
 
-    def test_actual_partial_read_cleanup_rebases_references_on_retained_evidence(self):
+    def test_page_cleanup_keeps_source_anchor_and_continuation_metadata(self):
         manager = self.make_manager(mode='off', tool_projection_enabled=True,
                                     investigation_keep_rounds=1, tool_clear_min_chars=1000)
         for name in ('first', 'second', 'third'):
             self.read(name, manager=manager, limit=100)
         cleaned = manager.project_messages(self.history, clean_tools=True)
-        self.assertNotIn(READ_REFERENCE_MARKER, results(cleaned)['third'])
-        self.assertNotEqual(results(cleaned)['first'], results(self.history)['first'])
+        self.assertIn(READ_REFERENCE_MARKER, results(cleaned)['third'])
+        self.assertEqual(results(cleaned)['first'], results(self.history)['first'])
+        self.assertIn('"next_offset":101', results(cleaned)['third'])
         self.read('fourth', manager=manager, limit=100)
         view = manager.project_messages(self.history)
         self.assertEqual(view[:len(cleaned)], cleaned)
-        self.assertIn('source_tool_use_id: "third"', results(view)['fourth'])
-        self.assertEqual(results(view)['third'], results(self.history)['third'])
+        self.assertIn('source_tool_use_id: "first"', results(view)['fourth'])
+        self.assertEqual(results(view)['third'], results(cleaned)['third'])
 
     def test_reference_projection_does_not_bypass_hard_limit(self):
         self.read('first')
@@ -360,6 +362,26 @@ class ReadReferenceTests(unittest.TestCase):
         self.assertTrue(denied[0]['is_error'])
         self.assertIn('access revoked', denied[0]['content'])
         self.assertNotIn('denied', agent.context.state.read_references['receipts'])
+
+    def test_large_pages_survive_serial_parallel_and_sdk_projection(self):
+        self.file.write_bytes(b'x' * 250_000)
+        for parallel in (False, True):
+            with self.subTest(parallel=parallel):
+                agent, sdk, _ = self.make_agent([
+                    self.response(('a', {'force_full': True}), ('b', {'force_full': True}),
+                                  ('c', {'force_full': True}))], parallel=parallel)
+                agent.context.config.single_tool_output_max_chars = 1000
+                agent.context.config.tool_result_budget_chars = 2000
+                agent.run('Read these source pages.')
+                sent = results(sdk.calls[-1]['messages'])
+                self.assertLessEqual(sum(map(len, sent.values())), 300_000)
+                self.assertGreater(sum(map(len, sent.values())), 290_000)
+                for page in sent.values():
+                    metadata = json.loads(page.split('\n', 1)[0].split('] ', 1)[1])
+                    self.assertLessEqual(metadata['body_chars'], 120_000)
+                    self.assertEqual(metadata['next_offset'], 1)
+                    self.assertEqual(metadata['next_char_offset'], metadata['body_chars'] - 2)
+                    self.assertEqual(page.split('\n', 1)[1], '1\t' + 'x' * metadata['next_char_offset'])
 
 
 if __name__ == '__main__':

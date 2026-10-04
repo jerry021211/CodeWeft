@@ -130,7 +130,7 @@ class DefaultToolTests(unittest.TestCase):
                 "read_file",
                 {"file_path": str(path), "offset": 2, "limit": 1},
             )
-            self.assertEqual(read_result, "2\tbeta")
+            self.assertEqual(read_result.split('\n', 1)[1], "2\t" + path.read_bytes().decode().splitlines(keepends=True)[1])
 
             edit_result = registry.execute(
                 "edit_file",

@@ -94,7 +94,7 @@ class ContextSimplificationTests(unittest.TestCase):
             manager.prepare_before_model_call([{"role": "user", "content": "hello"}], model="main")
         self.assertEqual(measured, [1])
 
-    def test_old_large_tools_are_untouched_until_pressure_and_can_avoid_summary(self):
+    def test_old_large_tools_are_untouched_below_window_pressure(self):
         history = rounds(5, name="grep", size=10000)
         original = deepcopy(history)
         client = SummaryClient()
@@ -102,7 +102,7 @@ class ContextSimplificationTests(unittest.TestCase):
         self.assertEqual(manager.prepare_before_model_call(history, client=client), original)
         manager.config.context_window_tokens = 30_000
         projected = manager.prepare_before_model_call(history, client=client)
-        self.assertIn(TOOL_VIEW_MARKER, str(projected))
+        self.assertNotIn(TOOL_VIEW_MARKER, str(projected))
         self.assertEqual(client.calls, [])
         self.assertEqual(history, original)
         self.assertEqual(projected[-4:], history[-4:])
@@ -123,15 +123,17 @@ class ContextSimplificationTests(unittest.TestCase):
         self.assertIn("UNIQUE_MIDDLE_EVIDENCE", str(projected))
         validate_tool_history(projected)
 
-    def test_short_bash_success_and_failure_do_not_create_archive_envelopes(self):
+    def test_bash_archives_preserve_short_success_and_failure_bodies(self):
         manager = self.manager()
         tool = ToolUse("command", "bash", {"command": "example"})
         for text in ("x" * 2000, "Error: " + "x" * 10000):
-            self.assertEqual(manager.finalize_tool_results([tool], [text]), [text])
-        self.assertFalse(manager.config.tool_output_dir.exists())
+            result = manager.finalize_tool_results([tool], [text])[0]
+            self.assertEqual(result.body, text)
+            self.assertTrue(result.output_id)
         result = manager.finalize_tool_results([tool], ["x" * 100000])[0]
-        self.assertIn("[tool output stored]", result)
-        self.assertEqual(len(manager.state.tool_artifacts), 1)
+        self.assertTrue(result.output_id)
+        self.assertLessEqual(len(result.body), 60000)
+        self.assertEqual(len(manager.state.tool_artifacts), 3)
 
     def test_small_edits_keep_arguments_and_large_write_notes_have_no_language_outline(self):
         def history(size):
@@ -155,7 +157,7 @@ class ContextSimplificationTests(unittest.TestCase):
         manager = self.manager(context_window_tokens=1_000_000, near_context_ratio=0.001, summary_max_chars=12000)
         original = deepcopy(history)
         client = SummaryClient("too verbose " * 800)
-        projected = manager.prepare_before_model_call(history, client=client)
+        projected = manager.force_compact(history, client=client)
         self.assertEqual(projected, original)
         self.assertEqual(manager.state.summary_revision, 0)
         self.assertEqual(manager.last_compaction["reason"], "insufficient_savings")
@@ -174,7 +176,7 @@ class ContextSimplificationTests(unittest.TestCase):
         self.assertEqual(manager.state.summary_revision, 0)
 
     def test_model_window_pressure_triggers_summary_without_character_pressure(self):
-        manager = self.manager(model_context_windows={"main": 8000})
+        manager = self.manager(model_context_windows={"main": 7000})
         client = SummaryClient()
         projected = manager.prepare_before_model_call(rounds(), client=client, model="main", max_tokens=1000)
         self.assertEqual(len(client.calls), 1)
@@ -200,8 +202,8 @@ class ContextSimplificationTests(unittest.TestCase):
         page = tool.run(manager.state.summary_transcript, message_offset=first_cursor, message_limit=3, char_limit=4000)
         for index in range(first_cursor, first_cursor + 3):
             self.assertIn(json.dumps(history[index - 1], ensure_ascii=False), page)
-        self.assertIn(f"next_message_offset={first_cursor + 3}", page)
-        self.assertIn("no messages", tool.run(str(first_path), message_offset=first_cursor + 1))
+        self.assertEqual(page.next_cursor["message_offset"], first_cursor + 3)
+        self.assertEqual(tool.run(str(first_path), message_offset=first_cursor + 1).body, "")
 
     def test_resumed_branches_share_old_immutable_segment_without_leaking_new_evidence(self):
         history, manager = rounds(), self.manager()

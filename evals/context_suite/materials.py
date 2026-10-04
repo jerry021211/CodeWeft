@@ -25,9 +25,8 @@ def definitions():
 
 def context_settings(variant: str, scale: str):
     settings = dict(VARIANTS[variant])
-    if scale == "stress":
-        # Stress the token trigger; character counts no longer initiate cleanup.
-        settings["near_context_ratio"] = 0.04
+    # Scale controls fixture size. Exercise fixed thresholds by selecting an
+    # explicit model window, rather than overriding retired trigger settings.
     ContextConfig(**settings)  # Fail early if the real configuration rejects it.
     return settings
 

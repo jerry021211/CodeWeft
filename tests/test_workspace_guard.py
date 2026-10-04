@@ -82,7 +82,7 @@ class GuardedToolTests(unittest.TestCase):
             )
 
             self.assertIn("Wrote 1 lines", writer.run("sample.txt", "alpha"))
-            self.assertEqual(reader.run("sample.txt"), "1\talpha")
+            self.assertEqual(reader.run("sample.txt").split('\n', 1)[1], "1\talpha")
             self.assertIn("Edited", editor.run("sample.txt", "alpha", "beta"))
             self.assertEqual(changed_files, {str(root / "sample.txt")})
 

@@ -18,6 +18,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from codeagent.mcp.config import McpServerConfig, load_mcp_servers
 from codeagent.tools import ToolDefinition, ToolRegistry
+from codeagent.tools.base import ToolOutput
 
 
 class McpTool:
@@ -34,7 +35,13 @@ class McpTool:
         )
 
     def run(self, **kwargs: Any) -> str:
-        return self.router.call_tool(self.server, self.remote_name, kwargs)
+        result = self.router.call_tool(self.server, self.remote_name, kwargs)
+        known = {('tavily', 'tavily-search'): 'web_search',
+                 ('brave-search', 'brave_web_search'): 'web_search', ('fetch', 'fetch'): 'webpage'}
+        result.output_policy = known.get((self.server, self.remote_name), 'default')
+        if result.output_policy == 'webpage':
+            result.source_url = kwargs.get('url')
+        return result
 
 
 class McpRouter:
@@ -103,7 +110,7 @@ class McpRouter:
         )
         result = future.result()
         output = _tool_result_text(result)
-        return f"Error: {output}" if result.is_error else output
+        return output
 
     def close(self) -> None:
         with self._lifecycle_lock:
@@ -195,12 +202,28 @@ def _expand(value: str) -> str:
 
 def _tool_result_text(result: Any) -> str:
     parts: list[str] = []
+    media = []
     for item in result.content:
         text = getattr(item, "text", None)
         if text is not None:
             parts.append(text)
         else:
-            parts.append(json.dumps(item.model_dump(mode="json"), ensure_ascii=False))
-    if not parts and result.structured_content is not None:
-        parts.append(json.dumps(result.structured_content, ensure_ascii=False))
-    return "\n".join(parts)
+            kind = getattr(item, 'type', 'unknown')
+            uri = getattr(item, 'uri', None) or getattr(getattr(item, 'resource', None), 'uri', None)
+            if isinstance(uri, str) and uri.startswith('data:'):
+                uri = None
+            # The current provider bridge is text-only. Never serialize inline
+            # binary data into text or claim the model has seen the media.
+            media.append({'type': kind, 'uri': uri, 'supported': False})
+            parts.append(f'[unsupported MCP {kind}; resource={uri or "unavailable"}]')
+    structured_json = result.structured_content is not None
+    if structured_json:
+        payload = ({'structured_content': result.structured_content, 'text_content': parts}
+                   if parts else result.structured_content)
+        text = json.dumps(payload, ensure_ascii=False)
+    else:
+        text = '\n'.join(parts)
+    output = ToolOutput(text, status='error' if getattr(result, 'is_error', False) else 'success')
+    output.media_references = media
+    output.structured_json = structured_json
+    return output

@@ -45,6 +45,31 @@ class McpConfigTests(unittest.TestCase):
 
 
 class McpRouterTests(unittest.TestCase):
+    def test_binary_media_is_not_dumped_into_text_and_error_status_survives(self):
+        from codeagent.mcp.router import _tool_result_text
+        result = SimpleNamespace(content=[SimpleNamespace(type='image', data='BASE64SECRET' * 10000)],
+                                 structured_content=None, is_error=True)
+        output = _tool_result_text(result)
+        self.assertEqual(output.status, 'error')
+        self.assertNotIn('BASE64SECRET', output)
+        self.assertIn('unsupported MCP image', output)
+        self.assertEqual(output.media_references, [{'type': 'image', 'uri': None, 'supported': False}])
+
+    def test_mcp_structured_scalar_keeps_json_type(self):
+        from codeagent.mcp.router import _tool_result_text
+        result = SimpleNamespace(content=[], structured_content='structured string', is_error=False)
+        output = _tool_result_text(result)
+        self.assertTrue(output.structured_json)
+        self.assertEqual(json.loads(output), 'structured string')
+
+    def test_structured_content_is_preserved_alongside_explanatory_text(self):
+        from codeagent.mcp.router import _tool_result_text
+        result = SimpleNamespace(content=[SimpleNamespace(text='Found two values')],
+                                 structured_content=[1, 2], is_error=False)
+        output = _tool_result_text(result)
+        self.assertEqual(json.loads(output)['structured_content'], [1, 2])
+        self.assertEqual(json.loads(output)['text_content'], ['Found two values'])
+
     def test_discovery_order_does_not_change_registration_order(self):
         from codeagent.mcp.router import McpTool
         with tempfile.TemporaryDirectory() as directory:

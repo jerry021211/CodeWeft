@@ -103,8 +103,8 @@ class ToolProjectionTests(unittest.TestCase):
             self.assertIs(build_tool_projection(complete, investigation_keep=0), complete)
             partial = tool_round("part", "read_file", reader.run(str(path), limit=1), {"file_path": str(path), "limit": 1})
             projected = build_tool_projection(partial, investigation_keep=0)
-            self.assertIn(TOOL_VIEW_MARKER, result_text(projected, 1))
-            self.assertIn("分段读取", result_text(projected, 1))
+            self.assertIs(projected, partial)
+            self.assertIn('"next_offset":2', result_text(projected, 1))
 
     def test_nonzero_offset_is_partial_even_without_truncation_footer(self):
         messages = tool_round("tail", "read_file", "2\t" + "x" * 3000,

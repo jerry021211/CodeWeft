@@ -62,7 +62,7 @@ class ToolCancellationTests(unittest.TestCase):
             agent.run("start")
         results = self.results(agent)
         self.assertEqual(calls, [0])
-        self.assertEqual(results[0]["content"], "file created")
+        self.assertEqual(results[0]["content"].body, "file created")
         self.assertFalse(results[0].get("is_error", False))
         self.assertIn("未执行", results[1]["content"])
         self.assertEqual([e.type for e in self.events if e.type in {"tool.completed", "tool.cancelled"}], ["tool.completed", "tool.cancelled", "tool.cancelled"])
@@ -82,7 +82,7 @@ class ToolCancellationTests(unittest.TestCase):
             agent.run("start")
         results = self.results(agent)
         self.assertEqual(calls, [0, 1])
-        self.assertEqual(results[0]["content"], "saved")
+        self.assertEqual(results[0]["content"].body, "saved")
         self.assertIn("结果未知", results[1]["content"])
         self.assertIn("未执行", results[2]["content"])
         self.assertTrue(any(e.type == "tool.interrupted" for e in self.events))
@@ -99,7 +99,7 @@ class ToolCancellationTests(unittest.TestCase):
         with self.assertRaises(CancelledError):
             agent.run("start")
         self.assertEqual(calls, [0, 1, 2])
-        self.assertEqual([item["content"] for item in self.results(agent)], ["saved 0", "saved 1", "saved 2"])
+        self.assertEqual([item["content"].body for item in self.results(agent)], ["saved 0", "saved 1", "saved 2"])
         self.assertTrue(all(not item.get("is_error") for item in self.results(agent)))
 
     def test_permission_wait_cancellation_does_not_dispatch(self):
@@ -121,7 +121,7 @@ class ToolCancellationTests(unittest.TestCase):
         agent = self.make_agent(lambda number: "file created", hooks=hooks)
         with self.assertRaisesRegex(RuntimeError, "hook failed"):
             agent.run("start")
-        self.assertEqual(self.results(agent)[0]["content"], "file created")
+        self.assertEqual(self.results(agent)[0]["content"].body, "file created")
         self.assertFalse(self.results(agent)[0].get("is_error", False))
 
     def test_formatter_failure_does_not_mask_cancel_or_break_pairing(self):
@@ -130,17 +130,17 @@ class ToolCancellationTests(unittest.TestCase):
         with patch.object(ContextManager, "finalize_tool_results", side_effect=OSError("disk full")):
             with self.assertRaises(CancelledError) as caught:
                 agent.run("start")
-        self.assertEqual(self.results(agent)[0]["content"], "saved")
+        self.assertEqual(self.results(agent)[0]["content"].body, "saved")
         self.assertIn("disk full", str(caught.exception.__notes__))
 
     def test_archive_failure_retains_truth_and_respects_budgets(self):
         context = ContextManager(config=ContextConfig(single_tool_output_max_chars=120, tool_result_budget_chars=150, persisted_preview_chars=70))
-        with patch.object(ContextManager, "_write_tool_output", side_effect=OSError("disk full")):
+        with patch("codeagent.context.output_archive.Path.mkdir", side_effect=OSError("disk full")):
             outputs = context.finalize_tool_results([ToolUse("a", "probe", {}), ToolUse("b", "probe", {})], ["hello" * 500, "world" * 500])
         self.assertEqual(len(outputs), 2)
-        self.assertLessEqual(sum(map(len, outputs)), 150)
-        self.assertTrue(all(len(output) <= 120 for output in outputs))
-        self.assertTrue(all("归档失败" in output for output in outputs))
+        self.assertLessEqual(sum(map(len, outputs)), 300000)
+        self.assertTrue(all(len(output.body) <= 120000 for output in outputs))
+        self.assertTrue(all(output.storage_error and not output.output_id and not output.source_complete for output in outputs))
         self.assertNotIn("path:", str(outputs))
 
     def test_blocked_tool_has_result_and_normal_batch_continues(self):
@@ -215,7 +215,7 @@ class ToolCancellationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Unable to persist run event"):
             agent.run("start")
         self.assertEqual(calls, [0])
-        self.assertEqual(self.results(agent)[0]["content"], "saved")
+        self.assertEqual(self.results(agent)[0]["content"].body, "saved")
 
     def test_lost_checkpoint_blocks_silent_resume_of_older_context(self):
         with TemporaryDirectory() as directory:

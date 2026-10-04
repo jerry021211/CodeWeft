@@ -127,7 +127,7 @@ class ContextEvaluationTests(unittest.TestCase):
             self.assertEqual(read_json(trial / "effective-loop-guard.json")["max_total_tokens"], 300000)
             self.assertIn("每场累计 token 预算：300,000 token", (root / "report.md").read_text(encoding="utf-8"))
 
-    def test_offline_ablation_really_triggers_projection_summaries_and_recall(self):
+    def test_offline_ablation_preserves_history_without_window_pressure(self):
         with tempfile.TemporaryDirectory() as temp:
             root = run_suite(output=Path(temp), cases=["S02", "S03", "S04"], variants=list("ABCD"), scale="stress",
                              context_window_tokens=1_000_000)
@@ -143,12 +143,8 @@ class ContextEvaluationTests(unittest.TestCase):
             self.assertNotIn("API 请求总数", report)
             for key, row in rows.items():
                 m = row["metrics"]
-                if key[1] in "AB":
-                    self.assertEqual(m["summary_api_requests"], 0)
-                if key[0] == "S03" and key[1] in "CD":
-                    self.assertGreater(m["summary_api_requests"], 0)
-                if key[0] == "S02" and key[1] in "BD":
-                    self.assertGreater(m["first_projection_placeholders"], 0)
+                self.assertEqual(m["summary_api_requests"], 0)
+                self.assertEqual(m["first_projection_placeholders"], 0)
                 if key[0] == "S04":
                     self.assertTrue(m["archive_evidence_observed"])
                 self.assertFalse(m["usage_complete"])
@@ -168,7 +164,17 @@ class ContextEvaluationTests(unittest.TestCase):
                 self.assertEqual(actual["mode"], "off" if key[1] in "AB" else "model")
                 self.assertTrue(row["execution"]["canonical_prefix_unchanged"])
                 if key[0] == "S03" and key[1] in "CD":
-                    self.assertTrue(all(not marker["in_first_retained_view"] for marker in row["fact_exposure_audit"]))
+                    self.assertTrue(all(marker["in_first_retained_view"] for marker in row["fact_exposure_audit"]))
+
+    def test_offline_summary_is_triggered_by_actual_window_pressure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = run_suite(output=Path(temp), cases=["S03"], variants=["D"], scale="stress",
+                             context_window_tokens=40000, summary_context_window_tokens=1_000_000)
+            row = read_json(root / "result.json")["results"][0]
+            self.assertTrue(row["task_success"], row["failure_reasons"])
+            self.assertGreater(row["metrics"]["summary_api_requests"], 0)
+            self.assertTrue(row["execution"]["canonical_prefix_unchanged"])
+            self.assertTrue(all(not marker["in_first_retained_view"] for marker in row["fact_exposure_audit"]))
 
     def test_timeout_is_failed_and_evidence_is_still_sealed(self):
         with tempfile.TemporaryDirectory() as temp:

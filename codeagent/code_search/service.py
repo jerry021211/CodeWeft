@@ -1,5 +1,8 @@
 """Budgeted query expansion, rank fusion and current-source evidence."""
 from __future__ import annotations
+from codeagent.tools.output_limits import CODE_SEARCH_RESULTS, CODE_SEARCH_BODY_CHARS
+from codeagent.tools.output_pages import json_page
+from codeagent.tools.base import ToolOutput
 
 import hashlib
 import json
@@ -107,7 +110,7 @@ class CodeSearch:
         candidates = fuse(queries[0], queries, exact, routes, vector_route, bool(exact) or has_code_locator(queries[0]))
         return candidates, bool(exact), [len(route) for route in routes]
 
-    def search(self, query, path=".", top_k=5, keywords=None, *, context=None):
+    def search(self, query, path=".", top_k=CODE_SEARCH_RESULTS, keywords=None, *, context=None):
         token = self._request.set(context or self.context)
         try:
             return self._locked_search(query, path, top_k, keywords)
@@ -123,13 +126,13 @@ class CodeSearch:
             self.index.close_snapshot()
             self._lock.release()
 
-    def _search(self, query, path=".", top_k=5, keywords=None):
+    def _search(self, query, path=".", top_k=CODE_SEARCH_RESULTS, keywords=None):
         started = time.monotonic()
         self.check()
         if not isinstance(query, str) or not query.strip() or len(query) > 4000:
             raise ValueError("query must be non-empty and at most 4000 characters")
-        if type(top_k) is not int or not 1 <= top_k <= 10:
-            raise ValueError("top_k must be between 1 and 10")
+        if type(top_k) is not int or not 1 <= top_k <= CODE_SEARCH_RESULTS:
+            raise ValueError("top_k must be between 1 and 20")
         if keywords is not None and (not isinstance(keywords, list) or len(keywords) > 3 or any(not isinstance(k, str) or len(k) > 250 for k in keywords)):
             raise ValueError("keywords must contain at most 3 strings of at most 250 characters")
         scope_path = self.index.guard.resolve(path)
@@ -198,6 +201,12 @@ class CodeSearch:
                 results.append({key: doc[key] for key in ('path', 'symbol', 'definition_start_line', 'kind', 'content_hash',
                     'language', 'entity_id', 'parse_quality', 'evidence_origin')} |
                                dict(line=start, end_line=end, quote="\n".join(lines[start - 1:end]), matched_fields=fields))
+                evidence = lines[start - 1:end]
+                if evidence:
+                    hit = max(range(len(evidence)), key=lambda i: len(wanted & set(terms(evidence[i]))))
+                    positions = [found.start() for word in wanted
+                                 if (found := re.search(re.escape(word), evidence[hit], re.IGNORECASE))]
+                    results[-1].update(hit_line=start + hit, hit_char=min(positions, default=0))
                 if doc['language'] != 'python':
                     results[-1].update(signature=doc['signature'][:200], parser=doc['parser'])
                 files[doc['path']] = files.get(doc['path'], 0) + 1
@@ -221,27 +230,8 @@ class CodeSearch:
                        notes=self.index.notes[:5], rewrite_status=rewrite_status, rewrite_calls=rewrite_calls,
                        route_candidates=counts, candidate_functions=len(candidates), indexed_files_updated=self.index.updated,
                        truncated=len(candidates) > len(results), absence_proven=False)
-        # Bound serialized output without ever inventing a partial source line.
-        while len(json.dumps(payload, ensure_ascii=False, separators=(',', ':'))) > 7900 and results:
-            # Reserve evidence for the higher-ranked hits before preserving a
-            # large tail of mostly-metadata results. Never silently keep only a
-            # declaration when the selected evidence was in its body.
-            if len(results) > 5:
-                results.pop()
-                payload['truncated'] = True
-                continue
-            longest = max(results, key=lambda r: len(r['quote']))
-            # splitlines() drops a final empty source line. Repeated trimming
-            # would then remove two lines while decrementing end_line once.
-            quote_lines = longest['quote'].split("\n")
-            if len(quote_lines) > 1:
-                longest['quote'] = "\n".join(quote_lines[:-1])
-                longest['end_line'] -= 1
-            else:
-                results.remove(longest)
-            payload['truncated'] = True
         payload['duration_ms'] = round((time.monotonic() - started) * 1000, 3)
-        output = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+        output = json_page(ToolOutput(''), payload, CODE_SEARCH_BODY_CHARS)
         if self.context.emitter:
             self.context.emitter.emit("code_search.completed", {k: v for k, v in payload.items() if k not in ('results', 'notes')} | {"returned_characters": len(output)})
         return output

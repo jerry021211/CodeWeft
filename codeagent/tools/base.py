@@ -44,6 +44,16 @@ class Tool(Protocol):
 class ToolOutput(str):
     """String-compatible result carrying execution facts before text projection."""
 
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+        result = ToolOutput(str(self))
+        memo[id(self)] = result
+        for key, value in self.__dict__.items():
+            # Render functions and finished archive handles are execution-local
+            # capabilities; copy metadata, but never deepcopy locks/file handles.
+            result.__dict__[key] = value if key in {'archive', 'page_renderer'} else deepcopy(value, memo)
+        return result
+
     def __new__(
         cls, text: str, *, status: str = "success", exit_code: int | None = None,
         outcome: str = "", deterministic: bool = False, input_state: str = "",
@@ -73,6 +83,16 @@ class ToolOutput(str):
         # Built-in read_file attaches content identity evidence. It contains no
         # body and grants no permission; missing metadata disables referencing.
         result.file_read_snapshot = None
+        from uuid import uuid4
+        result.execution_id = uuid4().hex
+        result.returned_range = None
+        result.next_cursor = None
+        result.has_more = False
+        result.source_complete = True
+        result.output_id = None
+        result.truncated_reason = None
+        result.scan_complete = None
+        result.storage_error = None
         return result
 
 

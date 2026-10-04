@@ -43,6 +43,7 @@ from codeagent.runtime.parallel import Admission, ParallelConfig, admission
 from codeagent.runtime.subagents import SubagentRuntime
 from codeagent.runtime.tool_executor import batches, submit
 from codeagent.tracing import trace_run
+from codeagent.tools.read import with_read_feedback
 from codeagent.tools.base import ToolDefinition, ToolOutput, normalize_tool_output
 from codeagent.tools import (
     COMPACT_TOOL_NAME,
@@ -204,6 +205,8 @@ class Agent:
         if self._loop_guard is None:
             self.tools.bind_runtime(self._check_execution, lambda: 120.0)
         for owner in self.tools.owners():
+            if hasattr(owner, 'output_root'):
+                owner.output_root = self.context.config.tool_output_dir
             bind_agent = getattr(owner, 'bind_agent', None)
             if callable(bind_agent):
                 bind_agent(self.client, self.config.model, self.event_emitter)
@@ -751,17 +754,20 @@ class Agent:
                 if len(outputs) != len(results):
                     raise ValueError("工具结果格式化数量不匹配")
                 for result, output in zip(results, outputs):
-                    result["content"] = output
+                    # History retains the bounded page and facts, not render
+                    # closures that could keep a complete remote payload alive.
+                    saved = ToolOutput(str(output))
+                    saved.__dict__.update({key: value for key, value in getattr(output, '__dict__', {}).items()
+                                           if key not in {'archive', 'page_renderer', 'original_payload', 'source_text',
+                                                          'feedback', 'context_feedback', 'guard_feedback'}})
+                    result["content"] = saved
             except Exception as exc:
                 cleanup_errors.append(exc)
                 # Preserve pairing and truth even if an extension formatter fails.
-                budget = max(1, self.context.config.tool_result_budget_chars // max(1, len(results)))
-                limit = min(budget, self.context.config.single_tool_output_max_chars)
-                for result in results:
+                for tool, result in zip(tool_uses, results):
                     content = result["content"]
-                    if len(content) > limit:
-                        marker = "[结果整理失败；预览截断，归档状态未知]\n"
-                        result["content"] = (marker + content[:max(0, limit - len(marker))])[:limit]
+                    if not getattr(content, "page_ready", None):
+                        result['content'] = self.context._prepare_result(tool, content)
             for tool, result, execution in zip(tool_uses, results, executions):
                 if not execution["emitted"]:
                     try:
@@ -836,9 +842,20 @@ class Agent:
                 self._check_cancelled()
                 execution["status"] = "unknown"
                 result["content"] = "执行结果未知：调用过程中被中断，未收到完整结果。操作可能已产生副作用，请先核实实际状态，不要自动重复执行。"
-                output = self._execute_tool_with_retry(tool)
+                try:
+                    output = self._execute_tool_with_retry(tool)
+                except BaseException as exc:
+                    captured = getattr(exc, 'tool_output', None)
+                    if captured is not None:
+                        result['content'] = captured
+                        result['is_error'] = True
+                        execution.update(status='cancelled', exit_code=captured.exit_code,
+                                         outcome=captured.outcome, process_id=captured.process_id,
+                                         process_running=captured.process_running)
+                        self.context.record_tool_result(tool, captured)
+                    raise
                 # Save the returned value before any optional bookkeeping.
-                result["content"] = str(output)
+                result["content"] = output
                 output = normalize_tool_output(output)
                 status = output.status
                 execution["status"] = status
@@ -852,7 +869,7 @@ class Agent:
                 # Record returned facts before a deadline check can end this operation.
                 self.context.record_tool_result(tool, output)
                 self.hooks.trigger("PostToolUse", tool, output)
-        result["content"] = getattr(output, "context_feedback", "") + str(output) + getattr(output, "guard_feedback", "")
+        result["content"] = with_read_feedback(output, getattr(output, "context_feedback", ""), getattr(output, "guard_feedback", ""))
         if status == "success":
             result.pop("is_error", None)
         else:
@@ -866,7 +883,7 @@ class Agent:
     def _commit_parallel_output(self, tool, result, execution, output, *, ran=True):
         output = normalize_tool_output(output)
         # Preserve returned execution facts even if a post hook or archive fails.
-        result["content"] = str(output)
+        result["content"] = output
         if output.status == "success":
             result.pop("is_error", None)
         else:
@@ -877,7 +894,7 @@ class Agent:
         if ran:
             self.context.record_tool_result(tool, output)
             self.hooks.trigger("PostToolUse", tool, output)
-        result["content"] = getattr(output, "context_feedback", "") + result["content"] + getattr(output, "guard_feedback", "")
+        result["content"] = with_read_feedback(output, getattr(output, "context_feedback", ""), getattr(output, "guard_feedback", ""))
         self._emit_tool_outcome(tool, result, execution)
 
     def _execute_parallel(self, kind, indices, calls, results, executions):
@@ -989,7 +1006,7 @@ class Agent:
                     output = returned[index]
                     self.context.record_tool_result(calls[index], output)
                     self.hooks.trigger("PostToolUse", calls[index], output)
-                    results[index]["content"] = getattr(output, "context_feedback", "") + results[index]["content"] + getattr(output, "guard_feedback", "")
+                    results[index]["content"] = with_read_feedback(output, getattr(output, "context_feedback", ""), getattr(output, "guard_feedback", ""))
                 except BaseException as exc:
                     if error is None:
                         error = exc

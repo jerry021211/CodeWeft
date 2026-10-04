@@ -57,7 +57,7 @@ class RuntimePlatformTests(unittest.TestCase):
             tool = BashTool(runtime_platform=detected)
             result = tool.run("show-version")
 
-        self.assertEqual(result, "ok")
+        self.assertEqual(result.body, "ok\n")
         self.assertIn("Test OS", tool.definition.description)
         self.assertIn("Test Shell", tool.definition.description)
         run.assert_called_once_with(
@@ -65,7 +65,6 @@ class RuntimePlatformTests(unittest.TestCase):
             shell=False,
             stdout=run.call_args.kwargs["stdout"],
             stderr=run.call_args.kwargs["stderr"],
-            text=True,
             cwd=str(Path.cwd().resolve()),
             env=run.call_args.kwargs["env"],
             **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}),

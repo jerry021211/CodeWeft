@@ -186,7 +186,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, "end_turn")
         self.assertEqual(result.iterations, 2)
         self.assertEqual(
-            agent.messages[2]["content"][0],
+            {**agent.messages[2]["content"][0], "content": agent.messages[2]["content"][0]["content"].body},
             {
                 "type": "tool_result",
                 "tool_use_id": "toolu_1",
@@ -252,7 +252,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn("echo", subagent_tool_names)
         self.assertNotIn("subagent", subagent_tool_names)
         self.assertEqual(
-            agent.messages[2]["content"][0],
+            {**agent.messages[2]["content"][0], "content": agent.messages[2]["content"][0]["content"].body},
             {
                 "type": "tool_result",
                 "tool_use_id": "toolu_parent",
@@ -300,7 +300,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.final_text, "parent handled failure")
         self.assertEqual(len(client.calls), 3)
         tool_result = agent.messages[2]["content"][0]["content"]
-        self.assertTrue(tool_result.startswith("Error: Subagent failed"))
+        self.assertIn("Error: Subagent failed", tool_result)
         child_events = [
             event.type for event in events if event.parent_agent_id == "agent_root"
         ]
@@ -683,7 +683,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(env.context_config.mode, "model")
         self.assertEqual(env.context_config.summarization_model, "summary-model")
         self.assertEqual(env.context_config.summarization_api_key, "summary-key")
-        self.assertEqual(env.context_config.tool_result_budget_chars, 111)
+        self.assertEqual(env.context_config.tool_result_budget_chars, 300000)
         self.assertTrue(env.memory_config.enabled)
         self.assertEqual(str(env.memory_config.memory_dir), "project-memory")
         self.assertEqual(env.memory_config.selection_mode, "llm")

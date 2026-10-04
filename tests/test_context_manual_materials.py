@@ -95,7 +95,8 @@ class ManualContextMaterialsTests(unittest.TestCase):
                         self.assertEqual(manager.last_compaction["status"], "written")
                         cursors.append(manager.state.compacted_message_count)
                     messages.append({"role": "assistant", "content": "已收到。"})
-                self.assertEqual(client.calls, expected_count)
+                # A compaction can summarize several material chunks and merge them.
+                self.assertGreaterEqual(client.calls, expected_count)
                 self.assertEqual(manager.state.summary_revision, expected_count)
                 self.assertEqual(cursors, sorted(set(cursors)))
                 self.assertGreater(cursors[0], 0)
@@ -119,7 +120,6 @@ class ManualContextMaterialsTests(unittest.TestCase):
         from codeagent.context import ContextConfig, ContextManager
         from codeagent.messages import ToolUse
         from codeagent.tools.read import ReadFileTool
-        from codeagent.tools.runtime_data import LoadToolOutputTool
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "manual"
@@ -130,9 +130,13 @@ class ManualContextMaterialsTests(unittest.TestCase):
             archive = Path(temporary) / "outputs"
             context = ContextManager(config=ContextConfig(mode="off", single_tool_output_max_chars=4000, tool_output_dir=archive))
             preview = context._finalize_single_tool_result(ToolUse(id="manual-read", name="read_file", input={"file_path": str(source)}), output)
-            self.assertIn("[tool output stored]", preview)
+            self.assertIn("INC-R7-4829", preview)
+            # Batch pressure shrinks a live-file page without copying the file.
+            preview = preview.page_renderer(4000)
             self.assertNotIn("INC-R7-4829", preview)
-            recovered = LoadToolOutputTool(archive).run(str(archive / "manual-read.txt"), offset=271, limit=1)
+            self.assertTrue(preview.has_more)
+            self.assertIsNotNone(preview.next_cursor)
+            recovered = ReadFileTool().run(str(source), **preview.next_cursor)
             self.assertIn("INC-R7-4829", recovered)
             self.assertIn("retry_allowed=false", recovered)
 

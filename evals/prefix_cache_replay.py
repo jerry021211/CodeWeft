@@ -54,7 +54,7 @@ def metrics(calls):
 
 
 def replay():
-    config = ContextConfig(mode="off", cache_policy="cache_friendly", context_window_tokens=83_000,
+    config = ContextConfig(mode="off", cache_policy="cache_friendly", context_window_tokens=250_000,
                            max_request_chars=150_000, compact_threshold_chars=75_000,
                            investigation_keep_rounds=2, tool_clear_min_chars=8000)
     events, canonical, before = [], [{"role": "user", "content": "Inspect the fixed evidence."}], []

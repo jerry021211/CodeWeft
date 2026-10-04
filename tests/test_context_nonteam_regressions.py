@@ -141,7 +141,7 @@ class NonTeamContextRegressions(unittest.TestCase):
         agent = self.agent(client, context=context, messages=history, cancellation=token)
         before = asdict(context.state)
         with self.assertRaises(CancelledError):
-            agent.run()
+            context.force_compact(history, client=client)
         after = asdict(context.state)
         # Prompt preparation is reusable even when the subsequent summary is
         # cancelled. Neither summary/task state nor sent-request baselines commit.
@@ -184,7 +184,7 @@ class NonTeamContextRegressions(unittest.TestCase):
         result = self.agent(client, context=context, recovery=recovery).run("current user request")
         self.assertTrue(result.stop_reason.startswith("recovery_failed"))
         self.assertEqual([call[1]["model"] for call in client.calls], ["main"])
-        self.assertIn("window budget 500", result.final_text)
+        self.assertIn("positive input space", result.final_text)
         self.assertEqual(context.state.summary_revision, 0)
 
     def test_default_subagents_own_compact_callbacks_and_private_archive_readers(self):
@@ -279,10 +279,12 @@ class NonTeamContextRegressions(unittest.TestCase):
     def test_45_round_task_rolls_summaries_and_resumes_checkpoint_without_duplicate_work(self):
         prompt = "EXACT 用户目标：修改 /project/真实文件.py，保留 public_api；不要重新执行已有成功操作。"
         client = LongTaskClient(rounds=45)
-        context = self.context(max_request_chars=30000, context_window_tokens=1_000_000, near_context_ratio=0.012)
+        context = self.context(context_window_tokens=15000)
         live = self.agent(client, context=context, iterations=22)
-        partial = live.run(prompt)
-        self.assertTrue(partial.stop_reason.startswith("max_iterations"))
+        live.boundary_callback = lambda boundary: live.request_yield('checkpoint') if client.index == 22 else None
+        partial = live.run_until_yield(prompt)
+        self.assertEqual(partial.stop_reason, "waiting:checkpoint")
+        live.boundary_callback = None
         self.assertEqual(client.index, 22)
         checkpoint_messages = deepcopy(live.messages)
         checkpoint_state = asdict(context.state)
@@ -295,13 +297,12 @@ class NonTeamContextRegressions(unittest.TestCase):
         # either continuation can create a new, uniquely named archive.
         self.assertEqual(context.project_messages(checkpoint_messages),
                          restored_context.project_messages(checkpoint_messages))
-        live.config.max_iterations = 60
         before_continuation = len(client.calls)
         live_result = live.run()
         restored_result = restored.run()
         self.assertEqual(live_result.final_text, "long task complete")
         self.assertEqual(restored_result.final_text, live_result.final_text)
-        self.assertEqual(restored.messages, live.messages)
+        self.assertEqual(self._without_archive_location(restored.messages), self._without_archive_location(live.messages))
         self.assertEqual(live.messages[:len(checkpoint_messages)], checkpoint_messages)
         self.assertGreaterEqual(context.state.summary_revision, 5)
         self.assertEqual(restored_context.state.summary_revision, context.state.summary_revision)
@@ -330,8 +331,10 @@ class NonTeamContextRegressions(unittest.TestCase):
             # Fresh archive timestamps may differ after the shared checkpoint.
             self.assertEqual(self._without_archive_location(left["messages"]), self._without_archive_location(right["messages"]))
         for _, request in client.calls + resumed_client.calls:
-            limit = context.config.summary_input_max_chars if request["model"] == "summary" else context.config.max_request_chars
-            self.assertLessEqual(inspect_request(**request).request_chars, limit)
+            if request["model"] == "main":
+                self.assertLessEqual(inspect_request(**request).estimated_total_tokens, context.config.context_window_tokens)
+            else:
+                self.assertEqual(request["max_tokens"], 32768)
             if request["model"] == "main":
                 validate_tool_history(request["messages"])
                 self.assertIn({"role": "user", "content": prompt}, request["messages"])
@@ -342,6 +345,10 @@ class NonTeamContextRegressions(unittest.TestCase):
         for message in result:
             if isinstance(message["content"], str) and message["content"].startswith("<context_summary"):
                 message["content"] = re.sub(r"原始已接收历史：[^\n]*", "原始已接收历史：<archive>", message["content"])
+            elif isinstance(message['content'], list):
+                for block in message['content']:
+                    if block.get('type') == 'tool_result' and isinstance(block.get('content'), str):
+                        block['content'] = re.sub(r'"output_id":"[a-f0-9]{32}"', '"output_id":"<archive>"', block['content'])
         return result
 
 

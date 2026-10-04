@@ -33,20 +33,19 @@ class ArchiveSearchTests(unittest.TestCase):
         for _ in range(100):
             result = self.tool.run(str(self.path), query=query, **options, **cursor)
             found.extend((int(a), int(b)) for a, b in re.findall(r"line=(\d+) char_offset=(\d+)", result))
-            self.assertLessEqual(len(result), 16000)
-            if "search_complete=true" in result:
+            self.assertLessEqual(len(result.body), 120000)
+            if result.scan_complete:
                 return found
-            match = re.search(r"next_offset=(\d+) next_char_offset=(\d+)", result)
-            self.assertIsNotNone(match, result)
-            cursor = dict(offset=int(match[1]), char_offset=int(match[2]))
+            self.assertIsNotNone(result.next_cursor, result)
+            cursor = result.next_cursor
         self.fail("search cursor failed to advance")
 
     def test_literal_search_pages_and_readback_use_original_positions(self):
         self.write("noise\n甲.*乙.*丙\n.*last\n")
         self.assertEqual(self.search_all(".*", max_matches=1), [(2, 1), (2, 4), (3, 0)])
-        result = self.tool.run(str(self.path), offset=2, char_offset=4, char_limit=2)
+        result = self.tool.run(str(self.path), offset=2, char_offset=4, char_limit=4)
         self.assertIn("2\t.*", result)
-        self.assertIn("matches=0", self.tool.run(str(self.path), query="LAST"))
+        self.assertEqual(self.tool.run(str(self.path), query="LAST").returned_range['matches'], 0)
 
     def test_chunk_and_scan_boundaries_in_huge_unicode_lines_do_not_drop_matches(self):
         text = "甲" * 8190 + "NEEDLE" + "乙" * 8190 + "NEEDLE\nNEEDLE"
@@ -60,8 +59,8 @@ class ArchiveSearchTests(unittest.TestCase):
         self.assertEqual(self.search_all("aaa", max_matches=20, scan_limit_chars=1024),
                          [(1, i) for i in range(1025)])
         result = self.tool.run(str(self.path), query="absent", scan_limit_chars=1024)
-        self.assertIn("search_complete=false", result)
-        self.assertIn("scanned_chars=1024", result)
+        self.assertFalse(result.scan_complete)
+        self.assertEqual(result.returned_range['scanned_chars'], 1024)
 
     def test_search_obeys_private_scope_and_validates_inputs(self):
         self.write("own data")
@@ -96,31 +95,33 @@ class CacheOptimizationTests(unittest.TestCase):
                   + "\n[stderr]\ntest failed\n[exit code: 2]")
         tool = ToolUse(id="command_1", name="bash", input={"command": "test"})
         preview = manager.finalize_tool_results([tool], [output])[0]
-        self.assertLess(len(preview), 3000)
+        self.assertLessEqual(len(preview.body), 60000)
         self.assertIn("start", preview)
         self.assertIn("[exit code: 2]", preview)
-        self.assertNotIn("FAILED case_middle", preview)
-        self.assertEqual((manager.config.tool_output_dir / "command_1.txt").read_text(encoding="utf-8"), output)
+        self.assertIn("FAILED case_middle", preview)
+        self.assertEqual((manager.config.tool_output_dir / (preview.output_id + '.txt')).read_text(encoding="utf-8"), output)
         self.assertIn("FAILED case_middle", LoadToolOutputTool(manager.config.tool_output_dir).run(
-            "command_1.txt", query="FAILED"))
+            preview.output_id + '.txt', query="FAILED"))
         file_read = ToolUse(id="read_1", name="read_file", input={"path": "file.py"})
-        self.assertEqual(manager.finalize_tool_results([file_read], [output]), [output])
+        self.assertEqual(manager.finalize_tool_results([file_read], [output])[0].body, output)
         manager.config.command_output_max_chars = 0
-        self.assertEqual(manager.finalize_tool_results([tool], [output]), [output])
+        self.assertEqual(manager.finalize_tool_results([tool], [output])[0].body, output)
 
     def test_archive_failure_retains_existing_bounded_fallback(self):
         manager = self.manager()
-        with patch.object(manager, "_write_tool_output", side_effect=OSError("disk full")):
+        with patch("codeagent.context.output_archive.Path.mkdir", side_effect=OSError("disk full")):
             preview = manager.finalize_tool_results([ToolUse("x", "bash", {})], ["x" * 20000])[0]
-        self.assertIn("归档失败", preview)
-        self.assertLessEqual(len(preview), manager.config.command_output_max_chars)
+        self.assertEqual(preview.storage_error, 'OSError')
+        self.assertIsNone(preview.output_id)
+        self.assertFalse(preview.source_complete)
+        self.assertLessEqual(len(preview.body), 60000)
 
     def test_summary_reserves_configured_tokens_before_any_paid_call(self):
         manager = self.manager(summary_max_tokens=2048)
         request = manager._summary_params(rounds(4))
         budget = inspect_request(**request)
-        self.assertEqual(budget.output_reserve_tokens, 2048)
-        manager.config.summary_context_window_tokens = budget.estimated_prompt_tokens + 2047
+        self.assertEqual(budget.output_reserve_tokens, 32768)
+        manager.config.summary_context_window_tokens = budget.estimated_prompt_tokens + 32767
         client = SummaryClient()
         with self.assertRaises(RequestBudgetError):
             manager._model_summary([], client=client, params=request)
@@ -164,13 +165,13 @@ class CacheOptimizationTests(unittest.TestCase):
         self.assertEqual(restored.history_generation, 7)
 
     def test_compaction_creates_headroom_and_restored_prefix_survives_growth(self):
-        manager = self.manager(cache_policy="cache_friendly", context_window_tokens=25_000,
+        manager = self.manager(cache_policy="cache_friendly", context_window_tokens=24_000,
                                max_request_chars=50000, max_fold_rounds=3, tool_projection_enabled=False)
         history, client = rounds(20, size=2000), SummaryClient()
         original = deepcopy(history)
         sent = manager.prepare_before_model_call(history, client=client)
         budget = inspect_request(model="", system="", tools=[], messages=sent, max_tokens=0)
-        self.assertLessEqual(budget.estimated_prompt_tokens, 17500)
+        self.assertLessEqual(budget.estimated_prompt_tokens, 16800)
         self.assertGreaterEqual(len(client.calls), 2)
         self.assertLessEqual(len(client.calls), 3)
         self.assertEqual(history, original)
@@ -188,12 +189,13 @@ class CacheOptimizationTests(unittest.TestCase):
                                       "CONTEXT_COMMAND_OUTPUT_MAX_CHARS": "9000"}, clear=True), \
                 patch("codeagent.config._load_dotenv"):
             config = EnvironmentConfig.from_env().context_config
-        self.assertEqual(config.summary_max_tokens, 4096)
-        self.assertEqual(config.command_output_max_chars, 9000)
+        self.assertEqual(config.summary_max_tokens, 32768)
+        self.assertEqual(config.command_output_max_chars, 60000)
         for options in ({"summary_max_tokens": 0}, {"summary_max_tokens": True},
                         {"command_output_max_chars": -1}):
-            with self.assertRaises(ValueError):
-                ContextConfig(**options)
+            config = ContextConfig(**options)
+            self.assertEqual(config.summary_max_tokens, 32768)
+            self.assertEqual(config.command_output_max_chars, 60000)
 
 
 if __name__ == "__main__":

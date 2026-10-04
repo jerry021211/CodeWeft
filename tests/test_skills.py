@@ -35,13 +35,13 @@ class SkillLoaderTests(unittest.TestCase):
             )
 
             loader = SkillLoader(roots=[root])
+            loaded = loader.load("python-refactor")
 
         skills = loader.list_skills()
         self.assertEqual(len(skills), 1)
         self.assertEqual(skills[0].name, "python-refactor")
         self.assertIn("Refactor Python safely", loader.catalog_prompt())
         self.assertIn("Use for type hints", loader.catalog_prompt())
-        loaded = loader.load("python-refactor")
         self.assertIn("# Python Refactor", loaded.content)
 
     def test_loader_rejects_unknown_skill_name(self) -> None:
@@ -65,7 +65,7 @@ class SkillLoaderTests(unittest.TestCase):
             result = tool.run("code-review")
 
         self.assertEqual(tool.definition.name, LOAD_SKILL_TOOL_NAME)
-        self.assertIn("[skill loaded] code-review", result)
+        self.assertEqual(result.skill, "code-review")
         self.assertIn("# Review", result)
 
 

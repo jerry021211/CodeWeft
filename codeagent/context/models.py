@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from codeagent.messages import ToolUse
 from codeagent.tools.base import normalize_tool_output
+from codeagent.tools.output_limits import (READ_SOURCE_LINES, BATCH_CHARS, DEFAULT_BODY_CHARS,
+    BASH_BODY_CHARS, SUMMARY_CHARS, SUMMARY_OUTPUT_TOKENS, SUMMARY_TIMEOUT_SECONDS, COMPACT_RATIO)
+
+_LIMIT_DEPRECATION_WARNED = False
+
+
+def warn_retired_limits():
+    global _LIMIT_DEPRECATION_WARNED
+    if not _LIMIT_DEPRECATION_WARNED:
+        warnings.warn('Tool/summary output limits are fixed code constants; retired quota overrides are ignored.',
+                      DeprecationWarning, stacklevel=2)
+        _LIMIT_DEPRECATION_WARNED = True
 
 
 @dataclass(slots=True)
@@ -17,22 +30,21 @@ class ContextConfig:
     mode: str = "model"
     summarization_model: str = ""
     summarization_api_key: str | None = None
-    tool_result_budget_chars: int = 200_000
-    single_tool_output_max_chars: int = 80_000
+    tool_result_budget_chars: int = BATCH_CHARS
+    single_tool_output_max_chars: int = DEFAULT_BODY_CHARS
     # Legacy configuration only; automatic compaction uses the model token window.
     compact_threshold_chars: int = 300_000
-    summary_max_chars: int = 4_000
+    summary_max_chars: int = SUMMARY_CHARS
     # Independent from the final character limit; includes reasoning where the
     # provider counts it against completion tokens.
-    summary_max_tokens: int = 8_192
-    # Command output can be searched in the private archive. File reads and
-    # unknown tools retain the existing single-result budget. Zero opts out.
-    command_output_max_chars: int = 12_000
+    summary_max_tokens: int = SUMMARY_OUTPUT_TOKENS
+    # Deprecated compatibility fields; fixed code constants always take priority.
+    command_output_max_chars: int = BASH_BODY_CHARS
     read_reference_enabled: bool = True
     transcript_dir: Path = Path(".transcripts")
     tool_output_dir: Path = Path(".task_outputs/tool-results")
     reactive_retries: int = 1
-    persisted_preview_chars: int = 2_000
+    persisted_preview_chars: int = 0
     recency_messages: int = 12
     recency_rounds: int = 2
     min_fold_messages: int = 4
@@ -41,7 +53,7 @@ class ContextConfig:
     round_trigger_min_fold: int = 8
     max_fold_messages: int = 200
     max_fold_rounds: int = 12
-    summary_input_max_chars: int = 120_000
+    summary_input_max_chars: int = 0
     # Legacy SDK field, ignored: request admission uses the model token window.
     max_request_chars: int = 0
     context_window_tokens: int = 0
@@ -53,16 +65,27 @@ class ContextConfig:
     write_keep_rounds: int = 2
     tool_clear_min_chars: int = 8_000
     write_clear_min_chars: int = 8_000
-    summary_timeout_seconds: float = 45.0
-    summary_text_preview_chars: int = 4_000
-    summary_argument_preview_chars: int = 2_000
+    summary_timeout_seconds: float = SUMMARY_TIMEOUT_SECONDS
+    summary_text_preview_chars: int = 0
+    summary_argument_preview_chars: int = 0
     model_context_windows: dict[str, int] = field(default_factory=dict)
-    near_context_ratio: float = 0.8
+    near_context_ratio: float = COMPACT_RATIO
     cache_policy: str = "auto"
-    cache_soft_ratio: float = 0.8
+    cache_soft_ratio: float = COMPACT_RATIO
     cache_boundary_growth_ratio: float = 0.1
 
     def __post_init__(self) -> None:
+        # Compatibility keys are accepted but cannot override code-owned limits.
+        fixed = dict(tool_result_budget_chars=BATCH_CHARS, single_tool_output_max_chars=DEFAULT_BODY_CHARS,
+                     command_output_max_chars=BASH_BODY_CHARS, persisted_preview_chars=0,
+                     summary_max_chars=SUMMARY_CHARS, summary_max_tokens=SUMMARY_OUTPUT_TOKENS,
+                     summary_input_max_chars=0, summary_timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+                     summary_text_preview_chars=0, summary_argument_preview_chars=0,
+                     near_context_ratio=COMPACT_RATIO, cache_soft_ratio=COMPACT_RATIO)
+        for key, value in fixed.items():
+            if getattr(self, key) != value:
+                warn_retired_limits()
+            setattr(self, key, value)
         if type(self.read_reference_enabled) is not bool:
             raise ValueError("read_reference_enabled must be a boolean")
         if self.cache_policy not in {"auto", "legacy", "cache_friendly"}:
@@ -76,9 +99,8 @@ class ContextConfig:
         for name in (
             "tool_result_budget_chars", "single_tool_output_max_chars", "compact_threshold_chars",
             "summary_max_chars", "summary_max_tokens", "recency_messages", "recency_rounds", "min_fold_messages",
-            "message_trigger_min_fold", "round_trigger_min_fold", "max_fold_messages", "max_fold_rounds",
-            "summary_input_max_chars", "tool_clear_min_chars", "write_clear_min_chars",
-            "summary_text_preview_chars", "summary_argument_preview_chars",
+            "max_fold_messages", "max_fold_rounds",
+            "tool_clear_min_chars", "write_clear_min_chars",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -123,6 +145,8 @@ class RuntimeState:
     request_view: dict[str, Any] = field(default_factory=dict)
     # Session-local read receipts, never a promise of provider-side caching.
     read_references: dict[str, Any] = field(default_factory=dict)
+    tool_output_records: dict[str, Any] = field(default_factory=dict)
+    last_tool_batch: dict[str, Any] = field(default_factory=dict)
     # These fields are committed with canonical messages in the existing checkpoint.
     summary_text: str = ""
     compacted_message_count: int = 0
@@ -174,7 +198,7 @@ class RuntimeState:
                 tool_use.input.get("file_path") or tool_use.input.get("path") or ""
             )
             offset = tool_use.input.get("offset", 1)
-            limit = tool_use.input.get("limit", 2000)
+            limit = tool_use.input.get("limit", READ_SOURCE_LINES)
             key = f"{path}|{offset}|{limit}"
             record = self.files_read.setdefault(
                 key,
@@ -183,9 +207,7 @@ class RuntimeState:
             record["count"] += 1
 
         if tool_use.name == "load_skill":
-            name = str(tool_use.input.get("name", "")).strip()
-            if name:
-                _append_unique(self.loaded_skills, name)
+            # Delivery is committed only after complete-request admission.
             return
 
         if tool_use.name == "subagent":

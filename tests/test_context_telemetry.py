@@ -49,7 +49,7 @@ class ContextTelemetryTests(unittest.TestCase):
         )
         self.assertEqual(events[-1].payload["context_window_tokens"], 0)
 
-    def test_real_pressure_cleanup_reports_current_savings_without_accumulation(self):
+    def test_pressure_preserves_current_evidence_and_reports_no_artificial_savings(self):
         events = []
         manager = ContextManager(config=ContextConfig(
             mode="off", context_window_tokens=10_000, investigation_keep_rounds=0,
@@ -61,9 +61,9 @@ class ContextTelemetryTests(unittest.TestCase):
         original = deepcopy(messages)
         for _ in range(2):
             projected = manager.prepare_before_model_call(messages, event_emitter=EventEmitter(CallbackEventSink(events.append)))
-            self.assertLess(len(projected[-1]["content"][0]["content"]), len(messages[-1]["content"][0]["content"]))
-        self.assertEqual(events[-1].payload["projected_tool_results"], 1)
-        self.assertGreater(events[-1].payload["tool_result_chars_saved"], 0)
+            self.assertEqual(len(projected[-1]["content"][0]["content"]), len(messages[-1]["content"][0]["content"]))
+        self.assertEqual(events[-1].payload["projected_tool_results"], 0)
+        self.assertEqual(events[-1].payload["tool_result_chars_saved"], 0)
         self.assertEqual(events[-1].payload["tool_result_chars_saved"], events[-2].payload["tool_result_chars_saved"])
         self.assertEqual(messages, original)
 

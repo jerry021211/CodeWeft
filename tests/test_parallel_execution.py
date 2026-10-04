@@ -74,7 +74,7 @@ class ParallelTests(unittest.TestCase):
         validate_tool_history(result.messages)
         outputs = next(m["content"] for m in result.messages if isinstance(m["content"], list) and
                        m["content"] and m["content"][0].get("type") == "tool_result")
-        self.assertEqual([r["content"] for r in outputs], ["1", "2"])
+        self.assertEqual([r["content"].body for r in outputs], ["1", "2"])
         self.assertTrue(all(not r.get("is_error") for r in outputs))
 
     def test_exclusive_barrier_preserves_read_write_read_order(self):
@@ -340,7 +340,7 @@ class ParallelTests(unittest.TestCase):
             agent.run("read")
         results = agent.messages[-1]["content"]
         self.assertIn("cannot read", results[0]["content"])
-        self.assertEqual(results[1]["content"], "sibling saved")
+        self.assertEqual(results[1]["content"].body, "sibling saved")
         self.assertFalse(results[1].get("is_error"))
         validate_tool_history(agent.messages)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import io
 import subprocess
 import sys
 import tempfile
@@ -29,11 +30,12 @@ class FakeProcess:
 
     def start(self, args, **kwargs):
         self.args = args
-        kwargs["stdout"].write(self.stdout_text)
-        kwargs["stdout"].flush()
-        kwargs["stderr"].write(self.stderr_text)
-        kwargs["stderr"].flush()
+        self.stdout = io.BytesIO(self.stdout_text.encode())
+        self.stderr = io.BytesIO(self.stderr_text.encode())
         return self
+
+    def poll(self):
+        return self.returncode
 
     def wait(self, timeout):
         self.wait_timeouts.append(timeout)
@@ -129,7 +131,8 @@ class BashProcessGuardTests(unittest.TestCase):
             self.assertTrue(kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP)
         else:
             self.assertTrue(kwargs["start_new_session"])
-        self.assertEqual(result, "Error: quoted source\n\n[stderr]\nwarning")
+        self.assertIn("Error: quoted source", result.body)
+        self.assertIn("warning", result.body)
         self.assertEqual(result.status, "success")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.process_id, proc.pid)
@@ -154,16 +157,16 @@ class BashProcessGuardTests(unittest.TestCase):
                 self.assertFalse(result.state_known)
                 self.assertFalse(result.retryable)
                 self.assertFalse(result.retry_safe)
-                self.assertIn("[exit code: 1]", result)
+                self.assertEqual(result.exit_code, 1)
             self.assertEqual(start.call_count, 4)
 
     def test_no_output_and_truncation_are_preserved(self):
-        for raw, expected in [("", "(no output)"), ("a" * 16000, "truncated (16000 chars total)")]:
+        for raw in ("", "a" * 16000):
             proc = FakeProcess(stdout=raw)
             with patch("codeagent.tools.bash.subprocess.Popen", side_effect=proc.start):
                 result = BashTool().run("echo")
-            self.assertIn(expected, result)
-            self.assertLess(len(result), 10000)
+            self.assertEqual(result.body, raw)
+            self.assertLessEqual(len(result.body), 60000)
 
     def test_runner_duration_noise_does_not_change_failure_signature(self):
         for summary in ["Ran 1 test in {}s", "=== 1 failed in {}s ==="]:
@@ -182,7 +185,7 @@ class BashProcessGuardTests(unittest.TestCase):
             proc = FakeProcess(returncode=1, stdout="a" * 7000 + diagnostic + "b" * 10000)
             with patch("codeagent.tools.bash.subprocess.Popen", side_effect=proc.start):
                 result = BashTool().run("test")
-            self.assertNotIn(diagnostic, result)
+            self.assertIn(diagnostic, result.body)
             signatures.append(result.result_signature)
         self.assertEqual(len(set(signatures)), 3)
 
@@ -200,7 +203,7 @@ class BashProcessGuardTests(unittest.TestCase):
         proc = FakeProcess()
         result = self.timeout(tool, proc, stopped=False)
         self.assertEqual(result.outcome, "timeout")
-        self.assertIsNone(result.exit_code)
+        self.assertEqual(result.exit_code, proc.returncode)
         self.assertTrue(result.process_running)
         self.assertIn("副作用", result)
         with patch("codeagent.tools.bash.subprocess.Popen", side_effect=proc.start) as start:
@@ -338,7 +341,8 @@ class BashProcessGuardTests(unittest.TestCase):
         result = tool.run("import sys; print('ok'); print('details', file=sys.stderr); sys.exit(3)")
         self.assertEqual(result.exit_code, 3)
         self.assertEqual(result.outcome, "diagnostic")
-        self.assertIn("ok\n\n[stderr]\ndetails", result)
+        self.assertIn("ok", result.body)
+        self.assertIn("details", result.body)
         started = time.monotonic()
         result = tool.run("import time; time.sleep(10)", timeout=0.2)
         self.assertEqual(result.outcome, "timeout")

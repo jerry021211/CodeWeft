@@ -11,6 +11,9 @@ from functools import lru_cache
 from pathlib import Path
 
 from codeagent.tools.workspace import WorkspaceGuard
+from codeagent.tools.output_limits import SEARCH_RECORDS, SEARCH_BODY_CHARS
+from codeagent.tools.base import ToolOutput
+from codeagent.tools.output_pages import page
 
 # Used for non-Git directories only. Git repositories use their own ignore rules.
 _SKIP_DIRS = {
@@ -21,7 +24,7 @@ _SKIP_DIRS = {
 
 PAGE_PROPERTIES = {
     "offset": {"type": "integer", "description": "跳过的匹配数，默认 0；继续时使用结果中的 next_offset，其他参数保持一致。"},
-    "limit": {"type": "integer", "description": "每页结果数，1–1000。"},
+    "limit": {"type": "integer", "minimum": 1, "maximum": SEARCH_RECORDS, "default": SEARCH_RECORDS, "description": "每页结果数，1–1000。"},
     "include_ignored": {"type": "boolean", "description": "默认 false，遵守 Git 忽略规则；查旧副本、临时文件时设 true，仍不搜索 .git。"},
 }
 
@@ -29,7 +32,7 @@ PAGE_PROPERTIES = {
 def validate_page(offset: int, limit: int) -> None:
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise ValueError("offset must be a non-negative integer")
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SEARCH_RECORDS:
         raise ValueError("limit must be an integer between 1 and 1000")
 
 
@@ -121,6 +124,7 @@ def search_files(root: Path, guard: WorkspaceGuard | None, *, include_ignored: b
                 if name == ".git" or (not include_ignored and name in _SKIP_DIRS):
                     continue
                 if guard is not None and not guard.allows(child):
+                    result.warning('Permission-filtered directories were not scanned.')
                     continue
                 if child.is_symlink() or getattr(child, "is_junction", lambda: False)():
                     result.warning(f"Directory link not traversed: {child}")
@@ -135,6 +139,7 @@ def search_files(root: Path, guard: WorkspaceGuard | None, *, include_ignored: b
         if ".git" in candidate.relative_to(root).parts:
             continue
         if guard is not None and not guard.allows(candidate):
+            result.warning('Permission-filtered files were not scanned.')
             continue
         try:
             if not candidate.is_file():
@@ -158,3 +163,28 @@ def page_footer(*, offset: int, count: int, has_more: bool, complete: bool) -> s
         f"Search: returned={count}, has_more={str(has_more).lower()}{next_page}, "
         f"scan_complete={str(complete).lower()}."
     )
+
+
+def records_page(records, *, offset, limit, more=False, complete=True, notes=(), allowance=SEARCH_BODY_CHARS):
+    selected, used = [], 0
+    for record in records[:limit]:
+        cost = len(record) + bool(selected)
+        if cost + used > allowance:
+            break
+        selected.append(record)
+        used += cost
+    has_more = more or len(selected) < len(records)
+    oversized = bool(records and not selected and len(records[0]) > SEARCH_BODY_CHARS)
+    result = page(ToolOutput('', status='error' if oversized else 'success'), '\n'.join(selected),
+                  returned_range={'offset': offset, 'count': len(selected)},
+                  returned_count=len(selected), has_more=has_more,
+                  next_cursor={'offset': offset + len(selected)} if has_more else None,
+                  next_offset=offset + len(selected) if has_more else None,
+                  scan_complete=complete, source_complete=complete,
+                  truncated_reason='record_too_large' if oversized else 'page_limit' if has_more else None,
+                  note='Live search, one record per path or matching source line. Keep query/scope/options unchanged; restart after file changes.',
+                  coverage='; '.join(notes)[:500])
+    result.page_renderer = lambda size: records_page(records, offset=offset, limit=limit, more=more,
+                                                     complete=complete, notes=notes, allowance=size)
+    result.source_text = '\n'.join(records)
+    return result

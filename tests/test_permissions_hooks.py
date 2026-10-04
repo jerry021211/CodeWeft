@@ -169,7 +169,7 @@ class HookedAgentTests(unittest.TestCase):
             for block in message["content"]
             if block.get("type") == "tool_result" and block.get("tool_use_id") == "toolu_1"
         ]
-        self.assertEqual(blocked_results, ["blocked by hook"])
+        self.assertEqual([result.body for result in blocked_results], ["blocked by hook"])
         self.assertEqual(result.final_text, "done")
 
     def test_lifecycle_hooks_fire(self) -> None:

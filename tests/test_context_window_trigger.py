@@ -55,15 +55,15 @@ class WindowTriggerTests(unittest.TestCase):
         for chars in (1, 2_000_000):
             legacy = replace(budget, request_chars=chars, estimated_prompt_tokens=599, estimated_total_tokens=799)
             self.assertFalse(manager._under_pressure(legacy, 1000))
-            self.assertTrue(manager._under_pressure(replace(legacy, estimated_total_tokens=800), 1000))
-            friendly = replace(legacy, estimated_prompt_tokens=639, estimated_total_tokens=839)
+            self.assertTrue(manager._under_pressure(replace(legacy, estimated_prompt_tokens=720, estimated_total_tokens=920), 1000))
+            friendly = replace(legacy, estimated_prompt_tokens=719, estimated_total_tokens=839)
             self.assertFalse(manager._under_pressure(friendly, 1000, cache_friendly=True))
-            self.assertTrue(manager._under_pressure(replace(friendly, estimated_prompt_tokens=640), 1000, cache_friendly=True))
+            self.assertTrue(manager._under_pressure(replace(friendly, estimated_prompt_tokens=720), 1000, cache_friendly=True))
             self.assertFalse(manager._under_pressure(friendly, 0, cache_friendly=True))
 
     def test_window_pressure_still_compacts_real_history(self):
         for policy in ("legacy", "cache_friendly"):
-            manager = self.manager(cache_policy=policy, context_window_tokens=25_000,
+            manager = self.manager(cache_policy=policy, context_window_tokens=23_000,
                                    compact_threshold_chars=600_000, tool_projection_enabled=False)
             history, client = rounds(20, size=2000), SummaryClient()
             original = deepcopy(history)
@@ -72,7 +72,7 @@ class WindowTriggerTests(unittest.TestCase):
             self.assertGreater(manager.state.summary_revision, 0)
             self.assertEqual(history, original)
             budget = inspect_request(model="", system="", messages=sent, tools=[], max_tokens=0)
-            self.assertFalse(manager._under_pressure(budget, 25_000, cache_friendly=policy == "cache_friendly"))
+            self.assertFalse(manager._under_pressure(budget, 23_000, cache_friendly=policy == "cache_friendly"))
 
     def test_model_discovery_unknown_overrides_configured_window(self):
         manager = self.manager(context_window_tokens=100, compact_threshold_chars=1)

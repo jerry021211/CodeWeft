@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from codeagent.skills import SkillLoader
-from codeagent.tools.base import ToolDefinition
+from codeagent.tools.base import ToolDefinition, ToolOutput
+from codeagent.tools.output_pages import page
 
 LOAD_SKILL_TOOL_NAME = "load_skill"
 
@@ -41,7 +42,11 @@ class LoadSkillTool:
         except KeyError:
             available = ", ".join(skill.name for skill in self.loader.list_skills())
             if not available:
-                return f"Skill not found: {name}. No skills are available."
-            return f"Skill not found: {name}. Available skills: {available}"
+                return ToolOutput(f"Skill not found: {name}. No skills are available.", status='error', outcome='skill_load_failed')
+            return ToolOutput(f"Skill not found: {name}. Available skills: {available}", status='error', outcome='skill_load_failed')
+        except (OSError, ValueError) as exc:
+            return ToolOutput(f'Error: {exc}', status='error', outcome='skill_load_failed')
 
-        return f"[skill loaded] {loaded.metadata.name}\n\n{loaded.content}"
+        result = page(ToolOutput(''), loaded.content, skill=loaded.metadata.name)
+        result.page_renderer = lambda size: result
+        return result

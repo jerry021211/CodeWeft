@@ -65,7 +65,7 @@ class SummaryPromptTests(unittest.TestCase):
         self.assertNotIn(SUMMARIZATION_SYSTEM_PROMPT, text)
         self.assertNotIn("<context_summary", text)
         self.assertEqual(text.count("<conversation>"), 1)
-        self.assertIn("最多 4000 字符", text)
+        self.assertIn("最多 16000 字符", text)
         for variable in ("{conversation}", "{summary_format}", "{previous_summary}", "{supporting_data}"):
             self.assertNotIn(variable, text)
         for section in ("附带状态材料", "<task-state>", "<runtime-state>", "<tool-artifacts>", "# 本批涉及的文件"):
@@ -107,10 +107,7 @@ class SummaryPromptTests(unittest.TestCase):
                     source = conversation(request)
                     self.assertEqual(source[1]["content"][0]["input"]["file_path"], "file-0.py")
                     self.assertEqual(source[2], original[2])
-                    if bounded:
-                        self.assertTrue(source[0]["content"]["truncated"])
-                    else:
-                        self.assertEqual(source, original)
+                    self.assertEqual(source, original)  # Deprecated bounded flag cannot lose source text.
                     if previous:
                         self.assertEqual(text.count(previous), 1)
                     self.assertEqual(asdict(self.manager.state), before)

@@ -66,7 +66,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         data = json.loads(result)
         self.assertEqual(len(data["results"]), 2)
-        self.assertEqual(len(data["results"][0]["content"]), 3000)
+        self.assertEqual(len(data["results"][0]["content"]), 8000)
         request = opener.open.call_args.args[0]
         self.assertEqual(request.full_url, "https://api.tavily.com/search")
         self.assertEqual(request.get_header("Authorization"), "Bearer test-secret")

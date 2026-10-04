@@ -131,7 +131,7 @@ class ToolEvidenceTests(unittest.TestCase):
                    side_effect=FakeProcess(returncode=2, stdout="All tests passed").start):
             result = agent._execute_tools([ToolUse(id="bad", name="bash", input={"command": "pytest"})])[0]
         self.assertTrue(result["is_error"])
-        self.assertIn("[exit code: 2]", result["content"])
+        self.assertEqual(result["content"].exit_code, 2)
         failures = [x for x in self.events if x.type == "tool.failed"]
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0].payload["exit_code"], 2)
@@ -149,7 +149,7 @@ class ToolEvidenceTests(unittest.TestCase):
         self.assertIsInstance(output, str)
 
     def test_timeout_is_error_without_invented_exit_code(self):
-        with patch("codeagent.tools.bash.subprocess.Popen", side_effect=FakeProcess().start), \
+        with patch("codeagent.tools.bash.subprocess.Popen", side_effect=FakeProcess(returncode=None).start), \
              patch("codeagent.tools.bash.time.monotonic", side_effect=[0, 2, 2]), \
              patch.object(BashTool, "_stop_process", return_value=True):
             output = BashTool().run("echo", timeout=1)
@@ -230,14 +230,14 @@ class ContinuityTests(unittest.TestCase):
                 transcript_dir=root/"transcripts", tool_output_dir=root/"outputs"))
             messages = [{"role": "user" if i % 2 == 0 else "assistant", "content": "保留目标"}
                         for i in range(28)]
-            client = Client([done("摘要" * 100), done("摘要" * 100)])
-            with self.assertRaisesRegex(ContextCompactionError, "超过预算"):
+            client = Client([done("摘要" * 8001), done("摘要" * 8001)])
+            with self.assertRaisesRegex(ContextCompactionError, "exceeds 16000 characters"):
                 manager.compact_history(messages, reason="test", client=client)
             self.assertEqual(len(messages), 28)
             self.assertTrue(all(m["content"] == "保留目标" for m in messages))
             self.assertEqual(manager.state.history_generation, 0)
             self.assertFalse((root/"transcripts").exists())
-            self.assertIn("最多 30 字符", client.calls[0]["messages"][0]["content"])
+            self.assertIn("最多 16000 字符", client.calls[0]["messages"][0]["content"])
 
     def test_memory_budget_keeps_whole_records_and_selection_uses_config(self):
         with tempfile.TemporaryDirectory() as directory:

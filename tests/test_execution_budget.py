@@ -208,7 +208,7 @@ class ExecutionBudgetTests(unittest.TestCase):
         agent._loop_guard.budget.clock = lambda: now[0]
         result = agent.run("start")
         self.assertEqual(result.stop_reason, "budget_exceeded:active_time")
-        self.assertEqual(agent.messages[-1]["content"][0]["content"], "saved")
+        self.assertTrue(agent.messages[-1]["content"][0]["content"].endswith("saved"))
         self.assertIn("a.py", result.final_text)
         self.assertEqual(len(agent.client.calls), 1)
 

@@ -47,13 +47,13 @@ class ContextHistoryToolTests(unittest.TestCase):
         middle = self.tool.run(path.name, message_offset=2, message_limit=1)
         self.assertIn("message=2", middle)
         self.assertIn('"id": "write-1"', middle)
-        self.assertIn("next_message_offset=3", middle)
+        self.assertEqual(middle.next_cursor, {"message_offset": 3, "char_offset": 0})
         final = self.tool.run(str(path), message_offset=3, message_limit=1)
         self.assertIn('"is_error": true', final)
         self.assertIn("失败", final)
         self.assertNotIn("more_messages=true", final)
         self.assertEqual(path.read_bytes(), original)
-        self.assertIn("no messages", self.tool.run(str(path), message_offset=4))
+        self.assertEqual(self.tool.run(str(path), message_offset=4).body, "")
 
     def test_long_jsonl_records_offer_exact_unicode_character_pages(self) -> None:
         line = json.dumps({"role": "user", "content": "甲😀乙" * 20_000 + "TAIL"}, ensure_ascii=False)
@@ -62,19 +62,18 @@ class ContextHistoryToolTests(unittest.TestCase):
         for offset in (0, 8189, 20_003, len(line) - 4, len(line) + 5):
             with self.subTest(offset=offset):
                 output = self.tool.run(str(path), message_limit=1, char_offset=offset, char_limit=97)
-                header, fragment = output.split("\n", 1)
+                header, fragment = output.body.split("\n", 1)
                 self.assertEqual(fragment, line[offset:offset + 97])
-                self.assertIn(f"total_chars={len(line)}", header)
                 if offset + 97 < len(line):
-                    self.assertIn(f"next_char_offset={offset + 97}", header)
+                    self.assertEqual(output.next_cursor["char_offset"], offset + 97)
 
     def test_entire_response_is_bounded_for_many_huge_records(self) -> None:
         path = self.write_history([{"content": "x" * 40_000} for _ in range(12)])
         output = self.tool.run(str(path), message_limit=10, char_limit=4000)
         self.assertLessEqual(len(output), 16_000)
-        for index in range(1, 11):
-            self.assertIn(f"message={index} ", output)
-        self.assertIn("next_message_offset=11", output)
+        self.assertIn("message=1 ", output.body)
+        self.assertNotIn("message=2 ", output.body)
+        self.assertEqual(output.next_cursor, {"message_offset": 1, "char_offset": 4000})
 
     def test_record_reader_never_requests_unbounded_lines(self) -> None:
         class BoundedReader(io.StringIO):
@@ -123,7 +122,7 @@ class ContextHistoryToolTests(unittest.TestCase):
                 self.assertIn("symbolic links", self.tool.run(str(path)))
 
     def test_invalid_ranges_fail_without_reading(self) -> None:
-        for key, value in (("message_offset", 0), ("message_limit", 11), ("char_offset", -1), ("char_limit", 0), ("char_limit", 4001), ("char_limit", True), ("message_offset", "1")):
+        for key, value in (("message_offset", 0), ("message_limit", 11), ("char_offset", -1), ("char_limit", 0), ("char_limit", 24001), ("char_limit", True), ("message_offset", "1")):
             with self.subTest(key=key, value=value):
                 self.assertTrue(self.tool.run("history.jsonl", **{key: value}).startswith("Error:"))
 

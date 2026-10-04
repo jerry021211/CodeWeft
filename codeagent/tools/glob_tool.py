@@ -7,8 +7,9 @@ from pathlib import Path
 
 from codeagent.tools.base import ToolDefinition
 from codeagent.tools.search_files import (
-    PAGE_PROPERTIES, matches_path, page_footer, search_files, validate_page, validate_pattern,
+    PAGE_PROPERTIES, matches_path, records_page, search_files, validate_page, validate_pattern,
 )
+from codeagent.tools.output_limits import SEARCH_RECORDS
 from codeagent.tools.workspace import WorkspaceGuard
 
 
@@ -21,7 +22,7 @@ class GlobTool:
         effect="read", reentrant=True,
         description=(
             "按 glob 模式定位路径，支持 ** 递归匹配，例如 **/*.py。默认遵守 Git 忽略规则（含未提交的新文件）。"
-            "每页默认 100 条，按路径稳定排序；has_more 时用 next_offset 继续，文件变化后从 offset=0 重搜。"
+            "每页默认 1000 条、正文最多32000字符，按路径稳定排序；has_more 时用 next_offset 继续，文件变化后从 offset=0 重搜。"
             "查旧副本设 include_ignored=true。scan_complete=false 表示有目录未搜到。未知路径时先定位，避免连续猜测。"
         ),
         input_schema={
@@ -44,7 +45,7 @@ class GlobTool:
 
     def run(
         self, pattern: str, path: str = ".", offset: int = 0,
-        limit: int = 100, include_ignored: bool = False,
+        limit: int = SEARCH_RECORDS, include_ignored: bool = False,
     ) -> str:
         try:
             validate_page(offset, limit)
@@ -68,12 +69,7 @@ class GlobTool:
             )
             total = len(hits)
             shown = hits[offset:offset + limit]
-            output = [str(hit) for hit in shown] or ["No files matched on this page."]
-            output.append(page_footer(
-                offset=offset, count=len(shown), has_more=total > offset + len(shown),
-                complete=not inventory.incomplete,
-            ))
-            output.extend(inventory.notes)
-            return "\n".join(output)
+            return records_page([str(hit) for hit in shown], offset=offset, limit=limit,
+                                more=total > offset + len(shown), complete=not inventory.incomplete, notes=inventory.notes)
         except Exception as exc:
             return f"Error: {exc}"

@@ -1,6 +1,7 @@
 """Read-only multi-language code retrieval tool."""
 from codeagent.code_search.service import CodeSearch
 from codeagent.tools.base import ToolDefinition, parameter_error
+from codeagent.tools.output_limits import CODE_SEARCH_RESULTS
 
 
 class SearchCodeTool:
@@ -15,7 +16,7 @@ class SearchCodeTool:
         input_schema={"type": "object", "properties": {
             "query": {"type": "string", "description": "需求、行为描述或精确符号名"},
             "path": {"type": "string", "description": "工作区内目录或文件，默认 ."},
-            "top_k": {"type": "integer", "description": "返回不同代码实体数，默认5，1至10"},
+            "top_k": {"type": "integer", "minimum": 1, "maximum": CODE_SEARCH_RESULTS, "default": CODE_SEARCH_RESULTS, "description": "返回不同代码实体数，默认20，1至20"},
             "keywords": {"type": "array", "items": {"type": "string"}, "description": "可选，至多三组简短搜索词；原始 query 始终保留"},
         }, "required": ["query"]}, effect="read", reentrant=True)
 
@@ -43,7 +44,7 @@ class SearchCodeTool:
     def bind_runtime(self, *, cancellation_check=None, remaining_seconds=None):
         self.service.bind_runtime(cancellation_check=cancellation_check, remaining_seconds=remaining_seconds)
 
-    def run(self, query, path=".", top_k=5, keywords=None):
+    def run(self, query, path=".", top_k=CODE_SEARCH_RESULTS, keywords=None):
         try:
             return self.service.search(query, path, top_k, keywords)
         except ValueError as exc:

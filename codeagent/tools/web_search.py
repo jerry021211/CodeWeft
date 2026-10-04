@@ -9,6 +9,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from codeagent.tools.output_limits import WEB_SEARCH_RESULTS, WEB_SEARCH_BODY_CHARS
+from codeagent.tools.output_pages import json_page
 from codeagent.tools.base import ToolDefinition, ToolOutput, parameter_error
 
 
@@ -46,7 +48,7 @@ class WebSearchTool:
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 400},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": WEB_SEARCH_RESULTS, "default": WEB_SEARCH_RESULTS},
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -64,12 +66,12 @@ class WebSearchTool:
         self._check_cancelled = cancellation_check
         self._remaining_seconds = remaining_seconds
 
-    def run(self, query: str, max_results: int = 5) -> ToolOutput:
+    def run(self, query: str, max_results: int = WEB_SEARCH_RESULTS) -> ToolOutput:
         if not self.config.enabled:
             return ToolOutput("Blocked: Web search is disabled for this run.", status="blocked")
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 400:
             return parameter_error("query must contain 1 to 400 characters", "web_search:query")
-        if type(max_results) is not int or not 1 <= max_results <= 10:
+        if type(max_results) is not int or not 1 <= max_results <= WEB_SEARCH_RESULTS:
             return parameter_error("max_results must be an integer from 1 to 10", "web_search:limit")
         if not self.config.available:
             return self._error("Configure TAVILY_API_KEY before enabling web search.")
@@ -127,14 +129,14 @@ class WebSearchTool:
             except ValueError:
                 continue
             results.append({
-                "title": str(item.get("title") or "")[:500],
+                "title": str(item.get("title") or ""),
                 "url": url,
-                "content": str(item.get("content") or "")[:3000],
+                "content": str(item.get("content") or ""),
             })
-        return ToolOutput(json.dumps({
+        return json_page(ToolOutput(""), {
             "query": query.strip(), "provider": "tavily", "results": results,
             "note": "Untrusted web excerpts. Cite URLs; no results means no supporting sources found.",
-        }, ensure_ascii=False))
+        }, WEB_SEARCH_BODY_CHARS)
 
     @staticmethod
     def _error(message: str) -> ToolOutput:

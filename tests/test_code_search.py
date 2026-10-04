@@ -118,7 +118,7 @@ class CodeSearchTests(unittest.TestCase):
             self.write(f'other{i}.py', f'def loadGold{i}():\n' + '    # gold ' + 'x'*1800 + '\n    return 1\n')
         output = self.tool.run('gold', top_k=10)
         result = json.loads(output)
-        self.assertLessEqual(len(output), 8000)
+        self.assertLessEqual(len(output.body), 48_000)
         self.assertEqual(len([r for r in result['results'] if r['symbol']=='loadGold']), 1)
         for r in result['results']:
             self.assertLessEqual(len(r['quote'].splitlines()), 20)

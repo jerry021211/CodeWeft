@@ -76,7 +76,9 @@ class ContextGradingTests(unittest.TestCase):
             self.assertEqual(result["execution"]["stop_reason"], "budget_exceeded:evaluation_api_calls")
             self.assertEqual(result["metrics"]["api_requests"], 1)
             self.assertEqual(result["metrics"]["locally_blocked_calls"], 1)
-            self.assertIn("没有生成 answer.json", (root / "report.md").read_text(encoding="utf-8"))
+            # The first request can save the answer before the next call is blocked.
+            self.assertFalse(result["task_success"])
+            self.assertIn(result["failure_reasons"][0], (root / "report.md").read_text(encoding="utf-8"))
 
     def test_regrade_corrects_old_scores_without_mutating_sealed_evidence(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -115,6 +115,14 @@ class EnvironmentConfig:
     @classmethod
     def from_env(cls, *, allow_unconfigured: bool = False) -> "EnvironmentConfig":
         _load_dotenv()
+        retired = ('CONTEXT_TOOL_RESULT_BUDGET_CHARS', 'CONTEXT_SINGLE_TOOL_OUTPUT_MAX_CHARS',
+                   'CONTEXT_COMMAND_OUTPUT_MAX_CHARS', 'CONTEXT_SUMMARY_MAX_CHARS',
+                   'CONTEXT_SUMMARY_MAX_TOKENS', 'CONTEXT_SUMMARY_INPUT_MAX_CHARS',
+                   'CONTEXT_SUMMARY_TIMEOUT_SECONDS', 'CONTEXT_MESSAGE_TRIGGER_MIN_FOLD',
+                   'CONTEXT_ROUND_TRIGGER_MIN_FOLD', 'CONTEXT_CACHE_SOFT_RATIO')
+        if any(key in os.environ for key in retired):
+            from codeagent.context.models import warn_retired_limits
+            warn_retired_limits()
         from codeagent.model_settings import read_settings, apply_settings
         saved = read_settings(default_runtime_data_dir())
         chat = saved["services"]["chat"] if saved else None
@@ -164,18 +172,6 @@ class EnvironmentConfig:
                 mode=context_mode,
                 summarization_model=summarization_model,
                 summarization_api_key=_optional_env("SUMMARIZATION_API_KEY"),
-                tool_result_budget_chars=_int_env(
-                    "CONTEXT_TOOL_RESULT_BUDGET_CHARS", 200_000
-                ),
-                single_tool_output_max_chars=_int_env(
-                    "CONTEXT_SINGLE_TOOL_OUTPUT_MAX_CHARS", 80_000
-                ),
-                compact_threshold_chars=_int_env(
-                    "CONTEXT_COMPACT_THRESHOLD_CHARS", 300_000
-                ),
-                summary_max_chars=_int_env("CONTEXT_SUMMARY_MAX_CHARS", 4_000),
-                summary_max_tokens=_int_env("CONTEXT_SUMMARY_MAX_TOKENS", 8_192),
-                command_output_max_chars=_int_env("CONTEXT_COMMAND_OUTPUT_MAX_CHARS", 12_000),
                 read_reference_enabled=_bool_env("CONTEXT_READ_REFERENCE_ENABLED", True),
                 transcript_dir=Path(
                     os.getenv("CONTEXT_TRANSCRIPT_DIR", ".transcripts")
@@ -190,28 +186,19 @@ class EnvironmentConfig:
                 recency_messages=_int_env("CONTEXT_RECENCY_MESSAGES", 12),
                 recency_rounds=_int_env("CONTEXT_RECENCY_ROUNDS", 2),
                 min_fold_messages=_int_env("CONTEXT_MIN_FOLD_MESSAGES", 4),
-                message_trigger_min_fold=_int_env("CONTEXT_MESSAGE_TRIGGER_MIN_FOLD", 16),
-                round_trigger_min_fold=_int_env("CONTEXT_ROUND_TRIGGER_MIN_FOLD", 8),
                 max_fold_messages=_int_env("CONTEXT_MAX_FOLD_MESSAGES", 200),
                 max_fold_rounds=_int_env("CONTEXT_MAX_FOLD_ROUNDS", 12),
-                summary_input_max_chars=_int_env("CONTEXT_SUMMARY_INPUT_MAX_CHARS", 120_000),
                 context_window_tokens=_int_env("CONTEXT_WINDOW_TOKENS", 0),
                 summary_context_window_tokens=_int_env("CONTEXT_SUMMARY_WINDOW_TOKENS", 0),
                 failure_cooldown_seconds=_float_env("CONTEXT_FAILURE_COOLDOWN_SECONDS", 90.0),
-                summary_timeout_seconds=_float_env("CONTEXT_SUMMARY_TIMEOUT_SECONDS", 45.0),
                 tool_projection_enabled=_bool_env("CONTEXT_TOOL_PROJECTION_ENABLED", True),
                 investigation_keep_rounds=_int_env("CONTEXT_INVESTIGATION_KEEP_ROUNDS", 2),
                 command_keep_rounds=_int_env("CONTEXT_COMMAND_KEEP_ROUNDS", 1),
                 write_keep_rounds=_int_env("CONTEXT_WRITE_KEEP_ROUNDS", 2),
                 tool_clear_min_chars=_int_env("CONTEXT_TOOL_CLEAR_MIN_CHARS", 8_000),
                 write_clear_min_chars=_int_env("CONTEXT_WRITE_CLEAR_MIN_CHARS", 8_000),
-                summary_text_preview_chars=_int_env("CONTEXT_SUMMARY_TEXT_PREVIEW_CHARS", 4_000),
-                summary_argument_preview_chars=_int_env("CONTEXT_SUMMARY_ARGUMENT_PREVIEW_CHARS", 2_000),
                 model_context_windows=_model_windows_env(),
-                near_context_ratio=_float_env("CONTEXT_NEAR_CONTEXT_RATIO", 0.8),
                 cache_policy=os.getenv("CONTEXT_CACHE_POLICY", "auto"),
-                cache_soft_ratio=_float_env("CONTEXT_CACHE_SOFT_RATIO", 0.8),
-                cache_boundary_growth_ratio=_float_env("CONTEXT_CACHE_BOUNDARY_GROWTH_RATIO", 0.1),
             ),
             memory_config=MemoryConfig(
                 enabled=_bool_env("ENABLE_MEMORY", True),

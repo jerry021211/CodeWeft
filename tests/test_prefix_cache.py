@@ -248,7 +248,7 @@ class PrefixCacheTests(unittest.TestCase):
             self.send(agent)
             before = deepcopy(agent.messages)
             agent.messages += rounds(8, start=1, size=3000)[1:]
-            config.near_context_ratio = 0.01
+            agent.client.get_model_window = lambda model: {"context_window_tokens": 1_000_000 if model == "summary" else 45_000, "context_window_source": "test"}
             config.cache_policy = "legacy"
             self.send(agent)
             self.assertGreater(agent.context.state.summary_revision, 0)
@@ -269,7 +269,7 @@ class PrefixCacheTests(unittest.TestCase):
         self.send(agent)
         before = deepcopy(agent.messages)
         agent.messages += rounds(8, start=1, size=3000)[1:]
-        config.near_context_ratio = 0.01
+        agent.client.get_model_window = lambda model: {"context_window_tokens": 1_000_000 if model == "summary" else 45_000, "context_window_source": "test"}
         config.cache_policy = "legacy"
         self.send(agent)
         self.assertGreater(agent.context.state.summary_revision, 0)
@@ -333,13 +333,14 @@ class StableCleanupTests(unittest.TestCase):
         history = rounds(8, name="grep", size=5500)
         original = deepcopy(history)
         sent = manager.prepare_before_model_call(history)
-        self.assertIn(TOOL_VIEW_MARKER, str(sent))
+        self.assertEqual(sent, history)
         self.assertEqual(history, original)
         boundary = deepcopy(manager.state.request_view)
         history += rounds(1, start=8, name="grep", size=2100)[1:]
         next_sent = manager.prepare_before_model_call(history)
         self.assertEqual(next_sent[:len(sent)], sent)
-        self.assertEqual(boundary, manager.state.request_view)
+        self.assertFalse(boundary.get('patches'))
+        self.assertFalse(manager.state.request_view.get('patches'))
         restored = ContextManager(config=manager.config,
             state=_restore_runtime_state(json.loads(json.dumps(serialize_runtime_state(manager.state)))))
         self.assertEqual(restored.prepare_before_model_call(history), next_sent)
@@ -353,7 +354,7 @@ class StableCleanupTests(unittest.TestCase):
         manager.prepare_before_model_call(history, event_emitter=emitter)
         history += rounds(1, start=8, name="grep", size=2100)[1:]
         manager.prepare_before_model_call(history, event_emitter=emitter)
-        self.assertEqual([e.payload["cleanup_boundary"] for e in events if e.type == "context.request_projected"], [True, False])
+        self.assertEqual([e.payload["cleanup_boundary"] for e in events if e.type == "context.request_projected"], [False, False])
         history += rounds(1, start=9, name="grep", size=6000)[1:]
         manager.prepare_before_model_call(history, event_emitter=emitter)
         self.assertTrue(events[-1].payload["cleanup_boundary"])
@@ -377,12 +378,13 @@ class StableCleanupTests(unittest.TestCase):
     def test_projection_config_and_source_changes_invalidate_snapshot(self):
         manager = self.manager()
         history = rounds(8, name="grep", size=5500)
-        manager.prepare_before_model_call(history)
+        from codeagent.context.projection import build_tool_projection
+        manager._remember_tool_view(history, build_tool_projection(history, min_chars=2000))
         manager.config.tool_projection_enabled = False
         self.assertEqual(manager.project_messages(history), history)
         self.assertIn("configuration", manager.consume_generation_reason())
         manager.config.tool_projection_enabled = True
-        manager.prepare_before_model_call(history)
+        manager._remember_tool_view(history, build_tool_projection(history, min_chars=2000))
         history[2]["content"][0]["content"] = "new evidence"
         self.assertEqual(manager.project_messages(history), history)
         self.assertEqual(manager.consume_generation_reason(), "request_view_history_changed")

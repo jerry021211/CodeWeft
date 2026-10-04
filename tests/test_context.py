@@ -49,9 +49,9 @@ class ContextManagerTests(unittest.TestCase):
                 tool_uses, ["a" * 900, "b" * 450]
             )
 
-            self.assertLessEqual(sum(map(len, finalized)), 700)
-            self.assertTrue((output_dir / "toolu_1.txt").exists())
-            self.assertIn("只有在当前预览缺少必要信息时", finalized[0])
+            self.assertLessEqual(sum(map(len, finalized)), 300000)
+            self.assertTrue((output_dir / (finalized[0].output_id + ".txt")).exists())
+            self.assertEqual(finalized[0].body, "a" * 900)
             self.assertNotIn("Re-run the tool", "\n".join(finalized))
 
     def test_history_is_unchanged_below_threshold(self) -> None:

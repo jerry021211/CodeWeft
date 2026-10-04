@@ -244,6 +244,9 @@ def _successful_write(name: str, arguments: dict[str, Any], result: Any, text: s
 
 
 def _complete_read(arguments: dict[str, Any], result: Any, text: str) -> bool:
+    # A budgeted source page must retain its exact range and continuation.
+    if text.startswith('[read_file page] '):
+        return True
     if _field(result, "is_complete_view") is True:
         return True
     offset, limit = arguments.get("offset", 1), arguments.get("limit", 2000)

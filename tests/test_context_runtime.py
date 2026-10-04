@@ -104,7 +104,7 @@ class ContextRuntimeTests(unittest.TestCase):
             recovery_runtime=RecoveryRuntime(RecoveryConfig(sleep_enabled=False, max_retries=0)),
         )
 
-    def test_production_pressure_trigger_keeps_canonical_and_sends_summary_recent_rounds(self):
+    def test_compacted_request_keeps_canonical_and_sends_summary_recent_rounds(self):
         history = _rounds(10, parallel=True)
         original = deepcopy(history)
         manager = self.manager()
@@ -112,6 +112,7 @@ class ContextRuntimeTests(unittest.TestCase):
         client = ScriptedContextClient([_text()])
         agent = self.agent(client, manager=manager, messages=history)
 
+        manager.force_compact(history, client=client)
         result = agent.run()
 
         self.assertEqual(result.final_text, "done")
@@ -155,7 +156,7 @@ class ContextRuntimeTests(unittest.TestCase):
         self.assertEqual(agent.messages[:len(first_turn)], first_turn)
         validate_tool_history(agent.messages)
 
-    def test_real_tool_loop_clears_only_sent_old_outputs(self):
+    def test_real_tool_loop_preserves_bounded_output_pages(self):
         tools = ToolRegistry()
         outputs = {str(index): f"result-{index}:" + str(index) * 3000 for index in range(3)}
         tools.register_handler(
@@ -166,8 +167,8 @@ class ContextRuntimeTests(unittest.TestCase):
         agent = self.agent(client, manager=manager, tools=tools)
         agent.run("perform the three searches")
         sent = client.main_calls[-1]["messages"]
-        self.assertIn(TOOL_VIEW_MARKER, str(sent))
-        self.assertNotIn(outputs["0"], str(sent))
+        self.assertNotIn(TOOL_VIEW_MARKER, str(sent))
+        self.assertIn(outputs["0"], str(sent))
         self.assertIn(outputs["1"], str(sent))
         self.assertIn(outputs["2"], str(sent))
         for output in outputs.values():
@@ -199,7 +200,7 @@ class ContextRuntimeTests(unittest.TestCase):
         manager = self.manager()
         manager.begin_turn(28)
         client = ScriptedContextClient()
-        projected = manager.prepare_before_model_call(history, client=client)
+        projected = manager.force_compact(history, client=client)
         self.assertEqual(manager.state.compacted_message_count, 16)
         self.assertEqual(projected[1:], history[16:])
         self.assertEqual(len(client.summary_calls), 1)
@@ -313,6 +314,8 @@ class ContextRuntimeTests(unittest.TestCase):
         client = ScriptedContextClient([_tool(1, usage=first), _text(usage=second)])
         manager = self.manager()
         agent = self.agent(client, manager=manager, messages=history)
+        manager.begin_turn(len(history))
+        manager.force_compact(history, client=client)
         agent.run("continue actual task")
         self.assertEqual(len(client.summary_calls), 1)
         self.assertEqual(manager.state.latest_request_prompt_tokens, 70)
@@ -374,7 +377,7 @@ class ContextRuntimeTests(unittest.TestCase):
         self.assertEqual(manager.last_compaction["reason"], "history_changed")
 
     def test_summary_input_budget_does_not_send_oversized_summary_or_main_request(self):
-        manager = self.manager(summary_input_max_chars=1000, context_window_tokens=2000)
+        manager = self.manager(summary_context_window_tokens=32768, context_window_tokens=2000)
         history = _rounds(10)
         for message in history:
             if message["role"] == "user" and isinstance(message["content"], list):
@@ -423,6 +426,7 @@ class ContextRuntimeTests(unittest.TestCase):
         history = _rounds(10)
         client = ScriptedContextClient([_text("main request continued")])
         agent = self.agent(client, manager=manager, messages=history)
+        manager.force_compact(history, client=client)
         result = agent.run()
         self.assertEqual(result.final_text, "main request continued")
         self.assertEqual(manager.state.summary_revision, 1)
@@ -517,10 +521,10 @@ class ContextRuntimeTests(unittest.TestCase):
         agent.hooks.register("BeforeModelCall", lambda messages: reminder)
         result = agent.run("run the searches")
         self.assertEqual(result.final_text, "done")
-        self.assertGreater(manager.state.history_generation, 0)
+        self.assertEqual(manager.state.history_generation, 0)
         self.assertEqual(manager.state.summary_revision, 0)
         self.assertEqual(sum(reminder in str(message["content"]) for message in agent.messages), 1)
-        self.assertTrue(any(TOOL_VIEW_MARKER in str(call["messages"]) for call in client.main_calls))
+        self.assertFalse(any(TOOL_VIEW_MARKER in str(call["messages"]) for call in client.main_calls))
 
     def test_reused_tool_id_archives_distinct_outputs_without_overwriting(self):
         manager = self.manager(single_tool_output_max_chars=500, tool_result_budget_chars=2000)
@@ -534,8 +538,8 @@ class ContextRuntimeTests(unittest.TestCase):
         self.assertNotEqual(first_path, second_path)
         self.assertEqual(first_path.read_text(encoding="utf-8"), first)
         self.assertEqual(second_path.read_text(encoding="utf-8"), second)
-        self.assertIn(str(first_path), first_preview)
-        self.assertIn(str(second_path), second_preview)
+        self.assertEqual(first_path.stem, first_preview.output_id)
+        self.assertEqual(second_path.stem, second_preview.output_id)
         manager.finalize_tool_results([tool], [second])
         self.assertEqual(len(manager.state.tool_artifacts), 2)
         self.assertEqual(first_path.read_text(encoding="utf-8"), first)

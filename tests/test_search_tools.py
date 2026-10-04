@@ -67,29 +67,29 @@ class SearchToolTests(unittest.TestCase):
 
     def test_grep_paging_reaches_201st_match_without_duplicates(self):
         target = self.write("many.py", "needle\n" * 200 + "needle FINAL_TARGET\n")
-        first = self.grep.run("needle")
+        first = self.grep.run("needle", limit=200)
         second = self.grep.run("needle", offset=200)
-        self.assertIn("next_offset=200", first)
-        self.assertIn("scan_complete=false", first)
+        self.assertIn("next_offset\":200", first)
+        self.assertIn("scan_complete\":false", first)
         self.assertNotIn("FINAL_TARGET", first)
         self.assertIn(f"{target}:201: needle FINAL_TARGET", second)
         self.assertNotIn(f"{target}:200:", second)
-        self.assertIn("has_more=false", second)
-        self.assertIn("scan_complete=true", second)
-        self.assertNotIn("next_offset", self.grep.run("needle", limit=201))
+        self.assertIn("has_more\":false", second)
+        self.assertIn("scan_complete\":true", second)
+        self.assertIsNone(self.grep.run("needle", limit=201).next_cursor)
 
     def test_glob_paging_is_path_ordered_and_supports_recursive_patterns(self):
         for index in reversed(range(101)):
             self.write(f"src/{index:03d}.py")
         self.write("root.py")
-        first = self.glob.run("src/**/*.py")
+        first = self.glob.run("src/**/*.py", limit=100)
         second = self.glob.run("src/**/*.py", offset=100)
         first_paths = [line for line in first.splitlines() if line.startswith(str(self.root))]
         self.assertEqual(len(first_paths), 100)
         self.assertEqual(first_paths, sorted(first_paths))
-        self.assertIn("next_offset=100", first)
+        self.assertIn("next_offset\":100", first)
         self.assertIn(str(self.root / "src/100.py"), second)
-        self.assertIn("has_more=false", second)
+        self.assertIn("has_more\":false", second)
         self.assertIn(str(self.root / "root.py"), self.glob.run("*.py"))
         self.assertNotIn(str(self.root / "src/000.py"), self.glob.run("*.py"))
         self.assertIn(str(self.root / "src"), self.glob.run("src/"))
@@ -101,12 +101,12 @@ class SearchToolTests(unittest.TestCase):
         with patch("codeagent.tools.grep.search_files", return_value=inventory):
             result = self.grep.run("unique_target", offset=5000)
         self.assertIn(f"{target}:1:", result)
-        self.assertIn("scan_complete=true", result)
+        self.assertIn("scan_complete\":true", result)
         with patch("codeagent.tools.grep.search_files", return_value=SearchFiles(paths=[self.root / "gone.py", target])):
             result = self.grep.run("unique_target")
         self.assertIn(f"{target}:1:", result)
-        self.assertIn("scan_complete=false", result)
-        self.assertIn("1 file(s) could not be read", result)
+        self.assertIn("scan_complete\":false", result)
+        self.assertIn("Unreadable files: 1", result)
 
     def test_scan_failure_is_visible_and_include_limits_scope(self):
         py = self.write("src/main.py")
@@ -116,7 +116,7 @@ class SearchToolTests(unittest.TestCase):
         self.assertNotIn("main.txt:", result)
         inventory = SearchFiles(paths=[py], incomplete=True, notes=["Unreadable directory: private"])
         with patch("codeagent.tools.glob_tool.search_files", return_value=inventory):
-            self.assertIn("scan_complete=false", self.glob.run("**/*.py"))
+            self.assertIn("scan_complete\":false", self.glob.run("**/*.py"))
 
     def test_page_validation_and_workspace_boundary_with_ignored_files_enabled(self):
         registry = create_default_registry(workspace_guard=self.guard)

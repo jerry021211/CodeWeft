@@ -150,5 +150,5 @@ class LoadMemoryTool:
             return f"Memory not found: {name}. No memories are available."
         return (
             f"[memory loaded] {record.name} [{record.memory_type}]\n"
-            f"{record.description}\n\n{record.clipped_content(self.max_chars)}"
+            f"{record.description}\n\n{record.content}"
         )

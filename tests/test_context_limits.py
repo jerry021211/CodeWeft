@@ -107,19 +107,18 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
         manager, client = self.manager(), CapturingClient()
         agent = self.agent(manager, client, history)
 
+        client.summaries = ["Validated summary; preserve errors and current task."] * 40
+        manager.force_compact(history, client=client)
         result = agent.run()
-
         self.assertEqual(result.final_text, "done")
-        self.assertEqual(len(client.summary_calls), 1)
-        self.assertTrue(manager.last_compaction["source_previews_used"])
+        self.assertGreater(len(client.summary_calls), 1)
+        self.assertTrue(manager.last_compaction["coverage_complete"])
         self.assertGreater(manager.state.compacted_message_count, 0)
-        self.assertLessEqual(inspect_request(**client.summary_calls[0]).request_chars, 120_000)
-        source = _new_summary_messages(client.summary_calls[0])
-        call, receipt = source[1]["content"][0], source[2]["content"][0]
-        self.assertEqual(call["input"]["file_path"], "D:/project/模块-0-a.py")
-        self.assertTrue(call["input"]["content"]["truncated"])
-        self.assertEqual((receipt["is_error"], receipt["status"], receipt["exit_code"]), (True, "error", 2))
-        self.assertIn("FAILED public_api; ERROR E129; exit=2", receipt["content"]["preview"])
+        material = str(client.summary_calls)
+        self.assertIn("CODE START", material)
+        self.assertIn("CODE END", material)
+        self.assertIn("FAILED public_api; ERROR E129; exit=2", material)
+        self.assertTrue(all(call["max_tokens"] == 32768 for call in client.summary_calls))
         self.assertEqual(agent.messages[:len(original)], original)
         validate_tool_history(agent.messages)
         validate_tool_history(client.main_calls[0]["messages"])
@@ -129,17 +128,16 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
         history = _rounds(kind="read_file")
         original = deepcopy(history)
         manager, client = self.manager(), CapturingClient()
+        client.summaries = ["Validated read evidence; continue current task."] * 40
+        manager.force_compact(history, client=client)
         result = self.agent(manager, client, history).run()
         self.assertEqual(result.final_text, "done")
-        self.assertTrue(manager.last_compaction["source_previews_used"])
-        self.assertEqual(len(client.summary_calls), 1)
-        self.assertEqual(manager.state.compacted_message_count, 17)
-        self.assertLessEqual(inspect_request(**client.summary_calls[0]).request_chars, 120_000)
-        self.assertLessEqual(inspect_request(**client.main_calls[0]).request_chars, 600_000)
-        source = _new_summary_messages(client.summary_calls[0])
-        self.assertEqual([block["id"] for block in source[1]["content"]], ["round-0-a", "round-0-b"])
-        self.assertEqual([block["tool_use_id"] for block in source[2]["content"]], ["round-0-a", "round-0-b"])
-        self.assertTrue(all(block["content"]["truncated"] for block in source[2]["content"]))
+        self.assertTrue(manager.last_compaction["coverage_complete"])
+        self.assertGreater(len(client.summary_calls), 1)
+        self.assertGreater(manager.state.compacted_message_count, 0)
+        self.assertIn("round-0-a", str(client.summary_calls))
+        self.assertIn("round-0-b", str(client.summary_calls))
+        self.assertTrue(all(call["max_tokens"] == 32768 for call in client.summary_calls))
         self.assertEqual(history[:len(original)], original)
 
     def test_full_source_mode_removes_reasoning_and_media_payload_before_summary(self):
@@ -151,8 +149,9 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
         ]
         original = deepcopy(history)
         manager, client = self.manager(), CapturingClient()
+        manager.force_compact(history, client=client)
         self.agent(manager, client, history).run()
-        self.assertFalse(manager.last_compaction["source_previews_used"])
+        self.assertTrue(manager.last_compaction["coverage_complete"])
         payload = client.summary_calls[0]["messages"][0]["content"]
         for private in ("DO-NOT-SUMMARIZE-THOUGHT", "PRIVATE-SIGNATURE", "DO-NOT-INLINE-PIXELS"):
             self.assertNotIn(private, payload)
@@ -186,7 +185,7 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
             self.assertEqual(restored.state.summary_retry_after_epoch, 0.0)
 
     def test_model_explicit_key_and_owner_scope_changes_release_old_cooldown(self):
-        for changed in ("model", "key", "scope", "output_budget"):
+        for changed in ("model", "key", "scope"):
             with self.subTest(changed=changed):
                 history, manager = _rounds(), self.manager()
                 manager.summary_credentials_scope = "owner-old"
@@ -224,7 +223,7 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
 
     def test_repeated_prepare_with_no_new_fold_does_not_open_summary_client(self):
         history, manager, client = _rounds(), self.manager(), CapturingClient()
-        first = manager.prepare_before_model_call(history, client=client)
+        first = manager.force_compact(history, client=client)
         state = asdict(manager.state)
         factory_calls = []
 
@@ -247,8 +246,10 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
         agent.add_user_message(runtime_text, source="runtime")
         agent.add_user_message(steering)
         agent.messages.extend(_rounds(6, start=4)[1:])
+        manager.force_compact(agent.messages, client=client)
         agent.run()
         agent.messages.extend(_rounds(8, start=10)[1:])
+        manager.force_compact(agent.messages, client=client)
         agent.run()
         self.assertEqual(len(client.summary_calls), 2)
         self.assertTrue(any(item.get("_context_source") == "runtime" for item in agent.messages))
@@ -279,14 +280,14 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
             config = EnvironmentConfig.from_env().context_config
         expected = {
             "recency_messages": 14, "recency_rounds": 3, "min_fold_messages": 6,
-            "message_trigger_min_fold": 18, "round_trigger_min_fold": 9, "max_fold_messages": 160,
-            "max_fold_rounds": 11, "max_request_chars": 0, "summary_input_max_chars": 110000,
+            "message_trigger_min_fold": 16, "round_trigger_min_fold": 8, "max_fold_messages": 160,
+            "max_fold_rounds": 11, "max_request_chars": 0, "summary_input_max_chars": 0,
             "context_window_tokens": 99000, "summary_context_window_tokens": 55000,
-            "failure_cooldown_seconds": 25.5, "summary_timeout_seconds": 30.5,
+            "failure_cooldown_seconds": 25.5, "summary_timeout_seconds": 180,
             "tool_projection_enabled": False, "investigation_keep_rounds": 0,
             "command_keep_rounds": 2, "write_keep_rounds": 2, "tool_clear_min_chars": 1500,
-            "write_clear_min_chars": 450, "summary_text_preview_chars": 3000,
-            "summary_argument_preview_chars": 1500, "near_context_ratio": 0.75,
+            "write_clear_min_chars": 450, "summary_text_preview_chars": 0,
+            "summary_argument_preview_chars": 0, "near_context_ratio": 0.9,
         }
         for key, value in expected.items():
             self.assertEqual(getattr(config, key), value, key)
@@ -304,10 +305,14 @@ class ContextLimitsIntegrationTests(unittest.TestCase):
             "CONTEXT_SUMMARY_ARGUMENT_PREVIEW_CHARS": "0", "CONTEXT_NEAR_CONTEXT_RATIO": "1.5",
             "CONTEXT_MODEL_WINDOWS_JSON": '{"main": -1}',
         }
+        retired = {"CONTEXT_SUMMARY_INPUT_MAX_CHARS", "CONTEXT_SUMMARY_TIMEOUT_SECONDS", "CONTEXT_SUMMARY_TEXT_PREVIEW_CHARS", "CONTEXT_SUMMARY_ARGUMENT_PREVIEW_CHARS", "CONTEXT_NEAR_CONTEXT_RATIO"}
         for key, value in cases.items():
             with self.subTest(key=key), patch.dict(os.environ, {"MODEL_ID": "main", "SUMMARIZATION_MODEL_ID": "summary", key: value}, clear=True), patch("codeagent.config._load_dotenv"):
-                with self.assertRaises(ValueError):
-                    EnvironmentConfig.from_env()
+                if key in retired:
+                    self.assertEqual(EnvironmentConfig.from_env().context_config.summary_max_tokens, 32768)
+                else:
+                    with self.assertRaises(ValueError):
+                        EnvironmentConfig.from_env()
         for invalid in ("not-json", "[]", '{"main":true}'):
             with self.subTest(model_windows=invalid), patch.dict(os.environ, {"MODEL_ID": "main", "SUMMARIZATION_MODEL_ID": "summary", "CONTEXT_MODEL_WINDOWS_JSON": invalid}, clear=True), patch("codeagent.config._load_dotenv"):
                 with self.assertRaises(ValueError):

@@ -206,7 +206,7 @@ CODEAGENT_WEB_SEARCH_TIMEOUT=20
 普通会话（含只读权限）均支持，普通子 Agent 继承父请求的选择；Team 会话暂不支持。
 关闭时不注册搜索工具，也不会调用 Tavily。这个开关只控制内置搜索工具，并非整个进程的网络隔离：
 模型 API、既有 shell/MCP 工具仍按原配置工作。搜索词会发送给 Tavily，Key 仅保存在服务端配置中。
-每次搜索默认 5 条、最多 10 条，使用 basic 深度；网络错误、限流或额度不足会明确报告，
+每次搜索默认 10 条、最多 10 条，正文最多 48,000 字符，使用 basic 深度；网络错误、限流或额度不足会明确报告，
 不自动重试收费请求。搜索结果作为外部参考资料处理。
 
 ## 只读权限
@@ -614,82 +614,29 @@ python -m codeagent --no-stream "请记住：这个项目里解释代码时先�
 python -m codeagent --no-stream "按照我之前记录过的项目讲解偏好，解释 codeagent/agent.py 的主循环。"
 ```
 
-## 上下文压缩：Context Compact
+## 上下文压缩与工具结果
 
-上下文管理面向普通主 Agent 和同步子 Agent，涵盖 CLI、普通 Web 与 SDK。
-本轮不开发或验收 Team。`Agent.messages` 和 checkpoint 保存已接收历史，
-每次发送给模型时另建视图；摘要和清理不会覆盖原记录。
+工具正文、元数据、归档和批次额度统一在 `codeagent/tools/output_limits.py` 定义。旧字符额度配置不再覆盖工具页面；不再提供环境变量、CLI 或设置页调节这些额度。完整额度与分页示例见 [工具输出策略](docs/tool-output-policy.md)。
 
-默认规则是“够用就保留，接近上限再整理”：
+每条元数据最多 2,000 字符；每个模型响应对应的工具结果批次软上限为 300,000 字符。先保留完整技能正文和必要元数据，再为错误、显式读取及其他结果分配正文。缩页调用各工具自己的分页器，保留真实状态及恢复游标，不重跑工具。生成输出每次最多保存 32 MiB；超过后仍排空命令管道，明确标记原始输出不完整。
 
-- 自动压缩只由模型 Token 窗口触发：普通策略在本次估算输入加输出预留达到窗口的 80% 时，
-  尝试清理旧的大工具内容；缓存友好策略按扣除输出预留后的输入窗口的 80% 触发。
-  清理后仍有压力才调用摘要模型；窗口未知时不使用字符数兜底。
-- 字符数不再触发自动压缩或再次清理，也不再限制完整请求容量，
-  工具输出归档和摘要字符验收继续保留。手动压缩和提供方超窗恢复不受此项调整影响。
-- 消息数、执行轮数不再独立触发摘要；上一轮很大也不会让已经缩小的当前请求反复压缩。
-- 摘要只折叠合法的旧区间，保留当前用户原文、近期至少 2 个执行轮；跨回合至少留 12 条消息。
-  候选摘要须让完整请求至少省下 256 字符及约 5%，估算输入 token 也要下降，才归档并提交。
-- 跨回合继续保留未摘要的工具证据与附件，不再另走首尾裁剪。命令输出没有可靠归档就不清理。
-- 旧工具结果和成功写入正文的默认清理门槛提高到 8k 字符；写参保留最近 2 条 assistant。
-  清理只给身份、状态和读取说明，不再生成多语言结构摘录。失败、完整文件读取等仍受保护。
-- 单个结果超过 80k 或整批超过 200k 字符时才按预算归档；取消 2k bash 提前归档。
-- 每次摘要归档只写新覆盖的消息，并引用上一段。`load_context_history` 自动串联，
-  消息编号连续；旧 checkpoint 不会看到之后新增的归档内容。
+请求输入预算为 `I = W - O - S`：W 沿用现有窗口发现与配置，O 为实际 `max_tokens`，S 沿用各调用路径的既有余量（无余量配置时为 0）。估算输入达到 I 的 85% 时记录预警，90% 时主动整理，目标不高于 70%；整理未达目标但不超 I 时仍可发送。未知窗口不猜数值。自动整理关闭时仍检查硬预算。
 
-主请求、摘要和辅助模型调用都检查完整预算，token 仍是估算。摘要优先使用完整可见材料，
-最小合法批次仍放不下才使用有损字段预览。失败、取消或没有足够缩减时保留旧摘要和水位；
-失败及无收益尝试默认冷却 90 秒。45 秒摘要超时是 SDK I/O 超时，不是严格总墙钟期限。
+摘要最终最多 16,000 字符，每次摘要调用固定预留 32,768 tokens。一次整理共用 180 秒截止时间，最多 16 个原始材料块，每块最多 32,000 估算 tokens。允许连续拆分大字段，不再使用有损首尾摘录；块与合并请求均检查摘要模型窗口。超长最终摘要仅重写一次，失败不截断提交。
 
-摘要使用四节滚动记忆 prompt，保留目标、有效约束与授权边界、完成结果和验证范围、
-有效决策、未决事项及文件标识符。本批结构化执行记录中的路径由代码逐字提取。
-`summary_char_budget` 来自 `CONTEXT_SUMMARY_MAX_CHARS`，默认 **4000 字符**，不是 token 数；
-按去除首尾空白后的 Python `len()` 检查，标题、换行、空格和标点都计入预算。
-摘要请求不再发送 `max_tokens`，由兼容服务端采用自己的默认输出限制；主模型的
-`MAX_TOKENS` 不变。Anthropic SDK 的 `messages.create` 强制要求该参数，因此省略输出 token 上限的
-摘要请求使用同一 SDK 的 `post` 发送 `/v1/messages`；不接受省略参数的服务端会报错并保留旧摘要。
-完整输出超长时附上原始材料和草稿，要求模型重新压缩一次；重试请求同样检查输入预算。
-若仍超长、为空、未完整结束、超时或异常，保留旧摘要、水位及完整历史，不机械截断。
-只有有效且有压缩收益的摘要才与水位一起提交；后续请求复用该摘要。
+候选仍遵守最近 12 条消息、最近 2 轮、最少 4 条消息、最多 200 条且 12 轮的合法边界。提交必须满足字符节省至少 `max(256, 5%)` 且输入 token 估算下降；原文进入不可变历史分段，检查点只在验证成功后更新。失败冷却保持 90 秒，请求前最多 3 次整理，供应商超窗恢复最多 1 次。
 
-`load_tool_output` 和 `load_context_history` 都支持有界分页，整个响应最多 16k 字符，
-并限制到本执行者目录。子 Agent 独立管理归档、压缩回调与内置待办状态。
-`compact()` 可以主动申请压缩，但同样遵守保护窗口、冷却和收益检查。
-
-无压力时只测量一次完整请求；请求内容变化才重新测量。使用量、失败原因和历史视图变化
-继续记录，上一份视图的哈希复用已计算结果。完整设计与验证见
-[上下文适配报告](docs/context-management-porting.md)。
-
-可配置项：
+窗口、权限、执行超时、模型服务凭据和原有传输限制仍使用原项目机制。旧的 80k/12k/200k 工具额度、摘要 4k/8192/45 秒等配置键不再生效，不自动改写用户配置。
 
 ```bash
-CONTEXT_COMPACT_MODE=model   # off | model
+CONTEXT_COMPACT_MODE=model
 SUMMARIZATION_MODEL_ID=your-summary-model
-SUMMARIZATION_API_KEY=your-summary-api-key  # 留空时与主模型共用 API Key
-CONTEXT_TOOL_RESULT_BUDGET_CHARS=200000
-CONTEXT_SINGLE_TOOL_OUTPUT_MAX_CHARS=80000
-# CONTEXT_COMPACT_THRESHOLD_CHARS 为兼容旧配置保留，不再触发自动压缩
-CONTEXT_SUMMARY_MAX_CHARS=4000              # 字符数，不是 token 数；超长只重压缩一次
-CONTEXT_TRANSCRIPT_DIR=.transcripts              # 旧目录导入位置
-CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results  # 旧目录导入位置
-CONTEXT_REACTIVE_RETRIES=1
-CONTEXT_RECENCY_MESSAGES=12
-CONTEXT_RECENCY_ROUNDS=2
-CONTEXT_MAX_FOLD_ROUNDS=12
-# CONTEXT_MAX_REQUEST_CHARS 已停用；请求容量仅按模型 Token 窗口检查
-CONTEXT_SUMMARY_INPUT_MAX_CHARS=120000
-CONTEXT_WINDOW_TOKENS=0                     # 未知窗口；不猜厂商值
-CONTEXT_MODEL_WINDOWS_JSON={}                # 按实际模型名覆盖窗口，包含 fallback
-CONTEXT_NEAR_CONTEXT_RATIO=0.8              # 普通策略仅按模型 Token 窗口触发；窗口未知不自动压缩
+CONTEXT_TRANSCRIPT_DIR=.transcripts
+CONTEXT_TOOL_OUTPUT_DIR=.task_outputs/tool-results
+CONTEXT_WINDOW_TOKENS=0
+CONTEXT_MODEL_WINDOWS_JSON={}
 CONTEXT_SUMMARY_WINDOW_TOKENS=0
-CONTEXT_SUMMARY_TIMEOUT_SECONDS=45            # SDK I/O timeout，非严格总期限
-CONTEXT_FAILURE_COOLDOWN_SECONDS=90
-CONTEXT_SUMMARY_TEXT_PREVIEW_CHARS=4000
-CONTEXT_SUMMARY_ARGUMENT_PREVIEW_CHARS=2000
-CONTEXT_TOOL_PROJECTION_ENABLED=true       # 有压力时启用，独立于语义摘要开关
-CONTEXT_TOOL_CLEAR_MIN_CHARS=8000
-CONTEXT_WRITE_CLEAR_MIN_CHARS=8000
-CONTEXT_WRITE_KEEP_ROUNDS=2
+CONTEXT_READ_REFERENCE_ENABLED=true
 ```
 
 权限策略参考 `s03_permission` 的三道闸门：

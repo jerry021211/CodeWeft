@@ -40,8 +40,8 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         ))
 
     def test_exact_character_boundary_and_whitespace(self):
-        # 4000 Unicode code points are well over 4000 UTF-8 bytes.
-        text = "中文😀\n" * 1000
+        # 16000 Unicode code points are well over 16000 UTF-8 bytes.
+        text = "中文😀\n" * 4000
         # Use a non-whitespace final character so strip does not change the size.
         expected = text[:-1] + "末"
         client = ScriptedClient(" \n" + expected + "\n ")
@@ -49,29 +49,29 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0]["max_tokens"], self.manager.config.summary_max_tokens)
         self.assertEqual(client.calls[0]["tools"], [])
-        self.assertIn("最多 4000 字符", client.calls[0]["messages"][0]["content"])
+        self.assertIn("最多 16000 字符", client.calls[0]["messages"][0]["content"])
         self.assertIn("不是 token 数", client.calls[0]["messages"][0]["content"])
 
     def test_overlong_output_is_recompressed_once_with_original_evidence(self):
         history = [{"role": "user", "content": "保留目标和原始证据"}]
-        client = ScriptedClient("长" * 4001, "  ## 未决问题 / 待办\n继续验证  ")
+        client = ScriptedClient("长" * 16001, "  ## 未决问题 / 待办\n继续验证  ")
         self.assertEqual(self.manager._model_summary(history, client=client), "## 未决问题 / 待办\n继续验证")
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(client.calls[1]["messages"][0], client.calls[0]["messages"][0])
         self.assertIn("原始证据", client.calls[1]["messages"][0]["content"])
-        self.assertEqual(client.calls[1]["messages"][1], {"role": "assistant", "content": "长" * 4001})
-        self.assertIn("4001 字符", client.calls[1]["messages"][-1]["content"])
+        self.assertEqual(client.calls[1]["messages"][1], {"role": "assistant", "content": "长" * 16001})
+        self.assertIn("16001 字符", client.calls[1]["messages"][-1]["content"])
         self.assertTrue(all(call["max_tokens"] == self.manager.config.summary_max_tokens for call in client.calls))
 
-    def test_custom_character_budget_drives_prompt_and_both_validations(self):
+    def test_retired_character_override_does_not_change_fixed_budget(self):
         self.manager.config.summary_max_chars = 30
-        client = ScriptedClient("字" * 31, "字" * 30)
-        self.assertEqual(len(self.manager._model_summary([], client=client)), 30)
-        self.assertIn("最多 30 字符", client.calls[0]["messages"][0]["content"])
-        self.assertIn("最多 30 字符", client.calls[1]["messages"][-1]["content"])
+        client = ScriptedClient("字" * 16001, "字" * 16000)
+        self.assertEqual(len(self.manager._model_summary([], client=client)), 16000)
+        self.assertIn("最多 16000 字符", client.calls[0]["messages"][0]["content"])
+        self.assertIn("最多 16000 字符", client.calls[1]["messages"][-1]["content"])
 
     def test_repair_failure_preserves_existing_summary_watermark_and_archives(self):
-        failures = ["长" * 4001, " \n ", TimeoutError("timeout"), RuntimeError("quota"),
+        failures = ["长" * 16001, " \n ", TimeoutError("timeout"), RuntimeError("quota"),
                     ModelResponse("max_tokens", "未完整结束")]
         for failure in failures:
             with self.subTest(failure=type(failure).__name__):
@@ -86,7 +86,7 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
                     history.extend(deepcopy(history[:16]))
                     before, original = asdict(manager.state), deepcopy(history)
                     archives = {p: p.read_bytes() for p in manager.config.transcript_dir.glob("*")}
-                    client = ScriptedClient("长" * 4001, failure)
+                    client = ScriptedClient("长" * 16001, failure)
                     with self.assertRaises(ContextCompactionError):
                         manager.force_compact(history, client=client)
                     self.assertEqual(len(client.calls), 2)
@@ -100,7 +100,7 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
         history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "历史" * 300}
                    for i in range(28)]
         original = deepcopy(history)
-        client = ScriptedClient("长" * 4001, "合格摘要")
+        client = ScriptedClient("长" * 16001, "合格摘要")
         self.manager.force_compact(history, client=client)
         self.assertEqual(self.manager.state.summary_text, "合格摘要")
         self.assertEqual(self.manager.state.summary_revision, 1)
@@ -118,8 +118,8 @@ class SummaryCharacterBudgetTests(unittest.TestCase):
             self.assertEqual(len(client.calls), 1)
 
     def test_repair_checks_complete_input_budget_before_second_call(self):
-        client = ScriptedClient("x" * 8000)
-        self.manager.config.summary_input_max_chars = 6000
+        client = ScriptedClient("x" * 16001)
+        self.manager.config.summary_context_window_tokens = 37000
         with self.assertRaises(RequestBudgetError):
             self.manager._model_summary([], client=client)
         self.assertEqual(len(client.calls), 1)

@@ -103,7 +103,7 @@ class WebQuestionTests(unittest.TestCase):
                 self.assertEqual(result.final_text, "继续使用 JSON")
                 tool_result = calls[1]["messages"][-1]["content"][0]
                 self.assertEqual(tool_result["tool_use_id"], "q1")
-                self.assertEqual(tool_result["content"], "JSON")
+                self.assertEqual(tool_result["content"].body, "JSON")
                 self.assertEqual(self.repo.list_user_questions(self.run.id)[0]["status"], "answered")
             finally:
                 self.token.cancel()

@@ -9,10 +9,15 @@ from itertools import islice
 from pathlib import Path
 from typing import TextIO
 
-from codeagent.tools.base import ToolDefinition
+from codeagent.tools.base import ToolDefinition, ToolOutput
+from codeagent.tools.output_limits import (READ_BODY_CHARS, READ_SOURCE_LINES, RESULT_METADATA_CHARS,
+    HISTORY_MESSAGES, HISTORY_MESSAGE_CHARS, ARCHIVE_MATCHES, ARCHIVE_SCAN_CHARS)
+from codeagent.tools.output_pages import page
+from codeagent.tools.read import _page
+import io
 
-_TOOL_OUTPUT_MAX_CHARS = 16_000
-_TOOL_OUTPUT_BODY_MAX_CHARS = 12_000
+_TOOL_OUTPUT_MAX_CHARS = READ_BODY_CHARS + RESULT_METADATA_CHARS
+_TOOL_OUTPUT_BODY_MAX_CHARS = READ_BODY_CHARS
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,45 +30,54 @@ class LoadToolOutputTool:
             description=(
                 "只读访问当前执行者私有目录中已保存的大型工具结果。"
                 "仅在预览缺少必要信息时读取；offset 从1开始、limit限制行数。"
-                "找到当前问题所需信息后继续任务；more_output 仅表示还有内容，不要求读完。"
+                "找到当前问题所需信息后继续任务；has_more 仅表示还有已保存内容，不要求读完。"
                 "工作区外的私有工具输出归档应使用本工具，不使用 read_file 或 grep。"
                 "char_offset 从0开始，定位首条选中行的Unicode字符；char_limit限制本次原文字符总量。"
                 "长行或结果未读完时，按返回的 next_offset/next_char_offset 继续。"
-                "file_path 取自实际归档路径；返回只是只读视图，不可作为写入正文。"
+                "file_path取自实际归档路径，或提供返回的output_id；返回只是只读视图，不可作为写入正文。"
                 "已知关键词时优先传 query 做区分大小写的字面搜索（非正则），避免逐页读完整日志。"
-                "搜索返回匹配行和字符位置；search_complete=false 时按返回游标继续，不代表没有更多匹配。"
+                "搜索返回匹配行和字符位置；scan_complete=false 时按返回游标继续，不代表没有更多匹配。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 1},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    "output_id": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 1, "default": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": READ_SOURCE_LINES, "default": READ_SOURCE_LINES},
                     "char_offset": {"type": "integer", "minimum": 0, "maximum": 1_000_000_000},
-                    "char_limit": {"type": "integer", "minimum": 1, "maximum": _TOOL_OUTPUT_BODY_MAX_CHARS},
+                    "char_limit": {"type": "integer", "minimum": 1, "maximum": READ_BODY_CHARS, "default": READ_BODY_CHARS},
                     "query": {"type": "string", "minLength": 1, "maxLength": 256},
-                    "max_matches": {"type": "integer", "minimum": 1, "maximum": 20},
-                    "scan_limit_chars": {"type": "integer", "minimum": 1024, "maximum": 4_000_000},
+                    "max_matches": {"type": "integer", "minimum": 1, "maximum": ARCHIVE_MATCHES, "default": ARCHIVE_MATCHES},
+                    "scan_limit_chars": {"type": "integer", "minimum": 1024, "maximum": ARCHIVE_SCAN_CHARS, "default": ARCHIVE_SCAN_CHARS},
+                    "max_scan_chars": {"type": "integer", "minimum": 1024, "maximum": ARCHIVE_SCAN_CHARS},
                 },
-                "required": ["file_path"],
+                "required": [],
             },
         ),
         init=False,
     )
 
     def run(
-        self, file_path: str, offset: int = 1, limit: int = 2000,
+        self, file_path: str = "", offset: int = 1, limit: int = READ_SOURCE_LINES,
         char_offset: int = 0, char_limit: int = _TOOL_OUTPUT_BODY_MAX_CHARS,
-        query: str | None = None, max_matches: int = 10, scan_limit_chars: int = 1_000_000,
+        query: str | None = None, max_matches: int = ARCHIVE_MATCHES, scan_limit_chars: int = ARCHIVE_SCAN_CHARS,
+        output_id: str | None = None, max_scan_chars: int | None = None,
     ) -> str:
         try:
+            if max_scan_chars is not None:
+                scan_limit_chars = max_scan_chars
+            if output_id is not None:
+                if not isinstance(output_id, str) or len(output_id) != 32 or any(c not in '0123456789abcdef' for c in output_id):
+                    raise ValueError('invalid output_id')
+                file_path = output_id + '.txt'
             for name, value, minimum, maximum in (
                 ("offset", offset, 1, 1_000_000_000),
-                ("limit", limit, 1, 5000),
+                ("limit", limit, 1, READ_SOURCE_LINES),
                 ("char_offset", char_offset, 0, 1_000_000_000),
                 ("char_limit", char_limit, 1, _TOOL_OUTPUT_BODY_MAX_CHARS),
-                ("max_matches", max_matches, 1, 20),
-                ("scan_limit_chars", scan_limit_chars, 1024, 4_000_000),
+                ("max_matches", max_matches, 1, ARCHIVE_MATCHES),
+                ("scan_limit_chars", scan_limit_chars, 1024, ARCHIVE_SCAN_CHARS),
             ):
                 if type(value) is not int or not minimum <= value <= maximum:
                     raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
@@ -74,41 +88,74 @@ class LoadToolOutputTool:
                 return _search_output(path, query, offset=offset, char_offset=char_offset,
                                       max_matches=max_matches, scan_limit=scan_limit_chars,
                                       result_limit=char_limit)
-            sections: list[str] = []
-            response_chars = 0
-            body_remaining = char_limit
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
-                for _ in range(offset - 1):
-                    if _history_record(handle, offset=0, limit=0) is None:
-                        return "(no lines at this offset)"
-                next_line = offset
-                for index in range(offset, offset + limit):
-                    # Reserve complete paging metadata and a footer, including
-                    # when thousands of short/empty lines exhaust the view budget.
-                    allowance = min(body_remaining, _TOOL_OUTPUT_MAX_CHARS - response_chars - 640)
-                    if allowance <= 0:
-                        break
-                    start = char_offset if index == offset else 0
-                    record = _history_record(handle, offset=start, limit=allowance)
-                    if record is None:
-                        break
-                    fragment, total = record
-                    end = min(total, start + len(fragment))
-                    more = end < total
-                    header = f"line={index} char_offset={start} total_chars={total} more_chars={str(more).lower()}"
-                    section = f"{header}\n{index}\t{fragment}"
-                    sections.append(section)
-                    response_chars += len(section) + 2
-                    body_remaining -= len(fragment)
-                    next_line = index + 1
-                    if more:
-                        sections.append(f"more_output=true next_offset={index} next_char_offset={end}")
-                        return "\n\n".join(sections)
-                if handle.read(1):
-                    sections.append(f"more_output=true next_offset={next_line} next_char_offset=0")
-            return "\n\n".join(sections) or ("(no lines at this offset)" if offset > 1 else "(empty output)")
+            manifest = _manifest(path)
+            with path.open('r', encoding='utf-8', errors='replace', newline='') as handle:
+                data = _page(handle, offset=offset, char_offset=char_offset, limit=limit, body_limit=char_limit)
+            return _saved_page(data, manifest, offset, char_offset, limit)
         except (OSError, RuntimeError, ValueError) as exc:
             return f"Error: Runtime output path or range is not allowed: {exc}"[:_TOOL_OUTPUT_MAX_CHARS]
+
+
+def _manifest(path):
+    sidecar = path.with_suffix('.json')
+    if sidecar.exists():
+        _archive_path(path.parent, str(sidecar))
+        return json.loads(sidecar.read_text(encoding='utf-8'))
+    return {'output_id': None, 'source_complete': False, 'legacy_archive': True,
+            'truncated_reason': 'legacy_completion_unknown'}
+
+
+def _saved_page(data, manifest, offset, char_offset, limit):
+    body, raw, start, end, more, next_line, next_char = data
+    source = ToolOutput('')
+    source.output_id = manifest.get('output_id')
+    source.source_complete = manifest.get('source_complete', False)
+    result = page(source, body, returned_range={'start': start, 'end': end},
+                  has_more=more, next_cursor={'offset': next_line, 'char_offset': next_char} if more else None,
+                  next_offset=next_line, next_char_offset=next_char,
+                  truncated_reason=manifest.get('truncated_reason'), eof=start is None and not more,
+                  channel_ranges=manifest.get('channels', [])[:8],
+                  channel_order=manifest.get('channel_order'))
+    def resize(size):
+        smaller = _page(io.StringIO(raw, newline=''), offset=start[0] if start else offset,
+                        char_offset=start[1] if start else char_offset, limit=limit, body_limit=size, positioned=True)
+        if not smaller[4] and more:
+            smaller = (*smaller[:4], True, next_line, next_char)
+        return _saved_page(smaller, manifest, offset, char_offset, limit)
+    result.page_renderer = resize
+    return result
+
+
+def _history_page(records, offset, char_offset, limit, char_limit, allowance=READ_BODY_CHARS):
+    body, ranges = [], []
+    used = 0
+    more, cursor = False, None
+    for index, fragment, total in records[:limit]:
+        start = min(char_offset, total) if index == offset else 0
+        label = f'message={index} char_offset={start}\n'
+        if len(label) + used + (2 if body else 0) > allowance:
+            more, cursor = True, {'message_offset': index, 'char_offset': start}
+            break
+        room = max(0, allowance - used - len(label) - (2 if body else 0))
+        shown = fragment[:min(char_limit, room)]
+        if not shown and total > start:
+            more, cursor = True, {'message_offset': index, 'char_offset': start}
+            break
+        body.append(label + shown)
+        used += len(label) + len(shown) + (2 if len(body) > 1 else 0)
+        ranges.append({'message': index, 'start': start, 'end': start + len(shown)})
+        if start + len(shown) < total:
+            more, cursor = True, {'message_offset': index, 'char_offset': start + len(shown)}
+            break
+    else:
+        if len(records) > limit:
+            more, cursor = True, {'message_offset': records[limit][0], 'char_offset': 0}
+    result = page(ToolOutput(''), '\n\n'.join(body), returned_range=ranges,
+                  has_more=more, next_cursor=cursor, source_complete=True,
+                  next_message_offset=cursor['message_offset'] if cursor else None,
+                  next_char_offset=cursor['char_offset'] if cursor else None)
+    result.page_renderer = lambda size: _history_page(records, offset, char_offset, limit, char_limit, size)
+    return result
 
 
 def _search_output(path: Path, query: str, *, offset: int, char_offset: int,
@@ -126,14 +173,20 @@ def _search_output(path: Path, query: str, *, offset: int, char_offset: int,
     result_chars = 0
     next_match = char_offset
 
-    def finish(complete: bool, next_line: int, next_char: int) -> str:
-        footer = (f"matches={len(sections)} scanned_chars={scanned} "
-                  f"search_complete={str(complete).lower()} more_output={str(not complete).lower()}")
-        if not complete:
-            footer += f" next_offset={next_line} next_char_offset={next_char}"
-        return "\n\n".join([*sections, footer])
+    def finish(complete: bool, next_line: int, next_char: int, reason=None) -> str:
+        manifest = _manifest(path)
+        source = ToolOutput('')
+        source.output_id = manifest.get('output_id')
+        result = page(source, '\n\n'.join(sections), returned_range={'matches': len(sections), 'scanned_chars': scanned},
+                      scan_complete=complete, has_more=not complete, source_complete=manifest.get('source_complete', False),
+                      next_cursor={'offset': next_line, 'char_offset': next_char} if not complete else None,
+                      next_offset=next_line if not complete else None, next_char_offset=next_char if not complete else None,
+                      truncated_reason=reason or manifest.get('truncated_reason'))
+        result.page_renderer = lambda size: _search_output(path, query, offset=offset, char_offset=char_offset,
+            max_matches=max_matches, scan_limit=scan_limit, result_limit=size)
+        return result
 
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
+    with path.open("r", encoding="utf-8", errors="replace", newline='') as handle:
         for _ in range(offset - 1):
             if _history_record(handle, offset=0, limit=0) is None:
                 return finish(True, offset, 0)
@@ -158,12 +211,14 @@ def _search_output(path: Path, query: str, *, offset: int, char_offset: int,
             while index >= 0:
                 match_position = base + index
                 excerpt = text[max(0, index - 120):index + len(query) + 120]
-                if len(sections) >= max_matches or result_chars >= result_limit:
-                    return finish(False, line, match_position)
-                # Always make progress even with a one-character result budget.
-                excerpt = excerpt[:result_limit - result_chars]
-                sections.append(f"line={line} char_offset={match_position}\n{line}\t{excerpt}")
-                result_chars += len(excerpt)
+                section = f"line={line} char_offset={match_position}\n{line}\t{excerpt}"
+                cost = len(section) + (2 if sections else 0)
+                if len(sections) >= max_matches or result_chars + cost > result_limit:
+                    return finish(False, line, match_position,
+                                  'record_too_large_for_page; increase char_limit up to 120000'
+                                  if not sections and result_limit else 'page_limit')
+                sections.append(section)
+                result_chars += cost
                 next_match = match_position + 1  # Include overlapping literal matches.
                 index = text.find(query, index + 1)
             position += len(chunk)
@@ -175,7 +230,7 @@ def _search_output(path: Path, query: str, *, offset: int, char_offset: int,
         return finish(False, line, max(next_match, position - len(query) + 1, 0))
 
 
-_HISTORY_OUTPUT_MAX_CHARS = 16_000
+_HISTORY_OUTPUT_MAX_CHARS = READ_BODY_CHARS
 _HISTORY_READ_CHUNK = 8192
 
 
@@ -254,9 +309,9 @@ class LoadContextHistoryTool:
                 "properties": {
                     "file_path": {"type": "string"},
                     "message_offset": {"type": "integer", "minimum": 1, "maximum": 1_000_000_000},
-                    "message_limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                    "message_limit": {"type": "integer", "minimum": 1, "maximum": HISTORY_MESSAGES, "default": HISTORY_MESSAGES},
                     "char_offset": {"type": "integer", "minimum": 0, "maximum": 1_000_000_000},
-                    "char_limit": {"type": "integer", "minimum": 1, "maximum": 4000},
+                    "char_limit": {"type": "integer", "minimum": 1, "maximum": HISTORY_MESSAGE_CHARS, "default": HISTORY_MESSAGE_CHARS},
                 },
                 "required": ["file_path"],
             },
@@ -265,36 +320,21 @@ class LoadContextHistoryTool:
     )
 
     def run(
-        self, file_path: str, message_offset: int = 1, message_limit: int = 3,
-        char_offset: int = 0, char_limit: int = 2000,
+        self, file_path: str, message_offset: int = 1, message_limit: int = HISTORY_MESSAGES,
+        char_offset: int = 0, char_limit: int = HISTORY_MESSAGE_CHARS,
     ) -> str:
         try:
             for name, value, minimum, maximum in (
                 ("message_offset", message_offset, 1, 1_000_000_000),
-                ("message_limit", message_limit, 1, 10),
+                ("message_limit", message_limit, 1, HISTORY_MESSAGES),
                 ("char_offset", char_offset, 0, 1_000_000_000),
-                ("char_limit", char_limit, 1, 4000),
+                ("char_limit", char_limit, 1, HISTORY_MESSAGE_CHARS),
             ):
                 if type(value) is not int or not minimum <= value <= maximum:
                     raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
-            # Reserve room for every record's paging metadata and the footer.
-            per_record = min(char_limit, (_HISTORY_OUTPUT_MAX_CHARS - 500) // message_limit - 180)
-            sections: list[str] = []
-            with closing(_context_records(self.root, file_path, message_offset, char_offset, per_record)) as records:
-                page = list(islice(records, message_limit + 1))
-                for index, fragment, total in page[:message_limit]:
-                    end = min(total, char_offset + len(fragment))
-                    more = end < total
-                    header = (
-                        f"message={index} char_offset={char_offset} total_chars={total} "
-                        f"more_chars={str(more).lower()}"
-                    )
-                    if more:
-                        header += f" next_char_offset={end}"
-                    sections.append(f"{header}\n{fragment}")
-                if len(page) > message_limit:
-                    sections.append(f"more_messages=true next_message_offset={page[message_limit][0]}")
-            return "\n\n".join(sections) or "(no messages at this offset)"
+            with closing(_context_records(self.root, file_path, message_offset, char_offset, char_limit)) as records:
+                captured = list(islice(records, message_limit + 1))
+            return _history_page(captured, message_offset, char_offset, message_limit, char_limit)
         except (OSError, RuntimeError, ValueError) as exc:
             return f"Error: Context history path or range is not allowed: {exc}"[:_HISTORY_OUTPUT_MAX_CHARS]
 
@@ -341,7 +381,7 @@ def _context_records(root: Path, file_path: str, offset: int, char_offset: int, 
                     return
             index = max(start + 1, offset)
             while end is None or index <= end:
-                record = _history_record(handle, offset=char_offset, limit=limit)
+                record = _history_record(handle, offset=char_offset if index == offset else 0, limit=limit)
                 if record is None:
                     if end is not None:
                         raise ValueError("incomplete context archive segment")

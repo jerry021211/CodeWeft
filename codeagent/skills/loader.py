@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from codeagent.skills.models import LoadedSkill, SkillMetadata
+from codeagent.tools.output_limits import SKILL_FILE_BYTES, SKILL_BODY_CHARS
 
 
 class SkillLoader:
@@ -14,10 +15,10 @@ class SkillLoader:
         self,
         roots: list[Path] | None = None,
         *,
-        max_skill_bytes: int = 50_000,
+        max_skill_bytes: int = SKILL_FILE_BYTES,
     ) -> None:
         self.roots = [Path(root) for root in (roots or [])]
-        self.max_skill_bytes = max_skill_bytes
+        self.max_skill_bytes = SKILL_FILE_BYTES  # Deprecated constructor override is ignored.
         self._skills: dict[str, LoadedSkill] = {}
         self.scan()
 
@@ -35,7 +36,14 @@ class SkillLoader:
                 if not manifest.is_file():
                     continue
 
-                loaded = self._load_manifest(manifest)
+                try:
+                    loaded = self._load_manifest(manifest)
+                except ValueError:
+                    # Discover a name without treating an oversized body as a
+                    # successful load; the actual tool reports the size error.
+                    with manifest.open('rb') as handle:
+                        preview = handle.read(8192).decode('utf-8', errors='replace')
+                    loaded = LoadedSkill(_metadata_from_content(preview, manifest), '')
                 if loaded.metadata.name in skills:
                     raise ValueError(f"Duplicate skill: {loaded.metadata.name}")
                 skills[loaded.metadata.name] = loaded
@@ -63,7 +71,7 @@ class SkillLoader:
             raise KeyError(name)
 
         try:
-            return self._skills[normalized_name]
+            return self._load_manifest(self._skills[normalized_name].metadata.path)
         except KeyError:
             raise KeyError(name) from None
 
@@ -73,7 +81,13 @@ class SkillLoader:
                 f"Skill is too large: {manifest} exceeds {self.max_skill_bytes} bytes"
             )
 
-        content = manifest.read_text(encoding="utf-8")
+        with manifest.open('rb') as handle:
+            raw = handle.read(SKILL_FILE_BYTES + 1)
+        if len(raw) > SKILL_FILE_BYTES or manifest.stat().st_size > SKILL_FILE_BYTES:
+            raise ValueError(f'Skill is too large: {manifest}; split reference material into separate files.')
+        content = raw.decode('utf-8')
+        if len(content) > SKILL_BODY_CHARS:
+            raise ValueError(f'Skill body exceeds {SKILL_BODY_CHARS} characters: {manifest}; split reference material.')
         metadata = _metadata_from_content(content, manifest)
         return LoadedSkill(metadata=metadata, content=content)
 

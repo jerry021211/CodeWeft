@@ -13,7 +13,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import TemporaryFile
+import codecs
+from codeagent.context.output_archive import OutputArchive, log_page
 
 from codeagent.runtime.cancellation import CancelledError
 from codeagent.runtime.execution import ExecutionStopped
@@ -48,6 +49,7 @@ class BashTool:
     workspace_guard: WorkspaceGuard | None = None
     cancellation_check: Callable[[], None] | None = None
     max_timeout_seconds: float = 600
+    output_root: Path = Path(".task_outputs/tool-results")
     definition: ToolDefinition = field(init=False)
     _cwd: Path | None = field(default=None, init=False, repr=False)
     _processes: dict[str, subprocess.Popen] = field(default_factory=dict, init=False, repr=False)
@@ -135,95 +137,99 @@ class BashTool:
         key = hashlib.sha256((str(cwd) + "\0" + command).encode("utf-8")).hexdigest()
         started = time.monotonic()
         proc = None
+        archive = OutputArchive(self.output_root, origin={'cwd': str(cwd)})
+        readers = []
+        collector_errors = []
+        def drain(pipe, channel):
+            decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+            try:
+                while chunk := pipe.read(8192):
+                    archive.append(decoder.decode(chunk), channel)
+                archive.append(decoder.decode(b'', final=True), channel)
+            except (OSError, ValueError) as exc:
+                collector_errors.append(type(exc).__name__)
+            finally:
+                pipe.close()
+        def finish(complete=True):
+            for thread in readers:
+                thread.join(timeout=1)
+            archive.finish(complete=complete and not collector_errors and not any(t.is_alive() for t in readers))
         try:
-            # Files avoid waiting on inherited pipe handles when a descendant
-            # survives a timeout. They also keep cancellation independent of EOF.
-            with TemporaryFile(mode="w+", errors="replace") as stdout, TemporaryFile(mode="w+", errors="replace") as stderr:
-                with self._process_lock:
-                    previous = self._processes.get(key)
-                    if previous is not None:
-                        return ToolOutput(
-                            f"Blocked: 同一命令的进程 {previous.pid} 仍在执行，或之前的清理结果未知；"
-                            "请检查该进程和已有副作用，不要重复启动。",
-                            status="blocked", outcome="process_pending",
-                            process_id=previous.pid, process_running=True,
-                        )
-                    if len(self._processes) >= 16:
-                        return ToolOutput("Blocked: 未确认结束的命令已达 16 个，请先检查进程状态。", status="blocked", outcome="process_pending")
-                    self._check_runtime()
-                    proc = subprocess.Popen(
-                        self.runtime_platform.command_argv(command),
-                        shell=False, stdout=stdout, stderr=stderr, text=True,
-                        cwd=str(cwd), env=_subprocess_environment(),
-                        **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}),
-                    )
-                    self._processes[key] = proc
-                deadline = started + timeout
-                try:
-                    while True:
-                        task_remaining = self._check_runtime()
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            raise subprocess.TimeoutExpired(proc.args, timeout)
-                        try:
-                            proc.wait(timeout=min(0.1, remaining, task_remaining))
-                            break
-                        except subprocess.TimeoutExpired:
-                            pass
-                except (subprocess.TimeoutExpired, CancelledError, ExecutionStopped, KeyboardInterrupt) as exc:
-                    stopped = self._stop_process(proc)
-                    if stopped:
-                        self._forget_process(key)
-                    if isinstance(exc, (CancelledError, ExecutionStopped, KeyboardInterrupt)):
-                        exc.process_id = proc.pid
-                        exc.process_running = not stopped
-                        raise
-                    return ToolOutput(
-                        f"Error: 命令在 {timeout:g}s 后超时；可能已产生部分副作用，重试前核实状态。"
-                        + (" 已终止本次进程组。" if stopped else " 进程清理结果未知，已阻止同一命令重启。"),
-                        status="error", outcome="timeout", process_id=proc.pid,
-                        process_running=not stopped, duration_seconds=time.monotonic() - started,
-                    )
-                self._forget_process(key)
-                stdout.seek(0)
-                stderr.seek(0)
-                output = stdout.read()
-                error_output = stderr.read()
-
-            if proc.returncode == 0:
-                self._update_cwd(command, cwd)
-
-            if error_output:
-                output += f"\n[stderr]\n{error_output}"
-            if proc.returncode != 0:
-                output += f"\n[exit code: {proc.returncode}]"
-            result_signature = _result_signature(output)
-            if len(output) > 15_000:
-                output = (
-                    output[:6000]
-                    + f"\n\n... truncated ({len(output)} chars total) ...\n\n"
-                    + output[-3000:]
+            with self._process_lock:
+                previous = self._processes.get(key)
+                if previous is not None or len(self._processes) >= 16:
+                    finish()
+                    return ToolOutput('Blocked: previous process cleanup is unconfirmed; inspect existing execution before retrying.',
+                                      status='blocked', outcome='process_pending',
+                                      process_id=previous.pid if previous else None, process_running=True)
+                self._check_runtime()
+                proc = subprocess.Popen(
+                    self.runtime_platform.command_argv(command), shell=False,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=str(cwd), env=_subprocess_environment(),
+                    **({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}),
                 )
-            return ToolOutput(
-                output.strip() or "(no output)",
-                status="success" if proc.returncode == 0 else "error",
-                exit_code=proc.returncode,
-                outcome="success" if proc.returncode == 0 else "diagnostic",
-                result_signature=result_signature,
-                process_id=proc.pid, duration_seconds=time.monotonic() - started,
-            )
+                self._processes[key] = proc
+            for pipe, channel in ((proc.stdout, 'stdout'), (proc.stderr, 'stderr')):
+                thread = threading.Thread(target=drain, args=(pipe, channel), daemon=True)
+                readers.append(thread)
+                thread.start()
+            deadline = started + timeout
+            timed_out = False
+            cleanup_unknown = False
+            try:
+                while True:
+                    task_remaining = self._check_runtime()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(proc.args, timeout)
+                    try:
+                        proc.wait(timeout=min(.1, remaining, task_remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+            except (subprocess.TimeoutExpired, CancelledError, ExecutionStopped, KeyboardInterrupt) as exc:
+                stopped = self._stop_process(proc)
+                cleanup_unknown = not stopped
+                if stopped:
+                    self._forget_process(key)
+                finish(complete=stopped)
+                if not isinstance(exc, subprocess.TimeoutExpired):
+                    exc.process_id, exc.process_running = proc.pid, not stopped
+                    exc.tool_output = log_page(archive.attach(ToolOutput('Cancelled after execution started.',
+                        status='error', exit_code=proc.poll(), outcome='cancelled', process_id=proc.pid,
+                        process_running=not stopped)))
+                    raise
+                timed_out = True
+            else:
+                self._forget_process(key)
+                finish()
+            if proc.returncode == 0 and not timed_out:
+                self._update_cwd(command, cwd)
+            result = ToolOutput('命令超时，可能已有副作用；核实已有执行和归档，不要自动重跑。' if timed_out else '', status='success' if proc.returncode == 0 and not timed_out else 'error',
+                                exit_code=proc.returncode, outcome='timeout' if timed_out else 'success' if proc.returncode == 0 else 'diagnostic',
+                                result_signature=_result_signature(archive.prefix if archive.saved_chars <= len(archive.prefix)
+                                                                   else archive.prefix + '\n' + archive.tail),
+                                process_id=proc.pid, process_running=cleanup_unknown or proc.poll() is None,
+                                duration_seconds=time.monotonic() - started)
+            return log_page(archive.attach(result))
         except (CancelledError, ExecutionStopped, KeyboardInterrupt):
+            if not archive.finished:
+                finish(False)
             raise
         except OSError as exc:
             stopped = proc is None or self._stop_process(proc)
             if stopped and proc is not None:
                 self._forget_process(key)
-            return ToolOutput(
-                f"Error running command: {exc}", status="error",
-                outcome="permission_denied" if isinstance(exc, PermissionError) else "infrastructure_error",
-                process_id=proc.pid if proc is not None else None,
-                process_running=not stopped, duration_seconds=time.monotonic() - started,
-            )
+            finish(False)
+            result = ToolOutput(f'Error running command: {exc}', status='error',
+                outcome='permission_denied' if isinstance(exc, PermissionError) else 'infrastructure_error',
+                process_id=proc.pid if proc else None, process_running=not stopped,
+                exit_code=proc.poll() if proc else None, duration_seconds=time.monotonic() - started)
+            return log_page(archive.attach(result))
+        finally:
+            if not archive.finished:
+                finish(False)
 
     def _forget_process(self, key: str) -> None:
         with self._process_lock:
