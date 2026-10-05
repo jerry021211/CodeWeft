@@ -113,6 +113,12 @@ export type TokenUsage = {
   available?: boolean;
 };
 
+export type TeamTokenUsage = TokenUsage & {
+  by_agent?: Record<string, TokenUsage>;
+  by_model?: Record<string, TokenUsage>;
+  by_call_kind?: Record<string, TokenUsage>;
+};
+
 export type Run = {
   id: Identifier;
   conversation_id: Identifier;
@@ -324,7 +330,7 @@ export type TeamSnapshot = {
     error?: string | null;
     validations: Array<{ command: string; status: string; output_ref: string }>;
   }>;
-  usage: TokenUsage;
+  usage: TeamTokenUsage;
   manual_integration: {
     required: boolean;
     commands: string[];

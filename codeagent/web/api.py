@@ -1455,7 +1455,7 @@ def _team_snapshot(
     sessions = repository.list_agent_sessions(team_run_id)
     messages = repository.list_team_messages(team_run_id)
     usage = repository.aggregate_usage(
-        run_id=team.root_run_id, include_breakdown=False
+        team_run_id=team.id, include_breakdown=True
     )
     return {
         "team": team.to_dict(),

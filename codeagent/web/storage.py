@@ -183,6 +183,7 @@ class Repository(Protocol):
         *,
         run_id: str | None = None,
         conversation_id: str | None = None,
+        team_run_id: str | None = None,
         include_breakdown: bool = True,
     ) -> JsonObject: ...
 
@@ -8634,6 +8635,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         *,
         run_id: str | None = None,
         conversation_id: str | None = None,
+        team_run_id: str | None = None,
         include_breakdown: bool = True,
     ) -> JsonObject:
         conditions: list[str] = []
@@ -8644,6 +8646,31 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         if conversation_id is not None:
             conditions.append("conversation_id = ?")
             parameters.append(conversation_id)
+        if team_run_id is not None:
+            # Narrow through the existing conversation index before membership.
+            conditions.append("conversation_id = (SELECT conversation_id FROM team_runs WHERE id = ?)")
+            parameters.append(team_run_id)
+            # Workers use the root run; later Lead turns have their own runs.
+            # Membership covers in-flight/legacy Lead runs before their terminal
+            # metadata is saved. EXISTS counts each persisted call only once.
+            conditions.append("""EXISTS (
+                SELECT 1 FROM team_runs t
+                WHERE t.id = ? AND t.conversation_id = model_calls.conversation_id
+                  AND (
+                    model_calls.run_id = t.root_run_id
+                    OR model_calls.agent_id IN (
+                        SELECT id FROM team_agents WHERE team_run_id = t.id
+                    )
+                    OR model_calls.run_id IN (
+                        SELECT id FROM runs
+                        WHERE json_extract(metadata_json, '$.team_run_id') = t.id
+                    )
+                    OR model_calls.run_id IN (
+                        SELECT run_id FROM planning_revisions WHERE team_run_id = t.id
+                    )
+                  )
+            )""")
+            parameters.append(team_run_id)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         with self._lock:
             self._ensure_open()

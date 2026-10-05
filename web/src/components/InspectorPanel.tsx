@@ -20,10 +20,11 @@ import {
 import type { RuntimeConfig, TeamSnapshot } from "@/types/api";
 import type { TaskList, TaskResource } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
-import { cx, formatDuration, formatNumber, formatTime, isRunActive, prettyJson, statusLabel, tokenTotal } from "@/lib/utils";
+import { cx, formatDuration, formatNumber, formatTime, isRunActive, prettyJson, statusLabel } from "@/lib/utils";
 import { EmptyPanel, IconButton, StatusDot } from "@/components/ui";
 import { TaskPlan } from "@/components/TaskPlan";
 import { TeamPanel } from "@/components/TeamPanel";
+import { TokenUsagePanel, teamUsageForRun } from "@/components/TokenUsagePanel";
 import { ContextMetricsPanel, RunMetricsPanel } from "@/components/RunMetricsPanel";
 
 type Props = {
@@ -65,7 +66,7 @@ export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], task
         {mobile && onClose && <IconButton label="关闭运行面板" onClick={onClose}><X className="size-4" /></IconButton>}
       </header>
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {tab === "run" ? <RunInspector run={run} runtime={runtime} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : tab === "team" ? <TeamPanel enabled={teamEnabled} team={team} loading={teamLoading} busy={teamBusy} error={teamError} onTeamPlan={onTeamPlan ?? (() => undefined)} onCandidateApproval={onCandidateApproval ?? (() => undefined)} onResumeAttempt={onResumeAttempt ?? (() => undefined)} onCancel={onCancelTeam ?? (() => undefined)} onVerifyIntegration={onVerifyIntegration ?? (() => undefined)} onResolveIntegration={onResolveIntegration} onCleanupWorktree={onCleanupWorktree ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
+        {tab === "run" ? <RunInspector run={run} runtime={runtime} team={team} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : tab === "team" ? <TeamPanel enabled={teamEnabled} team={team} loading={teamLoading} busy={teamBusy} error={teamError} onTeamPlan={onTeamPlan ?? (() => undefined)} onCandidateApproval={onCandidateApproval ?? (() => undefined)} onResumeAttempt={onResumeAttempt ?? (() => undefined)} onCancel={onCancelTeam ?? (() => undefined)} onVerifyIntegration={onVerifyIntegration ?? (() => undefined)} onResolveIntegration={onResolveIntegration} onCleanupWorktree={onCleanupWorktree ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
       </div>
     </aside>
   );
@@ -75,7 +76,9 @@ function Tab({ active, onClick, children }: { active: boolean; onClick: () => vo
   return <button type="button" onClick={onClick} className={cx("relative h-11 text-xs font-medium transition", active ? "text-ink" : "text-ink-muted hover:text-ink")}><span>{children}</span>{active && <span className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-accent" />}</button>;
 }
 
-function RunInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeConfig }) {
+function RunInspector({ run, runtime, team }: { run?: RunViewState; runtime?: RuntimeConfig; team?: TeamSnapshot }) {
+  const usageTeam = teamUsageForRun(run, team);
+  if (!run && usageTeam) return <div className="px-4 py-5"><TokenUsagePanel team={usageTeam} /></div>;
   if (!run) return <EmptyPanel icon={<Activity className="size-5" />} title="没有正在观察的运行" body="发送消息后，这里会汇总进度、Token 和 Agent 状态。" />;
   const activeAction = [...run.actionOrder].reverse().map((id) => run.actions[id]).find((action) => action?.status === "running" || action?.status === "waiting");
   const agents = Object.values(run.agents);
@@ -101,7 +104,7 @@ function RunInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeC
       </Section>
 
       <Section title="累计 Token 消耗" icon={<Coins className="size-3.5" />}>
-        <TokenPanel run={run} model={runtime?.model} />
+        <TokenUsagePanel run={run} team={usageTeam} model={runtime?.model} />
       </Section>
 
       <Section title="Agent" icon={<GitBranch className="size-3.5" />} count={agents.length}>
@@ -117,16 +120,6 @@ function RunInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeC
       </Section>
     </div>
   );
-}
-
-function TokenPanel({ run, model }: { run: RunViewState; model?: string | null }) {
-  const total = tokenTotal(run.usage);
-  const hitRatio = run.usage.cache_hit_ratio;
-  return <div className="overflow-hidden rounded-2xl border border-line"><div className="bg-surface-muted px-3.5 py-3"><div className="flex items-end justify-between"><div><div className="text-[9px] uppercase tracking-wider text-ink-faint">Run total</div><div className="mt-1 text-xl font-semibold tracking-tight text-ink">{formatNumber(total)}</div></div><span className="max-w-28 truncate font-mono text-[9px] text-ink-muted" title={run.usage.model || model || ""}>{run.usage.model || model || "—"}</span></div></div><div className="grid grid-cols-2 divide-x divide-y divide-line border-t border-line"><Metric label="未缓存输入" value={run.usage.input_tokens} /><Metric label="缓存读取" value={run.usage.cache_read_input_tokens} /><Metric label="缓存命中率" value={hitRatio == null ? null : `${(hitRatio * 100).toFixed(1)}%`} /><Metric label="输出" value={run.usage.output_tokens} /></div>{run.usageByCall.length > 0 && <div className="border-t border-line px-3 py-2 text-[9px] text-ink-muted">已记录 {run.usageByCall.length} 次模型调用{run.usage.estimated ? " · 含估算值" : ""}</div>}</div>;
-}
-
-function Metric({ label, value }: { label: string; value?: number | string | null }) {
-  return <div className="px-3 py-2.5"><div className="text-[9px] text-ink-faint">{label}</div><div className="mt-0.5 font-mono text-[11px] text-ink">{typeof value === "number" ? formatNumber(value) : value ?? "不可用"}</div></div>;
 }
 
 function DebugInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeConfig }) {
