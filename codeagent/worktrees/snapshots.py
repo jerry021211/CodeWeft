@@ -2,6 +2,7 @@
 
 Snapshots use a temporary index: neither the user's HEAD nor staging choices
 are changed. No operation in this module contacts a remote.
+Approved Team startup may initialize a missing repository with an empty commit.
 """
 
 from __future__ import annotations
@@ -84,6 +85,38 @@ class LocalGit:
         if not path.is_absolute():
             path = self.source / path
         return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+
+    def ensure_repository(self) -> str:
+        """Prepare an approved Team's local baseline without staging user files."""
+        with exclusive_file(self.root / "bootstrap.lock"):
+            try:
+                probe = self.run("rev-parse", "--show-toplevel", check=False)
+            except FileNotFoundError as exc:
+                raise WorktreeError("未找到 Git，请安装 Git 并重启服务后重试启动") from exc
+            if probe.returncode:
+                # Failed access to an existing/broken repo is not a missing repo.
+                markers = [parent / ".git" for parent in (self.source, *self.source.parents)]
+                if (any(path.exists() or path.is_symlink() for path in markers)
+                        or self.run("rev-parse", "--git-dir", check=False).returncode == 0):
+                    raise WorktreeError(probe.stderr.decode("utf-8", "replace").strip()
+                                        or "现有 Git 仓库无法读取，请修复后重试")
+                self.run("init", "--", str(self.source))
+                probe = self.run("rev-parse", "--show-toplevel")
+            if Path(os.fsdecode(probe.stdout).strip()).resolve() != self.source:
+                raise WorktreeError("Agent Team source workspace must be the Git repository root")
+            head = self.run("rev-parse", "--verify", "HEAD^{commit}", check=False)
+            if head.returncode == 0:
+                return head.stdout.decode().strip()
+            branch = self.text("symbolic-ref", "-q", "HEAD")
+            if not branch.startswith("refs/heads/"):
+                raise WorktreeError("Git HEAD 未指向有效的本地分支")
+            if self.run("show-ref", "--verify", "--quiet", branch, check=False).returncode != 1:
+                raise WorktreeError("现有 Git HEAD 无法解析，不能自动替换，请修复后重试")
+            # Plumbing avoids hooks, user identity setup, and the real index.
+            tree = self.text("hash-object", "-t", "tree", "--stdin", "-w", input=b"")
+            commit = self.commit(tree, [], "CodeAgent initial local baseline")
+            self.run("update-ref", branch, commit, "0" * len(commit))
+            return self.text("rev-parse", "--verify", "HEAD^{commit}")
 
     def tree(self, cwd: Path | None = None) -> str:
         """Capture tracked changes and non-ignored untracked files, including deletions."""

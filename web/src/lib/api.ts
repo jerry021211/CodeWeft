@@ -1,4 +1,6 @@
 import type {
+  PlanDocument,
+  PlanningSnapshot,
   ModelSettings,
   ModelSettingsInput,
   ModelServiceName,
@@ -6,6 +8,7 @@ import type {
   UserQuestion,
   ApiList,
   ApprovalDecision,
+  Approval,
   Conversation,
   CreateRunResponse,
   Message,
@@ -57,6 +60,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getPlans(conversationId: string) {
+    return request<PlanningSnapshot>(`/conversations/${encodeURIComponent(conversationId)}/plans`);
+  },
+  decidePlan(conversationId: string, plan: PlanDocument, decision: "approve" | "reject" | "withdraw" | "restore") {
+    return request<PlanDocument>(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(plan.id)}/decision`, {
+      method: "POST", body: JSON.stringify({ decision, contentHash: plan.content_hash }),
+    });
+  },
+  exitPlanning(conversationId: string) {
+    return request(`/conversations/${encodeURIComponent(conversationId)}/plans/exit`, { method: "POST" });
+  },
   getModelSettings() {
     return request<ModelSettings>("/settings/models");
   },
@@ -96,6 +110,10 @@ export const api = {
       if (page.next_after == null) return { runId, status: page.status, events };
       after = page.next_after;
     }
+  },
+  getRunActivityPage(runId: string, after = 0, signal?: AbortSignal) {
+    return request<{ run_id: string; status: RunStatus; events: RunEvent[]; next_after: number | null }>(
+      `/runs/${encodeURIComponent(runId)}/activity?after=${after}`, { signal });
   },
   listQuestions(runId: string) {
     return request<UserQuestion[]>(`/runs/${encodeURIComponent(runId)}/questions`);
@@ -167,10 +185,10 @@ export const api = {
     });
   },
 
-  createRun(conversationId: string, content: string, useTeam = false, readOnly = false, webSearch = false, reasoningEffort?: string, attachments: Attachment[] = []) {
+  createRun(conversationId: string, content: string, useTeam = false, readOnly = false, webSearch = false, reasoningEffort?: string, attachments: Attachment[] = [], planMode?: boolean) {
     return request<CreateRunResponse>(`/conversations/${encodeURIComponent(conversationId)}/runs`, {
       method: "POST",
-      body: JSON.stringify({ content, useTeam, readOnly, webSearch, reasoningEffort, attachments }),
+      body: JSON.stringify({ content, useTeam, readOnly, webSearch, reasoningEffort, attachments, ...(planMode ? { planMode: true } : {}) }),
     });
   },
 
@@ -182,8 +200,12 @@ export const api = {
     return request<Run | { status: string }>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
   },
 
+  listPendingApprovals(conversationId: string, signal?: AbortSignal) {
+    return request<Approval[]>(`/conversations/${encodeURIComponent(conversationId)}/approvals`, { signal });
+  },
+
   decideApproval(runId: string, approvalId: string, decision: ApprovalDecision) {
-    return request<{ status: string }>(
+    return request<Approval>(
       `/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`,
       { method: "POST", body: JSON.stringify({ decision }) },
     );
@@ -245,6 +267,12 @@ export const api = {
     return request<TeamSnapshot>(`/teams/${encodeURIComponent(teamRunId)}/cancel`, {
       method: "POST",
       body: JSON.stringify({ reason, commandId: crypto.randomUUID() }),
+    });
+  },
+
+  controlTeam(teamRunId: string, action: "pause" | "resume", reason: string) {
+    return request<TeamSnapshot>(`/teams/${encodeURIComponent(teamRunId)}/${action}`, {
+      method: "POST", body: JSON.stringify({ reason, commandId: crypto.randomUUID() }),
     });
   },
 

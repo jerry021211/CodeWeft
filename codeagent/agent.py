@@ -122,6 +122,7 @@ class Agent:
     permission_broker: CliPermissionBroker | WaitingPermissionBroker | None = None
     prompt_mode: PromptMode | None = None
     read_only: bool = False
+    plan_mode: bool = False
     execution_budget: RunBudget | None = None
     tool_admission: Admission | None = None
     _loop_guard: LoopGuard | None = field(default=None, init=False, repr=False)
@@ -230,6 +231,8 @@ class Agent:
         self.read_only = enabled
 
     def _read_only_guard(self, tool_use: ToolUse) -> str | None:
+        if self.plan_mode and tool_use.name in {"plan", "inspect_project", "project_diff"}:
+            return None  # Planning artifacts live in runtime storage, never project source.
         return read_only_tool_guard(tool_use) if self.read_only else None
 
     def set_execution_activity(self, activity: ExecutionActivity) -> None:
@@ -251,7 +254,7 @@ class Agent:
         usage_before = self.usage_tracker.snapshot()
         try:
             with permission_execution(self.execution_activity, self.cancellation, self.event_emitter.context.agent_id):
-                result = self._guarded_run(prompt, allow_yield=False, execution_id=execution_id)
+                result = self._guarded_run(prompt, allow_yield=self.plan_mode, execution_id=execution_id)
                 return result
         finally:
             if self._subagent_runtime is not None:
@@ -419,7 +422,7 @@ class Agent:
                     return result
                 self._round_budget.admit()
                 iterations += 1
-                if self.read_only:
+                if self.read_only or self.plan_mode:
                     reminder = None
                     if self._loop_guard is not None:
                         self._loop_guard.before_model(self.messages)
@@ -705,7 +708,7 @@ class Agent:
         if kind == "date" and previous.get("system_value_hash") == value_hash:
             return False
         validate_tool_history(canonical)
-        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期", 'round_budget': '收尾提醒'}
+        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期", 'round_budget': '收尾提醒', 'plan_mode': '规划模式'}
         text = value or "此前的运行时执行纠偏已解除；继续遵循当前用户目标和权限。"
         if kind == 'round_budget' and not value:
             text = '本次是新的逻辑执行，轮数重新计数；上一执行的收尾提醒不再适用。'
@@ -1362,7 +1365,7 @@ class Agent:
             return self.memory_manager.select_context(
                 self.messages,
                 current_query=current_query,
-                allow_index_write=not self.read_only,
+                allow_index_write=not (self.read_only or self.plan_mode),
                 client=self._side_query_client("memory_select"),
                 model=model or self.config.model,
                 max_tokens=max_tokens or self.config.max_tokens,
@@ -1427,7 +1430,7 @@ class Agent:
             })
 
     def _after_turn_memory(self, start_index: int = 0) -> None:
-        if self.memory_manager is None or self.read_only:
+        if self.memory_manager is None or self.read_only or self.plan_mode:
             return
         try:
             memory_client = self._side_query_client("memory_maintenance")

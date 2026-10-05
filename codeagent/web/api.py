@@ -35,6 +35,7 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
         ConversationResponse,
         CreateConversationRequest,
         CreateRunRequest,
+        PlanDecisionRequest,
         CreateRunResponse,
         CreateTeamPlanRevisionRequest,
         CreateTeamRunRequest,
@@ -209,6 +210,9 @@ def create_app(
         application.state.team_supervisor = team_supervisor
         application.state.team_worktrees = worktrees
         scheduler.start()
+        recover_plans = getattr(scheduler, 'recover_plan_launches', None)
+        if callable(recover_plans):
+            recover_plans()
         if team_supervisor is not None:
             team_supervisor.start()
         try:
@@ -804,12 +808,35 @@ def create_app(
             options["web_search_enabled"] = search_enabled
         if body.readOnly:
             options["read_only"] = True
+        if body.planMode is not None:
+            options['plan_mode'] = body.planMode
         run = scheduler.submit(conversation_id, content, **options)
         return CreateRunResponse(
             run_id=run.id,
             status=_visible_run_status(run),
             queue_position=run.queue_position,
         )
+
+    @app.get('/api/conversations/{conversation_id}/plans')
+    def get_plans(conversation_id: str) -> dict[str, Any]:
+        _require_conversation(repo, conversation_id)
+        return {'state': repo.planning_state(conversation_id),
+                'plans': repo.list_planning_revisions(conversation_id)}
+
+    @app.post('/api/conversations/{conversation_id}/plans/{plan_id}/decision')
+    def decide_plan(conversation_id: str, plan_id: str, body: PlanDecisionRequest) -> dict[str, Any]:
+        _require_conversation(repo, conversation_id)
+        plan = repo.get_planning_revision(plan_id)
+        if plan['conversation_id'] != conversation_id:
+            raise HTTPException(status_code=404, detail='Plan not found in this conversation')
+        if body.decision == 'approve' and plan['payload'].get('target') == 'team':
+            _require_team_enabled(team_enabled, team_supervisor)
+        return scheduler.decide_plan(plan_id, body.contentHash, body.decision)
+
+    @app.post('/api/conversations/{conversation_id}/plans/exit')
+    def exit_planning(conversation_id: str) -> dict[str, Any]:
+        _require_conversation(repo, conversation_id)
+        return scheduler.exit_planning(conversation_id)
 
     @app.get("/api/runs/{run_id}", response_model=RunResponse)
     def get_run(run_id: str) -> RunResponse:
@@ -1107,6 +1134,9 @@ def create_app(
         body: TeamDecisionRequest,
     ) -> dict[str, Any]:
         _require_team_enabled(team_enabled, team_supervisor)
+        revision_record = repo.get_team_plan_revision(team_run_id, revision)
+        if revision_record.plan.get('preview_plan_id'):
+            raise HTTPException(status_code=409, detail='请在方案预览中决定此方案，避免重复审批或批准过期版本。')
         if body.decision == "approve":
             worktrees.ensure_baseline_ready(team_run_id)
         repo.decide_team_plan_revision(

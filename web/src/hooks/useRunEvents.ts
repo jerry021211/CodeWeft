@@ -8,6 +8,7 @@ import type { RunStatus } from "@/types/api";
 const EVENT_NAMES = [
   "run_queued", "run_started", "run_completed", "run_failed", "run_cancelled", "run_interrupted",
   "message_completed", "agent_profile_selected",
+  "plan_updated",
   "model_started", "model_text_delta", "model_completed", "model_failed", "model_usage",
   "usage_updated",
   "tool_requested", "tool_waiting_approval", "tool_started", "tool_completed", "tool_failed", "tool_blocked", "tool_cancelled", "tool_interrupted",

@@ -24,6 +24,16 @@ const { useRunStore, createRunEventBuffer } = createRequire(import.meta.url)(bun
 after(() => { unlinkSync(bundle); rmdirSync(directory); });
 beforeEach(() => useRunStore.setState({ runs: {} }));
 
+test("cancellation event overrides legacy running payload until terminal confirmation", () => {
+  useRunStore.getState().mergeEvents([
+    event(1, "run.started", { status: "running" }),
+    event(2, "run.cancelling", { status: "running" }),
+  ]);
+  assert.equal(useRunStore.getState().runs["run-a"].status, "cancelling");
+  useRunStore.getState().mergeEvents([event(3, "run.cancelled", { status: "cancelled" })]);
+  assert.equal(useRunStore.getState().runs["run-a"].status, "cancelled");
+});
+
 test("parallel children keep independent status, results and reused tool ids through replay", () => {
   const child = (seq, agent, type, payload) => ({ ...event(seq, type, payload), agent_id: agent, parent_agent_id: "root" });
   const events = [
@@ -137,4 +147,29 @@ test("flushing before stream end preserves the authoritative terminal status", (
   context.mock.timers.tick(32);
   assert.equal(useRunStore.getState().runs["run-a"].status, "completed");
   assert.equal(useRunStore.getState().runs["run-a"].lastSeq, 2);
+});
+
+
+test("Lead terminal usage cannot overwrite worker totals, including reconnect replay", () => {
+  const events = [
+    event(1, "usage.updated", { call_id: "lead", input_tokens: 1, cache_read_input_tokens: 9, output_tokens: 2 }),
+    { ...event(2, "usage.updated", { call_id: "worker", input_tokens: 90, cache_read_input_tokens: 10, output_tokens: 3 }), agent_id: "worker", parent_agent_id: "root" },
+    event(3, "run.completed", { usage: { input_tokens: 1, cache_read_input_tokens: 9, output_tokens: 2 } }),
+    event(4, "usage.updated", { call_id: "worker", input_tokens: 90, cache_read_input_tokens: 10, output_tokens: 3 }),
+  ];
+  useRunStore.getState().mergeEvents(events);
+  useRunStore.getState().mergeEvents(events);
+  const run = useRunStore.getState().runs["run-a"];
+  assert.equal(run.usage.input_tokens, 91);
+  assert.equal(run.usage.output_tokens, 5);
+  assert.equal(run.usage.cache_hit_ratio, 19 / 110);
+  assert.equal(run.usageByCall.length, 2);
+  // Workers can keep producing calls after the planning run finishes.
+  useRunStore.getState().mergeEvents([event(5, "usage.updated", { call_id: "retry", input_tokens: 5 })]);
+  assert.equal(useRunStore.getState().runs["run-a"].usage.input_tokens, 96);
+});
+
+test("legacy terminal-only usage remains readable", () => {
+  useRunStore.getState().mergeEvents([event(1, "run.completed", { usage: { input_tokens: 40, output_tokens: 5 } })]);
+  assert.equal(useRunStore.getState().runs["run-a"].usage.input_tokens, 40);
 });

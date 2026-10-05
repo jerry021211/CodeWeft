@@ -3,14 +3,17 @@ import { useMutation, useMutationState, useQuery, useQueryClient } from "@tansta
 import { AlertCircle, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cx, isRunActive } from "@/lib/utils";
-import type { Attachment, ApprovalDecision, Conversation, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
+import type { Attachment, Approval, ApprovalDecision, Conversation, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
+import { PlanPreview } from "@/components/PlanPreview";
+import type { PlanDocument } from "@/types/api";
 import { InspectorPanel } from "@/components/InspectorPanel";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
 import { McpConfigModal } from "@/components/McpConfigModal";
 import { ModelSettingsPage } from "@/components/ModelSettingsPage";
 import { useRunEvents } from "@/hooks/useRunEvents";
+import { approvalsKey, usePendingApprovals } from "@/hooks/usePendingApprovals";
 import { useConversationActivity } from "@/hooks/useConversationActivity";
 import { useRunStore } from "@/store/runStore";
 
@@ -26,6 +29,7 @@ type TeamCommand =
   | { kind: "candidate-approval"; candidateId: string; decision: "approve" | "reject"; reason: string }
   | { kind: "resume-attempt"; attemptId: string; reason: string; acknowledgeUnknownResult: boolean }
   | { kind: "cancel"; reason: string }
+  | { kind: "pause" | "resume"; reason: string }
   | { kind: "integration"; targetRef: string }
   | { kind: "resolve-integration"; integrationId: string; action: "retry" | "repair" | "resume"; reason: string }
   | { kind: "cleanup"; worktreeId: string };
@@ -66,6 +70,7 @@ export default function App() {
   const sending = Boolean(selectedId && sendingConversations.includes(selectedId));
   const [readOnlyChoices, setReadOnlyChoices] = useState<Record<string, boolean>>({});
   const [teamChoices, setTeamChoices] = useState<Record<string, boolean>>({});
+  const [planChoices, setPlanChoices] = useState<Record<string, boolean>>({});
   const [webSearchChoices, setWebSearchChoices] = useState<Record<string, boolean>>({});
   const [reasoningChoices, setReasoningChoices] = useState<Record<string, string>>({});
   const [leftOpen, setLeftOpen] = useState(false);
@@ -122,11 +127,16 @@ export default function App() {
     if (selectedId) setReadOnlyChoices((current) => ({ ...current, [selectedId]: value }));
   };
   const teamEnabled = Boolean(runtimeQuery.data?.features?.agent_team);
+  const plansQuery = useQuery({
+    queryKey: ["plans", selectedId], queryFn: () => api.getPlans(selectedId!), enabled: Boolean(selectedId),
+    refetchInterval: query => query.state.data?.state.mode === "planning" ? 1000 : 5000,
+  });
+  const planningActive = plansQuery.data?.state.mode === "planning";
   const teamsQuery = useQuery({
     queryKey: teamsKey(selectedId ?? ""),
     queryFn: () => api.listTeams(selectedId!),
     enabled: teamEnabled && Boolean(selectedId),
-    refetchInterval: teamEnabled ? 5_000 : false,
+    refetchInterval: query => teamEnabled && query.state.data?.some(item => !["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(item.team.state)) ? 1500 : teamEnabled ? 5000 : false,
   });
   const team = useMemo(() => {
     const teams = teamsQuery.data ?? [];
@@ -135,7 +145,39 @@ export default function App() {
       ?? [...teams].sort((left, right) => right.team.updated_at.localeCompare(left.team.updated_at))[0];
   }, [teamsQuery.data]);
   const teamLeadActive = Boolean(team && !["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(team.team.state));
-  const useTeam = teamEnabled && (teamLeadActive || (!readOnly && Boolean(teamChoices[selectedId ?? ""])));
+  const useTeam = teamEnabled && (teamLeadActive || (!readOnly && (planningActive
+    ? plansQuery.data?.state.target === "team" : Boolean(teamChoices[selectedId ?? ""]))));
+  const planMode = !teamLeadActive && (planningActive || useTeam || Boolean(planChoices[selectedId ?? ""]));
+  const planDecision = useMutation({
+    mutationFn: ({ conversationId, plan, decision }: { conversationId: string; plan: PlanDocument; decision: "approve" | "reject" | "withdraw" | "restore" }) => api.decidePlan(conversationId, plan, decision),
+    onSuccess: (plan, variables) => {
+      if (variables.decision === "restore") {
+        setDrafts(current => current[variables.conversationId] === "请修改方案："
+          ? { ...current, [variables.conversationId]: "" } : current);
+      }
+      if (plan.status === "started") {
+        setPlanChoices(current => ({ ...current, [variables.conversationId]: false }));
+        if (plan.execution_run_id) setRunIds(current => ({ ...current, [variables.conversationId]: plan.execution_run_id! }));
+      }
+      void queryClient.invalidateQueries({ queryKey: ["plans", variables.conversationId] });
+      void queryClient.invalidateQueries({ queryKey: teamsKey(variables.conversationId) });
+      void queryClient.invalidateQueries({ queryKey: messagesKey(variables.conversationId) });
+    },
+  });
+  const exitPlan = useMutation({
+    mutationFn: (conversationId: string) => api.exitPlanning(conversationId),
+    onSuccess: (_, conversationId) => {
+      setPlanChoices(current => ({ ...current, [conversationId]: false }));
+      setTeamChoices(current => ({ ...current, [conversationId]: false }));
+      void queryClient.invalidateQueries({ queryKey: ["plans", conversationId] });
+    },
+    onError: error => setNotice(errorMessage(error)),
+  });
+  const selectPlanMode = (enabled: boolean) => {
+    if (!selectedId) return;
+    if (!enabled && planningActive) exitPlan.mutate(selectedId);
+    else setPlanChoices(current => ({ ...current, [selectedId]: enabled }));
+  };
   const selectTeam = (enabled: boolean) => {
     if (selectedId) setTeamChoices((current) => ({ ...current, [selectedId]: enabled }));
   };
@@ -186,7 +228,8 @@ export default function App() {
   const ensureRun = useRunStore((state) => state.ensureRun);
   const setRunStatus = useRunStore((state) => state.setRunStatus);
   const resolveApproval = useRunStore((state) => state.resolveApproval);
-  const pendingApproval = liveRun ? Object.values(liveRun.approvals).find((item) => item.status === "pending") : undefined;
+  const approvalsQuery = usePendingApprovals(selectedId);
+  const pendingApproval = approvalsQuery.data?.find(item => item.status === "pending");
 
   useEffect(() => {
     if (!taskListId) return;
@@ -301,8 +344,8 @@ export default function App() {
 
   const sendRun = useMutation({
     mutationKey: ["send-run"],
-    mutationFn: async ({ conversationId, content, useTeam, readOnly: submittedReadOnly, webSearch, reasoningEffort, attachments }: { attachments: Attachment[]; conversationId: string; content: string; useTeam: boolean; readOnly: boolean; webSearch: boolean; reasoningEffort: string }) => {
-      const result = await api.createRun(conversationId, content, useTeam, submittedReadOnly, webSearch, reasoningEffort, attachments);
+    mutationFn: async ({ conversationId, content, useTeam, readOnly: submittedReadOnly, webSearch, reasoningEffort, attachments, planMode: submittedPlanMode }: { attachments: Attachment[]; conversationId: string; content: string; useTeam: boolean; readOnly: boolean; webSearch: boolean; reasoningEffort: string; planMode?: boolean }) => {
+      const result = await api.createRun(conversationId, content, useTeam, submittedReadOnly, webSearch, reasoningEffort, attachments, submittedPlanMode);
       return { ...result, content, conversationId, attachments };
     },
     onSuccess: (result) => {
@@ -332,12 +375,14 @@ export default function App() {
 
   const decideApproval = useMutation({
     mutationKey: ["decide-approval"],
-    mutationFn: ({ targetRunId, approvalId, decision }: { targetRunId: string; approvalId: string; decision: ApprovalDecision }) => api.decideApproval(targetRunId, approvalId, decision),
-    onMutate: ({ targetRunId, approvalId, decision }) => resolveApproval(targetRunId, approvalId, decision === "allow" ? "allowed" : "denied"),
-    onError: (error, variables) => {
-      resolveApproval(variables.targetRunId, variables.approvalId, "pending");
-      showError(error, setNotice);
+    mutationFn: ({ targetRunId, approvalId, decision }: { conversationId: string; targetRunId: string; approvalId: string; decision: ApprovalDecision }) => api.decideApproval(targetRunId, approvalId, decision),
+    onSuccess: async (approval, variables) => {
+      resolveApproval(variables.targetRunId, approval.id, approval.status);
+      await queryClient.cancelQueries({ queryKey: approvalsKey(variables.conversationId) });
+      queryClient.setQueryData<Approval[]>(approvalsKey(variables.conversationId), current => current?.filter(item => item.id !== approval.id));
     },
+    onError: (error) => showError(error, setNotice),
+    onSettled: (_data, _error, variables) => queryClient.invalidateQueries({ queryKey: approvalsKey(variables.conversationId) }),
   });
 
   const createTask = useMutation({
@@ -367,6 +412,10 @@ export default function App() {
           return;
         case "cancel":
           await api.cancelTeam(teamId, command.reason);
+          return;
+        case "pause":
+        case "resume":
+          await api.controlTeam(teamId, command.kind, command.reason);
           return;
         case "integration":
           await api.verifyManualIntegration(teamId, command.targetRef);
@@ -433,7 +482,7 @@ export default function App() {
       metadata: { read_only: readOnly, web_search_enabled: webSearch, reasoning_effort: reasoningEffort, attachments: attachments.map(({ name, media_type }) => ({ name, media_type })) },
     };
     queryClient.setQueryData<Message[]>(messagesKey(selectedId), (current = []) => [...current, optimistic]);
-    sendRun.mutate({ conversationId: selectedId, content, useTeam, readOnly, webSearch, reasoningEffort, attachments });
+    sendRun.mutate({ conversationId: selectedId, content, useTeam, readOnly, webSearch, reasoningEffort, attachments, planMode });
   };
 
   const teamPanelProps = {
@@ -460,7 +509,21 @@ export default function App() {
         </div>
 
         <div className="relative flex min-h-0 min-w-0 flex-col">
-          <ChatWorkspace onOpenSettings={openSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(runId && decidingRuns.includes(runId))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => runId && pendingApproval && decideApproval.mutate({ targetRunId: runId, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
+          <ChatWorkspace planMode={planMode} planLocked={planningActive} onPlanModeChange={selectPlanMode}
+            teams={teamsQuery.data} team={team} teamBusy={teamCommand.isPending}
+            teamError={teamsQuery.error ? errorMessage(teamsQuery.error) : teamCommand.error ? errorMessage(teamCommand.error) : undefined}
+            onPauseTeam={() => teamCommand.mutate({ kind: "pause", reason: "用户暂停团队，保留工作现场" })}
+            onResumeTeam={() => teamCommand.mutate({ kind: "resume", reason: "用户检查并恢复团队" })}
+            planningSnapshot={plansQuery.data} planBusy={planDecision.isPending || exitPlan.isPending}
+            planError={planDecision.error ? errorMessage(planDecision.error) : undefined}
+            onPlanDecision={(plan, decision) => selectedId && planDecision.mutate({ conversationId: selectedId, plan, decision }, {
+              onSuccess: () => { if (decision === "reject") setDraft("请修改方案："); },
+            })}
+            planPanel={<PlanPreview key={selectedId} snapshot={plansQuery.data} busy={sending || planDecision.isPending || exitPlan.isPending || Boolean(liveRun && isRunActive(liveRun.status))}
+              error={planDecision.error ? errorMessage(planDecision.error) : undefined}
+              onDecision={(plan, decision) => selectedId && planDecision.mutate({ conversationId: selectedId, plan, decision })}
+              onExit={() => selectedId && exitPlan.mutate(selectedId)} onRevise={() => setDraft("请修改方案：")} />}
+            onOpenSettings={openSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(pendingApproval && decidingRuns.includes(pendingApproval.run_id))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => selectedId && pendingApproval && decideApproval.mutate({ conversationId: selectedId, targetRunId: pendingApproval.run_id, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>

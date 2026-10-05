@@ -5,6 +5,8 @@ import { cx, formatNumber, formatTime, prettyJson, tokenTotal } from "@/lib/util
 import { EmptyPanel, StatusDot } from "@/components/ui";
 import { TeamObserver } from "@/components/TeamObserver";
 import { api } from "@/lib/api";
+import { teamSessionGroups } from "@/lib/teamPresentation";
+import { TeamSessions } from "@/components/TeamSessions";
 
 type Props = {
   enabled: boolean;
@@ -43,7 +45,8 @@ export function TeamPanel({
   const [diffError, setDiffError] = useState("");
   const managed = team?.team.integration_mode === "managed";
   const pendingPlan = [...(team?.plans ?? [])].reverse().find((item) => item.status === "pending_user_approval");
-  const questionWaits = (team?.sessions ?? []).filter((session) => session.state === "waiting" && (
+  const latestSessions = useMemo(() => teamSessionGroups(team).map(group => group.current), [team?.sessions, team?.agents]);
+  const questionWaits = latestSessions.filter((session) => session.state === "waiting" && (
     session.waiting_reason?.startsWith("waiting_for_lead_answer:") || session.waiting_reason === "team_plan_change_required"
   ));
   const submittedAttemptPlans = team?.attempt_plans.filter((item) => item.status === "submitted") ?? [];
@@ -83,7 +86,7 @@ export function TeamPanel({
     if (!reason.trim()) return;
     action();
   };
-  const hasFailure = team.sessions.some((item) => item.failure || ["failed", "lost"].includes(item.state))
+  const hasFailure = latestSessions.some((item) => item.failure || ["failed", "lost"].includes(item.state))
     || team.attempts.some((item) => item.error || item.result_unknown);
 
   return (
@@ -123,7 +126,7 @@ export function TeamPanel({
             className="mb-2 min-h-16 w-full resize-y rounded-xl border border-line bg-surface px-3 py-2 text-[10px] text-ink outline-none focus:border-accent"
           />
           <div className="space-y-2">
-            {pendingPlan && (
+            {pendingPlan && !pendingPlan.plan.preview_plan_id && (
               <DecisionCard title={`Team Plan r${pendingPlan.revision}`} detail="用户审批后 Runtime 才能创建 Teammate、Attempt 与代码 Worktree。">
                 {typeof pendingPlan.plan.shared_context === "string" && pendingPlan.plan.shared_context && (
                   <details className="mb-2 text-[10px] text-ink-muted"><summary className="cursor-pointer">公共约定（审批内容）</summary><p className="mt-1 whitespace-pre-wrap break-words">{pendingPlan.plan.shared_context}</p></details>
@@ -169,7 +172,7 @@ export function TeamPanel({
 
       {(team.recoveries ?? []).length > 0 && (
         <section>
-          <Heading icon={<CircleAlert className="size-3.5" />} title="需要人工恢复" count={team.recoveries.length} />
+          <Heading icon={<CircleAlert className="size-3.5" />} title="任务恢复与检查" count={team.recoveries.length} />
           <div className="space-y-2">
             {team.recoveries.map((recovery) => (
               <RecoveryCard
@@ -227,22 +230,7 @@ export function TeamPanel({
         </div>)}</div>
       </section>}
 
-      <section>
-        <Heading icon={<Bot className="size-3.5" />} title="Agent Sessions" count={team.sessions.length} />
-        <div className="space-y-1.5">
-          {team.sessions.map((session) => (
-            <div key={session.id} className="rounded-xl border border-line px-3 py-2.5">
-              <div className="flex items-center gap-2 text-[10px]">
-                <StatusDot status={sessionStatus(session.state)} pulse={session.state === "work"} />
-                <span className="min-w-0 flex-1 truncate font-medium text-ink">{team.agents.find((item) => item.id === session.agent_id)?.name ?? session.agent_id}</span>
-                <span className="font-mono text-ink-faint">g{session.generation}</span>
-              </div>
-              <div className="mt-1 text-[9px] text-ink-muted">{session.state} · heartbeat {formatTime(session.heartbeat_at)}</div>
-              {session.waiting_reason && <div className="mt-1 text-[9px] text-warning">{activityLabel(session.waiting_reason)}</div>}
-            </div>
-          ))}
-        </div>
-      </section>
+      <TeamSessions team={team} />
 
       <section>
         <Heading icon={<GitBranch className="size-3.5" />} title="任务与调度" count={team.scheduling.length} />
@@ -294,12 +282,12 @@ export function TeamPanel({
         </section>
       )}
 
-      {(error || hasFailure) && <div className="rounded-xl border border-danger/20 bg-danger/5 p-3 text-[9px] text-danger"><div className="mb-1 flex items-center gap-2 font-semibold"><CircleAlert className="size-3.5" />异常与未知结果</div>{error || prettyJson({ sessions: team.sessions.filter((item) => item.failure), attempts: team.attempts.filter((item) => item.error || item.result_unknown) })}</div>}
+      {(error || hasFailure) && <div className="rounded-xl border border-danger/20 bg-danger/5 p-3 text-[9px] text-danger"><div className="mb-1 flex items-center gap-2 font-semibold"><CircleAlert className="size-3.5" />异常与未知结果</div>{error || prettyJson({ sessions: latestSessions.filter((item) => item.failure || ["failed", "lost"].includes(item.state)), attempts: team.attempts.filter((item) => item.error || item.result_unknown) })}</div>}
 
       {! ["completed", "failed", "cancelled", "closed_with_unmerged_candidates"].includes(team.team.state) && (
         <div className="space-y-2">
           <input aria-label="取消 TeamRun 的理由" placeholder="需要取消时，填写取消理由" value={reason} onChange={(event) => setReason(event.target.value)} className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-[10px]" />
-          <button type="button" disabled={busy || !reason.trim()} onClick={() => { if (window.confirm("确认取消整个 TeamRun？Runtime 会先撤销权限并等待 worker 停止。")) onCancel(reason.trim()); }} className="flex w-full items-center justify-center gap-2 rounded-xl border border-danger/30 px-3 py-2 text-[10px] text-danger disabled:opacity-40"><X className="size-3.5" />取消 TeamRun</button>
+          <button type="button" disabled={busy || !reason.trim()} onClick={() => { if (window.confirm("确认结束团队？如果稍后还想继续，请使用对话中的“暂停团队”。")) onCancel(reason.trim()); }} className="flex w-full items-center justify-center gap-2 rounded-xl border border-danger/30 px-3 py-2 text-[10px] text-danger disabled:opacity-40"><X className="size-3.5" />结束团队</button>
         </div>
       )}
     </div>
@@ -335,6 +323,7 @@ function schedulingLabel(value: string): string {
     dependency_not_completed: "等待前置任务完成",
     candidate_not_integrated: "等待前置候选集成并验证通过",
     no_idle_teammate: "暂无空闲成员",
+    task_attempt_limit_reached: "任务重试次数已耗尽，需要处理失败原因",
     resource_conflict: "写入范围或资源租约已被占用",
     team_concurrency_exhausted: "已达到并行任务上限",
     token_budget_exhausted: "Token 预算已用尽",
@@ -364,6 +353,9 @@ function DecisionButtons({ busy, disabled, positive, negative, onPositive, onNeg
 function RecoveryCard({ recovery, taskName, teammateName, busy, onResume }: { recovery: TeamRecovery; taskName?: string; teammateName?: string; busy?: boolean; onResume: (attemptId: string, reason: string, acknowledgeUnknownResult: boolean) => void }) {
   const [reason, setReason] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  if (recovery.automatic) return <div className="rounded-xl border border-line p-3 text-xs text-ink-muted" role="status">
+    Task #{recovery.task_id} · 正在自动检查恢复现场；若团队已暂停，将在继续执行后检查。
+  </div>;
   const ready = recovery.recoverable && reason.trim() && (!recovery.result_unknown || acknowledged);
   return (
     <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 text-[9px]">
@@ -396,22 +388,6 @@ function RecoveryCard({ recovery, taskName, teammateName, busy, onResume }: { re
   );
 }
 
-function activityLabel(value: string): string {
-  if (value.startsWith("waiting_for_lead_answer:")) return "等待 Lead 回答指定问题";
-  return ({
-    team_plan_change_required: "需要调整批准方案，等待用户指示",
-    model_waiting: "等待模型响应（思考期间可能没有正文）",
-    model_receiving: "正在接收模型响应",
-    model_retry_wait: "等待有限重试",
-    tool_executing: "正在执行工具",
-    permission_waiting: "等待工具权限审批",
-    executing: "正在处理本轮结果",
-    model_response_timeout: "模型长时间没有有效响应，已请求停止",
-    model_call_timeout: "本轮模型调用达到总时限，已请求停止",
-    worker_heartbeat_timeout: "执行进度异常，正在确认 worker 是否停止",
-  } as Record<string, string>)[value] ?? value;
-}
-
 function recoveryCheckLabel(value: string): string {
   const labels: Record<string, string> = {
     unknown_result_acknowledgement_required: "确认未知写结果",
@@ -425,13 +401,5 @@ function teamStatus(state: string): "running" | "warning" | "success" | "error" 
   if (["planning", "waiting_approval", "ready_for_manual_integration"].includes(state)) return "warning";
   if (state === "completed") return "success";
   if (["failed", "cancelled"].includes(state)) return "error";
-  return "idle";
-}
-
-function sessionStatus(state: string): "running" | "warning" | "success" | "error" | "idle" {
-  if (state === "work") return "running";
-  if (["waiting", "suspect"].includes(state)) return "warning";
-  if (state === "shutdown") return "success";
-  if (["failed", "lost"].includes(state)) return "error";
   return "idle";
 }

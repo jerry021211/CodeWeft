@@ -79,7 +79,7 @@ function explorationLabel(entry: ProcessEntry) {
   return [entry.readCount && `读取 ${entry.readCount} 次`, entry.searchCount && `${entry.searchCount} 次内容搜索`, entry.listCount && `${entry.listCount} 次文件查找`].filter(Boolean).join("、");
 }
 
-const ProcessStep = memo(function ProcessStep({ entry, active }: { entry: ProcessEntry; active: boolean }) {
+export const ProcessStep = memo(function ProcessStep({ entry, active }: { entry: ProcessEntry; active: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const detailId = useId();
   const narration = entry.kind === "narration";

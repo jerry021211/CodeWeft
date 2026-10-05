@@ -69,6 +69,7 @@ from codeagent.web.models import (
 )
 from codeagent.web.team_observation import install_observation, read_changes
 from codeagent.web.team_integration_storage import INTEGRATION_SCHEMA, TeamIntegrationStorage
+from codeagent.web.plan_storage import PLAN_SCHEMA, PlanStorage
 from codeagent.web.team_lifecycle import TeamLifecycleStorage
 from codeagent.teams.models import SESSION_ACTIVITY_PHASES
 
@@ -186,7 +187,7 @@ class Repository(Protocol):
     ) -> JsonObject: ...
 
 
-class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage):
+class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage):
     """A single-process, thread-safe SQLite repository.
 
     One connection is protected by a re-entrant lock.  This deliberately
@@ -820,6 +821,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage):
             self._ensure_open()
             self._connection.executescript(schema)
             self._connection.executescript(INTEGRATION_SCHEMA)
+            self._connection.executescript(PLAN_SCHEMA)
             for table, additions in {
                 "team_runs": (("integration_mode", "TEXT NOT NULL DEFAULT 'manual'"),
                               ("integration_head", "TEXT"),
@@ -2336,7 +2338,21 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage):
             )
             active_revision = revision if normalized == "approve" else None
             if normalized == "approve":
-                self._validate_team_plan_tasks(connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}), require_validation_commands=team["integration_mode"] == "managed")
+                plan_data = _json_loads(plan["plan_json"], {})
+                preview_id = plan_data.get("preview_plan_id")
+                if preview_id:
+                    from codeagent.plan_mode import task_snapshot
+
+                    preview = self.get_planning_revision(preview_id)
+                    if (preview["status"] != "starting"
+                            or preview["conversation_id"] != str(team["conversation_id"])
+                            or task_snapshot(self, str(team["task_list_id"]), plan_data)
+                            != preview["payload"]["task_snapshot"]):
+                        raise StorageConflictError("方案或任务内容已变化，请重新提交方案后批准")
+                self._validate_team_plan_tasks(
+                    connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}),
+                    require_validation_commands=team["integration_mode"] == "managed",
+                )
             connection.execute(
                 """
                 UPDATE team_plan_revisions

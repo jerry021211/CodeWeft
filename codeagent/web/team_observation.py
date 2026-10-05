@@ -30,6 +30,8 @@ TABLE_SCOPES = {
     "task_dependencies": ("task_list", "task_list_id"),
     "task_activity": ("task_list", "task_list_id"),
     "conversations": ("conversation", "id"),
+    "planning_sessions": ("conversation", "conversation_id"),
+    "planning_revisions": ("conversation", "conversation_id"),
     "runs": ("run", "id"),
     "user_questions": ("run", "run_id"),
     "messages": ("conversation", "conversation_id"),

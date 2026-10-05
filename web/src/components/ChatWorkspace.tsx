@@ -2,20 +2,39 @@ import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Sparkles, Sun, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Approval, ApprovalDecision, Message } from "@/types/api";
+import type { Approval, ApprovalDecision, Message, PlanDocument, PlanningSnapshot, TeamSnapshot } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatTime, isRunActive, statusLabel } from "@/lib/utils";
 import { getRunAnswer } from "@/lib/runAnswer";
 import { ThinkingProcess } from "@/components/ThinkingProcess";
 import { processAnchors } from "@/lib/conversationProcess";
+import { conversationPlans } from "@/lib/conversationPlans";
+import { PlanMessage } from "@/components/PlanMessage";
+import { TeamConversation } from "@/components/TeamConversation";
+import { isTeamActive, teamStatusLabel, teamExecutionState } from "@/lib/teamPresentation";
 import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { EmptyPanel, IconButton, Spinner, StatusDot } from "@/components/ui";
 import { UserQuestions } from "@/components/UserQuestions";
 import { ComposerToolbar } from "@/components/ComposerToolbar";
+import { ComposerTeamStatus } from "@/components/ComposerTeamStatus";
 import { AttachmentPicker, type AttachmentPickerHandle } from "@/components/AttachmentPicker";
 import type { Attachment } from "@/types/api";
 
 type Props = {
+  teams?: TeamSnapshot[];
+  team?: TeamSnapshot;
+  teamBusy?: boolean;
+  teamError?: string;
+  onPauseTeam?: () => void;
+  onResumeTeam?: () => void;
+  planningSnapshot?: PlanningSnapshot;
+  planBusy?: boolean;
+  planError?: string;
+  onPlanDecision?: (plan: PlanDocument, decision: "approve" | "reject" | "restore") => void;
+  planPanel?: import("react").ReactNode;
+  planMode?: boolean;
+  planLocked?: boolean;
+  onPlanModeChange?: (enabled: boolean) => void;
   attachments?: Attachment[];
   onAttachments?: (value: Attachment[]) => void;
   title?: string;
@@ -66,16 +85,39 @@ export function ChatWorkspace(props: Props) {
   const active = isRunActive(props.run?.status);
   const busy = Boolean(active || props.sending || props.loading);
   const attachmentDisabled = Boolean(busy || props.useTeam || props.teamLeadActive);
-  const canSend = Boolean(!busy && !attachmentsReading && (props.draft.trim() || props.attachments?.length));
+  const teamPaused = ["pausing", "paused"].includes(props.team?.team.state ?? "");
+  const teamProgress = teamExecutionState(props.team);
+  const canSend = Boolean(!busy && !teamPaused && !props.teamBusy && !attachmentsReading && (props.draft.trim() || props.attachments?.length));
   const runs = useMemo(() => ({ ...props.historyRuns, ...(props.run ? { [props.run.runId]: props.run } : {}) }), [props.historyRuns, props.run]);
-  const anchors = useMemo(() => processAnchors(props.messages, Object.keys(runs)), [props.messages, runs]);
-  const process = (id: string) => runs[id] ? <ThinkingProcess key={id} run={runs[id]} /> : null;
+  const plansByRun = useMemo(() => conversationPlans(props.planningSnapshot?.plans), [props.planningSnapshot?.plans]);
+  const teamsByRun = useMemo(() => {
+    const result: Record<string, TeamSnapshot[]> = {};
+    for (const team of props.teams ?? []) (result[team.team.root_run_id] ??= []).push(team);
+    return result;
+  }, [props.teams]);
+  const anchors = useMemo(() => processAnchors(props.messages, [...new Set([...Object.keys(runs), ...Object.keys(plansByRun), ...Object.keys(teamsByRun)])]), [props.messages, runs, plansByRun, teamsByRun]);
+  const process = (id: string) => <Fragment key={id}>
+    {runs[id] && <ThinkingProcess run={runs[id]} />}
+    {plansByRun[id]?.map(plan => <PlanMessage key={plan.id} plan={plan}
+      current={plan.id === props.planningSnapshot?.state.active_plan_id} busy={busy || props.planBusy}
+      error={props.planError} onDecision={props.onPlanDecision} />)}
+    {teamsByRun[id]?.map(team => <TeamConversation key={team.team.id} team={team} busy={props.teamBusy}
+      error={team.team.id === props.team?.team.id ? props.teamError : undefined}
+      onPause={team.team.id === props.team?.team.id ? props.onPauseTeam : undefined}
+      onResume={team.team.id === props.team?.team.id ? props.onResumeTeam : undefined} />)}
+  </Fragment>;
+  const hasPlans = Object.keys(plansByRun).length > 0 || Object.keys(teamsByRun).length > 0;
+  const displayedTeam = props.team && (isTeamActive(props.team) || props.team.team.root_run_id === props.run?.runId) ? props.team : undefined;
+  const teamPresentationKey = props.teams?.map(team => `${team.team.id}:${team.team.state}:${team.sessions.length}`).join("|");
+  const awaitingPlan = props.planningSnapshot?.plans.some(plan => plan.id === props.planningSnapshot?.state.active_plan_id
+    && plan.run_id === props.run?.runId && plan.status === "submitted");
+  const planPresentationKey = props.planningSnapshot?.plans.map(plan => `${plan.id}:${plan.status}`).join("|");
   const answer = useMemo(() => props.run ? getRunAnswer(props.run, props.messages) : undefined, [props.run?.runId, props.run?.events, props.run?.status, props.messages]);
 
   useEffect(() => {
     if (!following) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [props.messages, answer?.text, props.run?.actionOrder.length, following]);
+  }, [props.messages, answer?.text, props.run?.actionOrder.length, following, planPresentationKey, teamPresentationKey]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -98,10 +140,14 @@ export function ChatWorkspace(props: Props) {
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-ink">{props.title || "CodeAgent"}</h1>
           <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-ink-muted">
-            {props.run ? (
+            {displayedTeam ? <>
+              <StatusDot status={displayedTeam.team.state === "failed" ? "error" : displayedTeam.team.state === "completed" ? "success" : displayedTeam.team.state === "running" && !teamProgress.waitingRecovery ? "running" : "warning"}
+                pulse={displayedTeam.team.state === "running" && !teamProgress.waitingRecovery} />
+              <span>{teamStatusLabel(displayedTeam)}</span>
+            </> : props.run ? (
               <>
                 <StatusDot status={active ? props.run.status === "waiting_approval" ? "warning" : "running" : props.run.status === "failed" || props.run.status === "interrupted" ? "error" : props.run.status === "completed" ? "success" : "idle"} pulse={active} />
-                <span>{statusLabel[props.run.status]}</span>
+                <span>{awaitingPlan && !active ? "方案已完成，等待确认" : statusLabel[props.run.status]}</span>
                 {active && <><span aria-hidden>·</span>{props.run.connection === "live" ? <Wifi className="size-3 text-success" /> : props.run.connection === "reconnecting" ? <><Spinner className="size-3" /><span>重连中</span></> : <WifiOff className="size-3" />}</>}
               </>
             ) : (
@@ -125,13 +171,13 @@ export function ChatWorkspace(props: Props) {
         }}
         className="scrollbar-thin min-h-0 flex-1 overflow-y-auto"
       >
-        {!props.loading && props.messages.length === 0 && !props.run && (
+        {!props.loading && props.messages.length === 0 && !props.run && !hasPlans && (
           <div className="grid min-h-full place-items-center">
             <EmptyPanel icon={<Sparkles className="size-5" />} title="有什么可以帮你？" body="提问、讨论、创作或描述你希望完成的工作。" />
           </div>
         )}
         {props.loading && <div className="flex min-h-full items-center justify-center gap-2 text-xs text-ink-muted"><Spinner /> 加载会话…</div>}
-        {!props.loading && (props.messages.length > 0 || props.run) && (
+        {!props.loading && (props.messages.length > 0 || props.run || hasPlans) && (
           <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-7 sm:py-8">
             <div className="space-y-6">
               {props.messages.map((message) => (
@@ -150,6 +196,7 @@ export function ChatWorkspace(props: Props) {
                 />
               )}
               {props.run?.error && <div className="rounded-xl border border-danger/25 bg-danger/5 px-4 py-3 text-xs text-danger">{props.run.error}</div>}
+              {props.teamError && <div role="alert" className="rounded-xl border border-warning/25 bg-warning/5 px-4 py-3 text-xs text-warning">团队状态暂时无法更新：{props.teamError}</div>}
             </div>
           </div>
         )}
@@ -160,6 +207,7 @@ export function ChatWorkspace(props: Props) {
           <button type="button" onClick={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })} className="mx-auto mb-2 block rounded-full border border-line bg-surface px-3 py-1 text-[10px] text-ink-muted shadow-sm hover:text-ink">回到最新消息</button>
         )}
         <div className="mx-auto max-w-4xl space-y-2">
+          {props.planPanel}
           {props.run && <UserQuestions key={props.run.runId} runId={props.run.runId} active={active && props.run.status !== "cancelling"} />}
           {props.approval && (
             <ApprovalBanner
@@ -168,7 +216,8 @@ export function ChatWorkspace(props: Props) {
               onDecision={props.onApprovalDecision}
             />
           )}
-          <div className="rounded-2xl border border-line-strong/80 bg-surface shadow-sm transition focus-within:border-accent/40 focus-within:shadow-[0_0_0_3px_rgb(var(--accent)/0.04)]">
+          <div className="rounded-[22px] border border-line-strong/70 bg-surface shadow-[0_2px_12px_rgb(0_0_0/0.025)] transition-colors focus-within:border-ink-faint/50">
+          <ComposerTeamStatus team={props.team} busy={props.teamBusy} error={props.teamError} onPause={props.onPauseTeam} onResume={props.onResumeTeam} />
           {props.onAttachments && <AttachmentPicker ref={attachmentRef} hideTrigger value={props.attachments ?? []} onChange={props.onAttachments} onBusyChange={setAttachmentsReading} disabled={attachmentDisabled} />}
           <textarea
             ref={inputRef}
@@ -177,12 +226,12 @@ export function ChatWorkspace(props: Props) {
             onKeyDown={onKeyDown}
             rows={1}
             disabled={busy}
-            placeholder={active ? "Agent 正在工作…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeAgent 你想做什么…"}
+            placeholder={props.team?.team.state === "pausing" ? "团队正在暂停，等待当前操作退出…" : teamPaused ? "团队已暂停，点击“继续执行”后可发送指令…" : props.cancelling || props.run?.status === "cancelling" ? "正在停止当前运行…" : active ? "Agent 正在工作…" : teamProgress.waitingRecovery ? "团队等待恢复，请先查看恢复事项；也可向 Lead 补充说明…" : props.team?.team.state === "running" ? "团队正在执行，可向 Lead 补充指令…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeAgent 你想做什么…"}
             aria-label="发送消息"
             className="scrollbar-thin min-h-[76px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />
-          <ComposerToolbar busy={busy} active={active} cancelling={Boolean(props.cancelling || props.run?.status === "cancelling")}
-            sending={props.sending} canSend={canSend} readOnly={props.readOnly} useTeam={props.useTeam} teamEnabled={props.teamEnabled} teamLeadActive={props.teamLeadActive}
+          <ComposerToolbar planMode={props.planMode} planLocked={props.planLocked} onPlanModeChange={props.onPlanModeChange} busy={busy} active={active} cancelling={Boolean(props.cancelling || props.run?.status === "cancelling")}
+            sending={props.sending} canSend={canSend} readOnly={props.readOnly} useTeam={props.useTeam} teamEnabled={props.teamEnabled} teamLeadActive={props.teamLeadActive} teamState={teamProgress.waitingRecovery ? "recovery_waiting" : props.team?.team.state}
             runtimeModel={props.runtimeModel} reasoningEffort={props.reasoningEffort} reasoningOptions={props.reasoningOptions} reasoningDefault={props.reasoningDefault}
             webSearch={props.webSearch} webSearchAvailable={props.webSearchAvailable} attachmentDisabled={attachmentDisabled} attachmentsReading={attachmentsReading}
             onReadOnlyChange={props.onReadOnlyChange} onTeamChange={props.onTeamChange} onReasoningChange={props.onReasoningChange} onWebSearchChange={props.onWebSearchChange}
@@ -190,13 +239,13 @@ export function ChatWorkspace(props: Props) {
           </div>
         </div>
         <p className="mx-auto mt-2 hidden max-w-4xl px-1 text-right text-[10px] text-ink-faint sm:block">Enter 发送 · Shift + Enter 换行</p>
-        {props.run?.status === "cancelling" && <div className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-ink-muted"><CircleStop className="size-3" /> 取消将在当前安全边界生效</div>}
+        {props.run?.status === "cancelling" && <div className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-ink-muted"><CircleStop className="size-3" /> 已请求停止，正在等待当前操作退出</div>}
       </div>
     </main>
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ message }: { message: Message }) {
+export const ChatMessage = memo(function ChatMessage({ message }: { message: Message }) {
   const user = message.role === "user";
   const attachments = Array.isArray(message.metadata?.attachments) ? message.metadata.attachments as { name: string }[] : [];
   if (message.role === "system") return <div className="mx-auto max-w-lg rounded-full border border-line bg-surface-muted px-3 py-1 text-center text-[10px] text-ink-muted">{message.content}</div>;

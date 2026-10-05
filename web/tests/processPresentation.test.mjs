@@ -39,6 +39,22 @@ test("groups successful exploration and counts calls separately from unique file
   assert.equal(actions[0].count, undefined, "does not mutate run actions");
 });
 
+test("repo maps and batch reads show file targets and count tool calls accurately", () => {
+  const result = buildProcessPresentation(run([
+    action("map", "repo_map", { path: ".", depth: 2 }),
+    action("batch", "read_file", { file_paths: ["src/a.py", "tests/a.py"] }),
+    action("single", "read_file", { file_path: "src/a.py" }),
+  ]));
+  assert.equal(result.summary.toolCount, 3);
+  assert.equal(result.summary.readCount, 2);
+  assert.equal(result.summary.listCount, 1);
+  assert.equal(result.summary.fileCount, 2);
+  assert.deepEqual(result.entries[0].targets, [".", "src/a.py", "tests/a.py"]);
+  const batch = buildProcessPresentation(run([action("batch", "read_file", { file_paths: ["a.py", "b.py"] })]));
+  assert.equal(batch.entries[0].label, "批量读取 2 个文件");
+  assert.equal(batch.entries[0].inputText, "a.py\nb.py");
+});
+
 test("public narration stays chronological, joins call chunks, and separates exploration groups", () => {
   const actions = [action("read1", "read_file", { path: "one.py" }), action("read2", "read_file", { path: "two.py" }), action("call1", "模型思考", {}, { kind: "model" })];
   const events = [event(1, "tool.started", { tool_use_id: "read1" }), ...call(2, "call1", "我会先检查"), event(5, "model.text_delta", { call_id: "call1", text: "调用方。" }), event(6, "tool.started", { tool_use_id: "read2" })];

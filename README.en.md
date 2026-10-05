@@ -31,6 +31,7 @@ The agent runtime is built in Python, with a local React + TypeScript web workbe
 | **Visible execution** | Follow streaming responses, tool execution, tasks, subagents, file changes, and model usage in the web UI. Conversations and run records persist in SQLite. |
 | **Multiple model protocols** | Use Anthropic Messages, OpenAI Chat Completions, or Responses. Configure conversation, speech recognition, and embedding services separately in model settings. |
 | **Code understanding and retrieval** | Combine keywords, code structure, and optional vector retrieval to find implementations, with file paths, symbols, and source excerpts. Structured retrieval supports languages including Python, Java, JavaScript, and TypeScript. |
+| **Project overview and batch reading** | `repo_map` shows directories, file sizes, and likely entry points, tests, and configuration. `read_file` accepts up to five `file_paths`, preserving separate line numbers and continuation cursors. |
 | **Context management for longer tasks** | Check requests against model context windows and summarize history in chunks. Large tool results have bounded pages, archives, and follow-up reading tools. |
 | **Tasks and parallel collaboration** | Persistent tasks track dependencies and status. Ordinary agents can run parallel reads and delegate read-only subtasks; Teams can develop in separate Git worktrees. |
 | **Extensible tools** | Load instructions on demand through Skills, retain project conventions in long-term memory, connect MCP tools, and optionally enable Tavily web search. |

@@ -99,13 +99,14 @@ function statusFrom(value: unknown, fallback: ActionStatus): ActionStatus {
 }
 
 function runStatusFromType(type: string, payload: Record<string, unknown>, current: RunStatus): RunStatus {
+  // Older servers emitted run.cancelling with the persisted status "running".
+  if (type === "run_cancelling" || type === "cancel_requested") return "cancelling";
   const explicit = payload.status;
   const valid: RunStatus[] = ["queued", "running", "waiting_approval", "cancelling", "completed", "failed", "cancelled", "interrupted"];
   if (typeof explicit === "string" && valid.includes(explicit as RunStatus)) return explicit as RunStatus;
   if (type === "run_queued") return "queued";
   if (type === "run_started" || type === "run_running") return "running";
   if (type === "approval_requested" || type === "tool_waiting_approval") return "waiting_approval";
-  if (type === "run_cancelling" || type === "cancel_requested") return "cancelling";
   if (type === "run_completed" || type === "run_succeeded") return "completed";
   if (type === "run_failed") return "failed";
   if (type === "run_cancelled") return "cancelled";
@@ -220,9 +221,10 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
   }
 
   if ((type === "run_completed" || type === "run_failed") && (payload.usage || payload.token_usage)) {
-    // The terminal run event is the authoritative aggregate from the shared
-    // UsageTracker. It intentionally replaces locally accumulated deltas.
-    next.usage = mergeUsage({}, payload);
+    // A Team Lead's terminal usage covers only that invocation, not every
+    // agent observed on the run. Keep deduplicated call totals; support legacy
+    // terminal-only usage when no per-call events were received.
+    if (!next.usageByCall.length) next.usage = mergeUsage({}, payload);
   } else if (type === "usage_updated" || type === "model_usage" || type === "call_usage_updated") {
     // usage.updated represents one model call, not a running total. The same
     // call's usage is also embedded in model.completed, so aggregate only this

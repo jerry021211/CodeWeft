@@ -611,18 +611,26 @@ class WorktreeManagerRegistry:
         key = str(source)
         manager = self._managers.get(key)
         if manager is None:
-            suffix = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
-            root = (
-                self.configured_root.resolve()
-                / f"{_safe_component(source.name)}-{suffix}"
-                if self.configured_root.is_absolute()
-                else source.parent
-                / self.configured_root
-                / f"{_safe_component(source.name)}-{suffix}"
-            )
+            root = self._workspace_root(source)
             manager = WorktreeManager(self.repository, source, root)
             self._managers[key] = manager
         return manager
+
+    def _workspace_root(self, source: Path) -> Path:
+        suffix = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:10]
+        base = self.configured_root.resolve() if self.configured_root.is_absolute() else source.parent / self.configured_root
+        return base / f"{_safe_component(source.name)}-{suffix}"
+
+    def prepare_local_repository(self, workspace: str | Path) -> str:
+        """Called only after the user approves a new Team plan."""
+        from codeagent.worktrees.snapshots import LocalGit
+        source = Path(workspace).expanduser().resolve()
+        root = self._workspace_root(source).resolve()
+        if not source.is_dir():
+            raise WorktreeError("Team workspace does not exist")
+        if root == source or source in root.parents:
+            raise WorktreeError("Managed Worktree root must be outside source workspace")
+        return LocalGit(source, root).ensure_repository()
 
     def ensure_baseline_ready(self, team_run_id: str) -> GitBaselineInspection:
         return self.for_team(team_run_id).ensure_baseline_ready(team_run_id)

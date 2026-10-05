@@ -93,6 +93,7 @@ class WebAgentFactory:
         worktree_manager: WorktreeManager | None = None,
         root_prompt_mode: PromptMode | None = None,
         read_only: bool = False,
+        plan_mode: bool = False,
         web_search_enabled: bool = False,
         reasoning_effort: str | None = None,
     ) -> Agent:
@@ -175,7 +176,7 @@ class WebAgentFactory:
         )
         skill_loader = self._skill_loader()
         memory_store = self._memory_store(
-            always_read_only=team_session is not None or team_planner or read_only
+            always_read_only=team_session is not None or team_planner or read_only or plan_mode
         )
         recovery = RecoveryRuntime(self.env.recovery_config)
         memory_manager = (
@@ -204,7 +205,7 @@ class WebAgentFactory:
                 ),
                 skill_loader=skill_loader,
                 memory_store=memory_store,
-                allow_memory_write=team_session is None and not team_planner,
+                allow_memory_write=team_session is None and not team_planner and not plan_mode,
                 memory_max_items=self.env.memory_config.max_loaded_items,
                 workspace_guard=self.workspace_guard,
                 changed_files=changed_files,
@@ -344,9 +345,10 @@ class WebAgentFactory:
             subagent_environment_factory=subagent_environment,
             skill_catalog=(skill_loader.catalog_prompt() if skill_loader else ""),
             memory_catalog=(memory_manager.catalog_prompt() if memory_manager else ""),
-            allow_subagents=team_session is None and not team_planner,
+            allow_subagents=team_session is None and (not team_planner or plan_mode),
             prompt_mode=root_mode if team_session is None else None,
             read_only=read_only,
+            plan_mode=plan_mode,
         )
         if checkpoint is not None and team_session is None and not team_planner:
             guard_state = getattr(checkpoint, "metadata", {}).get("execution_guard")
@@ -484,6 +486,35 @@ class WebAgentFactory:
         agent.permission_broker = permission_broker
         if agent.execution_activity is not None:
             permission_broker.execution_activity = agent.execution_activity
+        if plan_mode:
+            from codeagent.plan_mode import (PLAN_REMINDER, InspectProjectTool, ProjectDiffTool,
+                                            PlanTool, PlannedTeamSubmitTool, PlanModeGate)
+            plan_tool = PlanTool(self.task_service, execution.conversation_id, execution.run_id,
+                                 read_only=read_only, emitter=event_emitter)
+            plan_tool.on_submit = lambda: agent.request_yield("plan_approval")
+            from codeagent.plan_mode import source_fingerprints
+            plan_tool.source_files = lambda: source_fingerprints(self.workspace,
+                [item['path'] for item in agent.context.state.files_read.values() if item.get('path')])
+            registry = agent.tools.copy_without({"TeamPlanSubmit"})
+            registry.register(plan_tool)
+            registry.register(InspectProjectTool(self.workspace))
+            registry.register(ProjectDiffTool(self.workspace))
+            if team_planner:
+                original = LeadTeamPlanTool(self.task_service, None, execution.conversation_id,
+                    team.root_run_id if team is not None else execution.run_id, task_list.id, self.memory_access)
+                registry.register(PlannedTeamSubmitTool(original, plan_tool))
+            gate = PlanModeGate(self.task_service, execution.conversation_id, team=team_planner)
+            agent.tools = gate.wrap(gate.filter(registry))
+            agent.tools.bind_runtime(agent._check_execution, lambda: 120.0)
+            agent.hooks.register("PreToolUse", gate.guard, first=True)
+            agent._sync_runtime_reminder("plan_mode", PLAN_REMINDER, agent.messages)
+            if agent.execution_activity is None:
+                agent.set_execution_activity(ExecutionActivity(cancellation,
+                    response_timeout=self.env.team_model_response_timeout,
+                    model_timeout=self.env.team_model_call_timeout))
+                permission_broker.execution_activity = agent.execution_activity
+        elif agent.context.state.runtime_reminders.get("plan_mode", {}).get("active"):
+            agent._sync_runtime_reminder("plan_mode", "[Plan Mode 已结束] 以当前用户授权、基础权限和已批准方案为准继续。", agent.messages)
         return agent
 
     def for_workspace(self, workspace: str | Path) -> "WebAgentFactory":

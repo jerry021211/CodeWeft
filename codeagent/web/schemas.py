@@ -82,6 +82,7 @@ class CreateRunRequest(ApiModel):
     attachments: list[AttachmentRequest] = Field(default_factory=list, max_length=8)
     useTeam: bool = False
     readOnly: bool = False
+    planMode: bool | None = None
     webSearch: bool | None = None
     reasoningEffort: str | None = Field(default=None, min_length=1, max_length=32)
 
@@ -102,6 +103,11 @@ class CreateRunRequest(ApiModel):
 
 class ApprovalDecisionRequest(ApiModel):
     decision: Literal["allow", "deny"]
+
+
+class PlanDecisionRequest(ApiModel):
+    contentHash: str = Field(min_length=1)
+    decision: Literal['approve', 'reject', 'withdraw', 'restore']
 
 
 class AnswerQuestionRequest(ApiModel):

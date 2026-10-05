@@ -192,6 +192,7 @@ export type TeamSession = {
   heartbeat_at: string;
   current_attempt_id?: Identifier | null;
   waiting_reason?: string | null;
+  activity_phase?: string | null;
   failure?: Record<string, unknown> | null;
 };
 
@@ -262,6 +263,7 @@ export type TeamScheduling = {
 };
 
 export type TeamRecovery = {
+  automatic?: boolean;
   attempt_id: Identifier;
   task_id: string;
   agent_id: Identifier;
@@ -490,3 +492,14 @@ export interface UserQuestion {
   created_at: string;
   resolved_at: string | null;
 }
+export type PlanDocument = {
+  id: string; conversation_id: string; run_id: string; revision: number; title: string; markdown: string;
+  status: string; content_hash: string; read_only: boolean; error?: string;
+  execution_run_id?: string; team_run_id?: string;
+  payload: { target: "single" | "team"; task_snapshot?: Array<{ task: { id: string; subject: string; description: string;
+    blockedBy?: string[]; metadata?: { write_scopes?: string[]; validation_commands?: string[]; risk_level?: string } } }> };
+};
+export type PlanningSnapshot = {
+  state: { mode: "off" | "planning"; target: "single" | "team"; active_plan_id?: string };
+  plans: PlanDocument[];
+};

@@ -52,6 +52,7 @@ class _FakeFactory:
         self.prompt_modes = []
         self.read_only_choices = []
         self.web_search_choices = []
+        self.plan_modes = []
 
     def create(
         self,
@@ -63,8 +64,11 @@ class _FakeFactory:
         root_prompt_mode=None,
         web_search_enabled=False,
         read_only=False,
+        plan_mode=False,
+        reasoning_effort=None,
     ):
         del permission_broker, checkpoint
+        self.plan_modes.append(plan_mode)
         self.prompt_modes.append(root_prompt_mode)
         self.read_only_choices.append(read_only)
         self.web_search_choices.append(web_search_enabled)
@@ -270,7 +274,7 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(factory.prompt_modes, [PromptMode.TEAM_PLANNER])
         persisted = self.repository.get_run(run.id)
-        self.assertEqual(persisted.status, "failed")
+        self.assertEqual(persisted.status, "completed")
         self.assertEqual(persisted.metadata["requested_mode"], "team")
         self.assertEqual(persisted.metadata["agent_profile"], "team_planner")
         selected = [
@@ -278,12 +282,15 @@ class SchedulerTests(unittest.TestCase):
             if event.type == "agent.profile.selected"
         ]
         self.assertEqual(selected[0].payload["profile"], "team_planner")
-        self.assertTrue(
+        self.assertFalse(
             any(
                 event.type == "team.plan.not_submitted"
                 for event in self.repository.list_events(run.id)
             )
         )
+
+        self.assertEqual(factory.plan_modes, [True])
+        self.assertEqual(self.repository.planning_state(self.conversation.id)["mode"], "planning")
 
     def test_active_team_routes_chat_to_durable_lead_session(self):
         factory = _TeamAwareFactory()
@@ -503,6 +510,31 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(self.repository.list_team_runs(), [])
         finally:
             closed.set()
+            scheduler.stop()
+
+    def test_empty_non_git_team_workspace_can_plan_without_creating_git(self):
+        from codeagent.worktrees import WorktreeManagerRegistry
+
+        workspace = Path(self.tempdir.name) / "new-project"
+        workspace.mkdir()
+        conversation = self.repository.create_conversation(workspace=str(workspace))
+        factory = _FakeFactory()
+        scheduler = RunScheduler(self.repository, factory)
+        scheduler.configure_team_runtime(WorktreeManagerRegistry(
+            self.repository, Path(self.tempdir.name) / "worktrees",
+        ))
+        try:
+            run = scheduler.submit(conversation.id, "create SeatFlow", use_team=True)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and self.repository.get_run(run.id).status not in {"failed", "completed"}:
+                time.sleep(0.01)
+            current = self.repository.get_run(run.id)
+            self.assertEqual(current.status, "completed", current.error)
+            self.assertEqual(factory.prompt_modes, [PromptMode.TEAM_PLANNER])
+            self.assertEqual(factory.plan_modes, [True])
+            self.assertEqual(self.repository.list_team_runs(), [])
+            self.assertEqual(list(workspace.iterdir()), [])
+        finally:
             scheduler.stop()
 
     def test_permission_round_trip_is_persisted_and_resumes_run(self):

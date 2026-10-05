@@ -31,6 +31,7 @@ from codeagent.teams import (
     TeamAgentRole,
 )
 from codeagent.web.factory import serialize_runtime_state
+from codeagent.worktrees import WorktreeError
 from codeagent.web.models import ApprovalRecord, RunRecord
 from codeagent.web.storage import (
     ACTIVE_RUN_STATUSES,
@@ -54,6 +55,7 @@ class AgentFactory(Protocol):
         checkpoint: Any | None = None,
         root_prompt_mode: PromptMode | None = None,
         read_only: bool = False,
+        plan_mode: bool = False,
         web_search_enabled: bool = False,
         reasoning_effort: str | None = None,
     ) -> Any: ...
@@ -74,6 +76,7 @@ class _RunJob:
     reasoning_effort: str | None = None
     agent: Any = None
     attachments: list[dict] | None = None
+    plan_mode: bool = False
 
 
 class RunScheduler:
@@ -173,12 +176,14 @@ class RunScheduler:
         web_search_enabled: bool | None = None,
         reasoning_effort: str | None = None,
         attachments: list[dict] | None = None,
+        plan_mode: bool | None = None,
     ) -> RunRecord:
         # Admission, queue order and shutdown share one short critical section.
         with self._lock:
             self.start()
             return self._submit(conversation_id, content, use_team=use_team, read_only=read_only,
-                                web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort, attachments=attachments)
+                                web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort, attachments=attachments,
+                                plan_mode=plan_mode)
 
     def _submit(
         self, conversation_id: str, content: str, *, use_team: bool,
@@ -186,7 +191,28 @@ class RunScheduler:
         web_search_enabled: bool | None = None,
         reasoning_effort: str | None = None,
         attachments: list[dict] | None = None,
+        plan_mode: bool | None = None,
+        approved_plan_id: str | None = None,
     ) -> RunRecord:
+        active_team = self.repository.get_active_team_run_for_conversation(conversation_id)
+        planning = self.repository.planning_state(conversation_id)
+        if approved_plan_id:
+            plan_mode = False
+        elif active_team is not None:
+            if plan_mode:
+                raise StorageConflictError('团队正在运行，请先结束执行再开启新的 Plan Mode')
+            plan_mode = False
+        else:
+            if planning['mode'] == 'planning':
+                plan_mode = True
+                use_team = planning['target'] == 'team'
+            plan_mode = bool(plan_mode or use_team)
+            if plan_mode:
+                if self.repository.list_runs(conversation_id=conversation_id, statuses=list(ACTIVE_RUN_STATUSES), limit=1):
+                    raise StorageConflictError('请先停止当前执行，再进入或修改方案')
+                current_plan = self.repository.get_planning_revision(planning['active_plan_id']) if planning['active_plan_id'] else None
+                if current_plan and current_plan['status'] in {'approved', 'starting', 'blocked'}:
+                    raise StorageConflictError('方案已批准，请重试启动或撤回后重新规划')
         env = getattr(self.agent_factory, "env", None)
         if env is not None and hasattr(env, "model_id") and not env.model_id:
             raise ValueError("请先在模型设置页面配置对话模型。")
@@ -225,11 +251,16 @@ class RunScheduler:
                 title=_conversation_title(prompt),
             )
         requested_mode = "team" if use_team else "single"
+        if plan_mode:
+            self.repository.set_planning_mode(conversation_id, 'planning', 'team' if use_team else 'single')
         run = self.repository.create_run(
             conversation_id,
+            **({'run_id': 'run_' + approved_plan_id} if approved_plan_id else {}),
             metadata={
                 "requested_mode": requested_mode,
                 "read_only": read_only,
+                **({'plan_mode': True} if plan_mode else {}),
+                **({'approved_plan_id': approved_plan_id} if approved_plan_id else {}),
                 "web_search_enabled": web_search_enabled,
                 "reasoning_effort": reasoning_effort or "default",
                 "agent_profile": (
@@ -309,6 +340,7 @@ class RunScheduler:
             workspace=conversation.workspace,
             prompt=prompt,
             attachments=attachments,
+            plan_mode=plan_mode,
             use_team=bool(use_team),
             read_only=read_only,
             emitter=emitter,
@@ -329,6 +361,108 @@ class RunScheduler:
             return False
         reload_factory(workspace)
         return True
+
+    def decide_plan(self, plan_id, content_hash, decision):
+        """UI-only authority; model tools cannot call this transition."""
+        with self._lock:
+            plan = self.repository.get_planning_revision(plan_id)
+            if decision == 'approve' and plan['status'] == 'started':
+                return self.repository.decide_planning_revision(plan_id, content_hash, decision)
+            if self.repository.list_runs(conversation_id=plan['conversation_id'], statuses=list(ACTIVE_RUN_STATUSES), limit=1):
+                raise StorageConflictError('请等待本轮结束或先停止，再决定方案')
+            plan = self.repository.decide_planning_revision(plan_id, content_hash, decision)
+            if decision == 'withdraw' and plan.get('team_run_id'):
+                team = self.repository.get_team_run(plan['team_run_id'])
+                if team and team.state.value in {'planning', 'waiting_approval'}:
+                    self.repository.cancel_team_run(team.id, cancelled_by='user',
+                        reason='撤回尚未开始执行的方案', command_id='plan-withdraw:' + plan_id)
+            if decision == 'approve' and plan['status'] != 'started':
+                return self._launch_plan(plan)
+            return plan
+
+    def recover_plan_launches(self):
+        with self._lock:
+            for plan in self.repository.pending_plan_launches():
+                self._launch_plan(plan)
+
+    def exit_planning(self, conversation_id):
+        with self._lock:
+            if self.repository.list_runs(conversation_id=conversation_id, statuses=list(ACTIVE_RUN_STATUSES), limit=1):
+                raise StorageConflictError('请先停止当前执行')
+            state = self.repository.planning_state(conversation_id)
+            if state['active_plan_id']:
+                plan = self.repository.get_planning_revision(state['active_plan_id'])
+                if plan['status'] not in {'started', 'withdrawn', 'superseded'}:
+                    self.decide_plan(plan['id'], plan['content_hash'], 'withdraw')
+            return self.repository.set_planning_mode(conversation_id, 'off', state['target'])
+
+    def _launch_plan(self, plan):
+        import json
+        from codeagent.plan_mode import task_snapshot, source_fingerprints
+        from codeagent.teams.lead import LeadTeamPlanTool
+        repo = self.repository
+        repo.update_plan_execution(plan['id'], status='starting')
+        try:
+            payload = plan['payload']
+            if payload.get('target') == 'team':
+                linked_teams = [repo.get_team_run(plan['team_run_id'])] if plan.get('team_run_id') else [
+                    t for t in repo.list_team_runs() if t.root_run_id == plan['run_id']]
+                for linked in linked_teams:
+                    if linked and linked.active_plan_revision:
+                        linked_plan = repo.get_team_plan_revision(linked.id, linked.active_plan_revision)
+                        if linked_plan.plan.get('preview_plan_id') == plan['id']:
+                            return repo.update_plan_execution(plan['id'], status='started', team_run_id=linked.id)
+            expected_files = payload.get('source_files', {})
+            conversation = repo.get_conversation(plan['conversation_id'])
+            # Started runs are never replayed, even when they have already changed files.
+            already_started = repo.get_run('run_' + plan['id']) if payload.get('target') != 'team' else None
+            source_workspace = conversation.workspace
+            if expected_files and payload.get('existing_team_id') and self._team_worktrees:
+                source_team = repo.get_team_run(payload['existing_team_id'])
+                source_workspace = self._team_worktrees.read_view(source_team.id, source_team.integration_head)
+            if not already_started and source_fingerprints(source_workspace, expected_files) != expected_files:
+                raise StorageConflictError('规划时调查的文件已变化，请撤回并核对新版本后重新提交方案')
+            if payload.get('target') == 'team':
+                if self._team_worktrees is None or not getattr(getattr(self.agent_factory, 'env', None), 'team_runtime_enabled', False):
+                    raise ValueError('Agent Team 当前不可用')
+                active = repo.get_active_team_run_for_conversation(plan['conversation_id'])
+                # Root run identifies this exact submitted revision, including crash recovery.
+                if active and active.root_run_id != plan['run_id'] and active.id not in {plan.get('team_run_id'), payload.get('existing_team_id')}:
+                    raise StorageConflictError('会话已关联其他 Team，不能启动旧方案')
+                if active and active.state.value == 'running':
+                    revision = repo.get_team_plan_revision(active.id, active.active_plan_revision)
+                    if revision.plan.get('preview_plan_id') == plan['id']:
+                        return repo.update_plan_execution(plan['id'], status='started', team_run_id=active.id)
+                    raise StorageConflictError('团队已按其他版本执行，不能重复启动')
+                if task_snapshot(repo, payload['task_list_id'], payload['team_input']['plan']) != payload['task_snapshot']:
+                    raise StorageConflictError('任务内容已变化，请撤回方案并重新提交后再批准')
+                kwargs = dict(payload['team_input'])
+                kwargs['plan'] = {**kwargs['plan'], 'preview_plan_id': plan['id']}
+                kwargs['baseCommit'] = active.base_commit if active else kwargs.get('baseCommit', 'HEAD')
+                if not active and kwargs['baseCommit'] == 'HEAD':
+                    self._team_worktrees.prepare_local_repository(conversation.workspace)
+                tool = LeadTeamPlanTool(repo, self._team_worktrees, plan['conversation_id'], plan['run_id'],
+                                       payload['task_list_id'], getattr(self.agent_factory, 'memory_access', None))
+                result = json.loads(tool.run(**kwargs))
+                team_id, revision = result['team_run_id'], result['plan_revision']
+                repo.update_plan_execution(plan['id'], status='starting', team_run_id=team_id)
+                self._team_worktrees.ensure_baseline_ready(team_id)
+                repo.decide_team_plan_revision(team_id, revision, decision='approve', decided_by='user',
+                    reason='批准统一方案 ' + plan['id'], command_id='plan-approve:' + plan['id'])
+                return repo.update_plan_execution(plan['id'], status='started', team_run_id=team_id)
+            run_id = 'run_' + plan['id']
+            existing = repo.get_run(run_id)
+            if existing is None:
+                self.start()
+                source = repo.get_run(plan['run_id'])
+                prompt = '执行用户已批准的方案（版本 ' + str(plan['revision']) + '）：\n\n' + plan['markdown']
+                self._submit(plan['conversation_id'], prompt, use_team=False, read_only=False,
+                    plan_mode=False, approved_plan_id=plan['id'],
+                    web_search_enabled=bool(source and source.metadata.get('web_search_enabled')),
+                    reasoning_effort=source.metadata.get('reasoning_effort') if source else None)
+            return repo.update_plan_execution(plan['id'], status='started', execution_run_id=run_id)
+        except Exception as exc:
+            return repo.update_plan_execution(plan['id'], status='blocked', error=str(exc))
 
     def configure_team_runtime(self, worktree_manager: Any) -> None:
         """Attach the Runtime-owned Worktree registry used by Team Agents."""
@@ -555,6 +689,13 @@ class RunScheduler:
                 activity.interrupt_request()
             return activity is not None
 
+    def _lead_plan_options(self, team):
+        if team.state.value == 'planning' and any(
+            p.get('team_run_id') == team.id for p in self.repository.list_planning_revisions(team.conversation_id)
+        ):
+            self.repository.set_planning_mode(team.conversation_id, 'planning', 'team')
+            return {'plan_mode': True}
+        return {}
 
     def run_team_lead_cycle(
         self,
@@ -649,6 +790,7 @@ class RunScheduler:
                 checkpoint=None,
                 team_session=session,
                 worktree_manager=self._team_worktrees,
+                **self._lead_plan_options(team),
             )
             activity = execution_activity or agent.execution_activity or ExecutionActivity(token)
             agent.set_execution_activity(activity)
@@ -845,6 +987,16 @@ class RunScheduler:
                     raise ValueError("A Team became active after this read-only request was queued")
                 self._execute_team_lead(job, active_team)
                 return
+            if job.use_team and not job.plan_mode and self._team_worktrees is not None:
+                try:
+                    self._team_worktrees.for_workspace(job.workspace).inspect_baseline("HEAD")
+                except WorktreeError as exc:
+                    raise ValueError(
+                        "Agent Team 启动检查失败：当前 Worktree 模式需要 Git 仓库根目录，"
+                        "并且已有至少一次本地提交。新项目请先初始化本地 Git 仓库和初始提交，"
+                        "或使用普通模式创建项目后再启用 Team；不需要推送 GitHub。"
+                        f"具体原因：{exc}"
+                    ) from exc
             if not job.use_team:
                 missing = self.repository.get_uncheckpointed_tool_run(job.conversation_id, exclude_run_id=job.run_id)
                 if missing is not None:
@@ -878,6 +1030,8 @@ class RunScheduler:
                 create_kwargs["root_prompt_mode"] = profile
             if job.read_only:
                 create_kwargs["read_only"] = True
+            if job.plan_mode:
+                create_kwargs['plan_mode'] = True
             if job.web_search_enabled:
                 create_kwargs["web_search_enabled"] = True
             if job.reasoning_effort is not None:
@@ -908,7 +1062,7 @@ class RunScheduler:
                 job.conversation_id
             )
             contract_error = None
-            if job.use_team and active_team is None:
+            if job.use_team and active_team is None and not job.plan_mode:
                 terminal_status = "failed"
                 contract_error = (
                     "Explicit Team mode ended without submitting a Team Plan. "

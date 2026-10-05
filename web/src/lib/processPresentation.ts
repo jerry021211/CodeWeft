@@ -47,6 +47,7 @@ type Narration = { key: string; callId: string; agentId: string; parentAgentId?:
 
 const toolLabels: Record<string, string> = {
   web_search: "联网搜索",
+  repo_map: "项目概览", search_code: "搜索代码",
   read_file: "读取文件", read: "读取文件", write_file: "写入文件", write: "写入文件",
   edit_file: "修改文件", edit: "修改文件", apply_patch: "应用修改", bash: "运行命令",
   shell: "运行命令", exec_command: "运行命令", glob: "查找文件", grep: "搜索内容",
@@ -89,8 +90,8 @@ function toolCategory(action: RunAction): Category {
   if (action.kind !== "tool") return "other";
   const name = action.title.toLowerCase();
   if (["read", "read_file"].includes(name)) return "read";
-  if (["grep", "search", "web_search"].includes(name)) return "search";
-  if (["glob", "list_files", "list_directory", "ls"].includes(name)) return "list";
+  if (["grep", "search", "search_code", "web_search"].includes(name)) return "search";
+  if (["glob", "repo_map", "list_files", "list_directory", "ls"].includes(name)) return "list";
   if (["write", "write_file", "edit", "edit_file", "apply_patch"].includes(name)) return "edit";
   if (["bash", "shell", "exec_command"].includes(name)) return "command";
   return "other";
@@ -110,10 +111,17 @@ export function processOutputText(value: unknown): string | undefined {
   return stringFrom(output, "preview", "text", "stdout", "message", "summary", "content");
 }
 
+function batchPaths(action: RunAction): string[] {
+  const paths = record(action.input).file_paths;
+  return action.title.toLowerCase() === "read_file" && Array.isArray(paths)
+    ? paths.filter((path): path is string => typeof path === "string") : [];
+}
+
 function targetFor(action: RunAction) {
   const input = record(action.input);
   if (action.kind !== "tool") return action.subtitle;
   const category = toolCategory(action);
+  if (batchPaths(action).length) return batchPaths(action).join(" · ");
   const keys = category === "command" ? ["command", "cmd"]
     : category === "search" || category === "list" ? ["pattern", "query", "path", "directory"]
     : ["file_path", "path", "subject", "summary", "question", "answer", "taskId", "task_id", "description", "prompt", "name"];
@@ -124,12 +132,14 @@ function targetFor(action: RunAction) {
 function inputFor(action: RunAction) {
   const input = record(action.input);
   if (typeof action.input === "string") return action.input;
+  if (batchPaths(action).length) return batchPaths(action).join("\n");
   if (toolCategory(action) === "command") return stringFrom(input, "command", "cmd");
   // Paths, queries and descriptions make useful details; raw argument JSON belongs in Debug.
   return stringFrom(input, "file_path", "path", "pattern", "query", "question", "answer", "summary", "description", "prompt", "subject", "name");
 }
 
 function labelFor(action: RunAction) {
+  if (batchPaths(action).length) return `批量读取 ${batchPaths(action).length} 个文件`;
   if (action.kind === "model") return "模型调用";
   if (action.kind === "context") return "整理上下文";
   if (action.kind === "recovery") return "恢复执行";
@@ -255,6 +265,7 @@ export function buildProcessPresentation(run: RunViewState, options: { finalAnsw
     if (category === "command") summary.commandCount++;
     const file = stringFrom(record(action.input), "file_path", "path");
     if (file && (category === "read" || category === "edit")) files.add(file);
+    for (const path of batchPaths(action)) files.add(path);
     if (action.parent_agent_id && action.agent_id) agents.add(action.agent_id);
     // Empty successful model iterations are timing data, not user-facing reasoning.
     if (action.kind === "model" && !["failed", "blocked", "waiting", "unknown", "cancelled"].includes(status)) continue;
@@ -265,7 +276,7 @@ export function buildProcessPresentation(run: RunViewState, options: { finalAnsw
       target, agentId: action.agent_id, agentLabel: agentLabel(run, action.agent_id, Boolean(action.parent_agent_id)),
       durationMs: action.duration_ms, error: action.error ?? ((status === "failed" || status === "blocked" || status === "waiting" || status === "unknown") ? info?.reason ?? outputText : undefined),
       inputText: inputFor(action), outputText, outputTruncated: record(action.output).truncated === true,
-      actions: [action], count: 1, targets: target ? [target] : [],
+      actions: [action], count: 1, targets: batchPaths(action).length ? batchPaths(action) : target ? [target] : [],
       readCount: category === "read" ? 1 : 0, searchCount: category === "search" ? 1 : 0, listCount: category === "list" ? 1 : 0,
     } });
   }
