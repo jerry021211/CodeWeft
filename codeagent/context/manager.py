@@ -460,7 +460,7 @@ class ContextManager:
     def _render_result(self, output, allowance):
         renderer = getattr(output, 'page_renderer', None)
         rendered = renderer(allowance) if renderer else text_page(output, output.body, allowance)
-        if getattr(rendered, 'read_page', None):
+        if getattr(rendered, 'read_page', None) or getattr(rendered, 'read_batch', None):
             return rendered
         rendered.output_id = output.output_id
         rendered.source_complete = output.source_complete

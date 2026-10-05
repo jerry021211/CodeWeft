@@ -17,6 +17,7 @@ from codeagent.tools.memory import (
     SearchMemoryTool,
 )
 from codeagent.tools.read import ReadFileTool
+from codeagent.tools.repo_map import RepoMapTool
 from codeagent.tools.runtime_data import LoadContextHistoryTool, LoadToolOutputTool
 from codeagent.tools.registry import ToolRegistry, tool_request_hash, tool_schema_hash
 from codeagent.tools.skill import LOAD_SKILL_TOOL_NAME, LoadSkillTool
@@ -60,6 +61,7 @@ __all__ = [
     "LoadContextHistoryTool",
     "LoadToolOutputTool",
     "ReadFileTool",
+    "RepoMapTool",
     "REMEMBER_TOOL_NAME",
     "SUBAGENT_TOOL_NAME",
     "TASK_TOOL_NAMES",

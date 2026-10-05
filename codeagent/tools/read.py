@@ -174,6 +174,9 @@ def with_read_feedback(output, prefix='', suffix=''):
     result = ToolOutput(prefix + str(output) + suffix)
     result.__dict__.update(getattr(output, '__dict__', {}))
     result.feedback = (prefix, suffix)
+    if getattr(output, 'read_batch', None):
+        result.metadata_chars += len(prefix) + len(suffix)
+        result.page_renderer = lambda size: with_read_feedback(output.page_renderer(size), prefix, suffix)
     if getattr(output, 'read_page', None):
         result.read_page = {**output.read_page, 'feedback': (prefix, suffix)}
     return result
@@ -200,20 +203,37 @@ class ReadFileTool:
     definition: ToolDefinition = ToolDefinition(
         name='read_file', effect='read', reentrant=True,
         description=(f'读取连续原文，正文最多{READ_BODY_CHARS}字符（含行号），最多{READ_SOURCE_LINES}行。续读使用next_offset/next_char_offset，'
+                     'file_path读取单文件；file_paths一次读取1至5个已知相关文件，二者仅选一个。批量正文共享字符预算，每个文件分别保留行号和续读信息。'
                      '并必须携带上一页source_version作为expected_version；版本变化后重新定位。'
                      '行内偏移按解码字符计（含原换行），结束位置为排他边界。引用代码时去掉显示行号并使用实际行号。'
                      'force_full只禁用重复读取短引用。'),
         input_schema={'type': 'object', 'properties': {
             'file_path': {'type': 'string', 'description': '文件路径'},
+            'file_paths': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1, 'maxItems': 5,
+                           'description': '一次读取最多5个文件。offset/limit应用于每个文件；续读改用单文件file_path和该文件的版本及游标。'},
             'offset': {'type': 'integer', 'minimum': 1, 'default': 1},
             'limit': {'type': 'integer', 'minimum': 1, 'maximum': READ_SOURCE_LINES, 'default': READ_SOURCE_LINES},
             'char_offset': {'type': 'integer', 'minimum': 0, 'default': 0, 'description': '仅起始行的行内字符位置，不含显示行号。'},
             'expected_version': {'type': 'string', 'description': '续读时传上一页source_version；不匹配则拒绝正文。'},
-            'force_full': {'type': 'boolean', 'default': False}}, 'required': ['file_path']})
+            'force_full': {'type': 'boolean', 'default': False}},
+            'oneOf': [{'required': ['file_path']}, {'required': ['file_paths']}]})
     workspace_guard: WorkspaceGuard | None = None
 
-    def run(self, file_path: str, offset: int = 1, limit: int = READ_SOURCE_LINES,
-            force_full: bool = False, char_offset: int = 0, expected_version: str | None = None) -> str:
+    def run(self, file_path: str | None = None, offset: int = 1, limit: int = READ_SOURCE_LINES,
+            force_full: bool = False, char_offset: int = 0, expected_version: str | None = None,
+            file_paths: list[str] | None = None) -> str:
+        if (file_path is None) == (file_paths is None):
+            return parameter_error('Provide exactly one of file_path or file_paths.', 'read_file:paths')
+        if file_paths is not None:
+            if (not isinstance(file_paths, list) or not 1 <= len(file_paths) <= 5
+                    or any(not isinstance(p, str) or not p.strip() for p in file_paths)):
+                return parameter_error('file_paths must contain 1 to 5 non-empty paths.', 'read_file:file_paths')
+            if expected_version is not None or char_offset != 0:
+                return parameter_error('Continue each file separately with file_path and its own cursor/version.', 'read_file:batch_cursor')
+            from codeagent.tools.read_batch import render_batch
+            return render_batch([(path, self.run(path, offset, limit, force_full)) for path in file_paths])
+        if not isinstance(file_path, str) or not file_path.strip():
+            return parameter_error('file_path must be a non-empty path.', 'read_file:file_path')
         if type(offset) is not int or offset < 1 or type(limit) is not int or not 1 <= limit <= READ_SOURCE_LINES:
             return parameter_error(f'offset必须为正整数；limit必须为1到{READ_SOURCE_LINES}的整数。', 'read_file:positive_range')
         if type(char_offset) is not int or char_offset < 0:

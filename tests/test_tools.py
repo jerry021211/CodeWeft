@@ -45,6 +45,7 @@ class DefaultToolTests(unittest.TestCase):
             {
                 "bash",
                 "read_file",
+                "repo_map",
                 "write_file",
                 "edit_file",
                 "glob",

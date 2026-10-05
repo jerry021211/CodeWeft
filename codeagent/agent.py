@@ -758,7 +758,7 @@ class Agent:
                     # closures that could keep a complete remote payload alive.
                     saved = ToolOutput(str(output))
                     saved.__dict__.update({key: value for key, value in getattr(output, '__dict__', {}).items()
-                                           if key not in {'archive', 'page_renderer', 'original_payload', 'source_text',
+                                           if key not in {'archive', 'page_renderer', 'original_payload', 'source_text', 'read_batch',
                                                           'feedback', 'context_feedback', 'guard_feedback'}})
                     result["content"] = saved
             except Exception as exc:

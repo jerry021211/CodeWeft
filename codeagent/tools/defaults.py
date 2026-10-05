@@ -16,6 +16,7 @@ from codeagent.memory import MemoryStore
 from codeagent.skills import SkillLoader
 from codeagent.tools.memory import LoadMemoryTool, RememberTool, SearchMemoryTool
 from codeagent.tools.read import ReadFileTool
+from codeagent.tools.repo_map import RepoMapTool
 from codeagent.tools.registry import ToolRegistry
 from codeagent.tools.skill import LoadSkillTool
 from codeagent.tools.tasks import TaskService, create_task_tools
@@ -54,6 +55,7 @@ def default_tools(
     tools: list[Tool] = [
         BashTool(workspace_guard=workspace_guard),
         ReadFileTool(workspace_guard=workspace_guard),
+        RepoMapTool(workspace_guard=workspace_guard),
         WriteFileTool(
             workspace_guard=workspace_guard,
             changed_files=file_changes,

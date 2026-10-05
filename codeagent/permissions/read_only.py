@@ -12,7 +12,7 @@ import shlex
 from codeagent.messages import ToolUse
 
 READ_ONLY_TOOLS = frozenset({
-    "read_file", "glob", "grep", "search_code", "lsp", "web_search", "load_skill", "search_memory", "load_memory",
+    "read_file", "repo_map", "glob", "grep", "search_code", "lsp", "web_search", "load_skill", "search_memory", "load_memory",
     "load_tool_output", "load_context_history", "compact", "TaskGet", "TaskList", "ask_user",
 })
 
