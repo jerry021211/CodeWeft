@@ -184,7 +184,7 @@ export function ConversationSidebar(props: Props) {
         </nav>
       </div>
       <footer className="shrink-0 border-t border-white/[0.06] px-3 py-3 text-[10px] text-sidebar-muted">
-        <button type="button" onClick={props.onOpenSettings} className="mb-2 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-xs text-sidebar-ink transition hover:bg-white/5"><Settings2 className="size-4" />模型设置</button>
+        <button type="button" onClick={props.onOpenSettings} className="mb-2 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-xs text-sidebar-ink transition hover:bg-white/5"><Settings2 className="size-4" />设置</button>
         <span className="px-3">数据仅保存在本机</span>
       </footer>
     </aside>

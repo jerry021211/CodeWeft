@@ -11,7 +11,10 @@ import type { PlanDocument } from "@/types/api";
 import { InspectorPanel } from "@/components/InspectorPanel";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
 import { McpConfigModal } from "@/components/McpConfigModal";
-import { ModelSettingsPage } from "@/components/ModelSettingsPage";
+import { SettingsPage, settingsSectionFromHash } from "@/components/SettingsPage";
+import { archivedConversationsKey } from "@/components/ArchivedConversationsPanel";
+import { workspaceKey } from "@/lib/conversationGroups";
+import { useSidebarStore } from "@/store/sidebarStore";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { approvalsKey, usePendingApprovals } from "@/hooks/usePendingApprovals";
 import { useConversationActivity } from "@/hooks/useConversationActivity";
@@ -36,13 +39,22 @@ type TeamCommand =
 
 export default function App() {
   const queryClient = useQueryClient();
-  const [settingsOpen, setSettingsOpen] = useState(() => window.location.hash === "#settings/models");
+  const [settingsSection, setSettingsSection] = useState(() => settingsSectionFromHash(window.location.hash));
+  const settingsOpen = Boolean(settingsSection);
   useEffect(() => {
-    const changed = () => setSettingsOpen(window.location.hash === "#settings/models");
+    const changed = () => setSettingsSection(settingsSectionFromHash(window.location.hash));
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === ",") {
+        event.preventDefault();
+        window.location.hash = "settings/general";
+      }
+    };
     window.addEventListener("hashchange", changed);
-    return () => window.removeEventListener("hashchange", changed);
+    window.addEventListener("keydown", shortcut);
+    return () => { window.removeEventListener("hashchange", changed); window.removeEventListener("keydown", shortcut); };
   }, []);
-  const openSettings = () => { setLeftOpen(false); window.location.hash = "settings/models"; };
+  const openSettings = () => { setLeftOpen(false); window.location.hash = "settings/general"; };
+  const openModelSettings = () => { setLeftOpen(false); window.location.hash = "settings/models"; };
   const [selectedId, setSelectedId] = useState<string | undefined>(() => localStorage.getItem("codeagent.conversation") || undefined);
   const [search, setSearch] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -80,9 +92,10 @@ export default function App() {
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [workspacePath, setWorkspacePath] = useState<string>();
   const [workspaceSearch, setWorkspaceSearch] = useState("");
-  const [mcpOpen, setMcpOpen] = useState(false);
+  const mcpOpen = settingsSection === "mcp";
+  const [mcpWorkspaceChoice, setMcpWorkspaceChoice] = useState<string>();
   const [mcpMessage, setMcpMessage] = useState<string>();
-  const { theme, cycleTheme } = useTheme();
+  const { theme, cycleTheme, setTheme } = useTheme();
 
   const conversationsQuery = useQuery({
     queryKey: conversationsKey,
@@ -215,7 +228,8 @@ export default function App() {
     enabled: workspacePickerOpen,
     retry: false,
   });
-  const mcpWorkspace = selectedConversation?.workspace ?? runtimeQuery.data?.workspace;
+  const mcpWorkspace = mcpWorkspaceChoice ?? selectedConversation?.workspace ?? runtimeQuery.data?.workspace;
+  const mcpWorkspaces = [...new Set([mcpWorkspace, runtimeQuery.data?.workspace, ...conversations.map(item => item.workspace)].filter((path): path is string => Boolean(path)))];
   const mcpQuery = useQuery({
     queryKey: ["mcp-servers", mcpWorkspace],
     queryFn: () => api.getMcpConfig(mcpWorkspace!),
@@ -303,6 +317,7 @@ export default function App() {
     mutationFn: (conversation: Conversation) => api.updateConversation(conversation.id, { archived: true }),
     onSuccess: (_, conversation) => {
       queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => current.filter((item) => item.id !== conversation.id));
+      void queryClient.invalidateQueries({ queryKey: archivedConversationsKey });
       if (selectedId === conversation.id) setSelectedId(undefined);
     },
     onError: (error) => showError(error, setNotice),
@@ -317,6 +332,7 @@ export default function App() {
       setSelectedId((current) => current === conversation.id ? undefined : current);
       queryClient.removeQueries({ queryKey: ["conversations", conversation.id] });
       queryClient.removeQueries({ queryKey: teamsKey(conversation.id) });
+      void queryClient.invalidateQueries({ queryKey: archivedConversationsKey });
       for (const setter of [setDrafts, setRunIds]) {
         setter((current) => {
           const next = { ...current };
@@ -502,7 +518,28 @@ export default function App() {
 
   return (
     <div className="h-dvh min-h-[520px] overflow-hidden bg-canvas text-ink">
-      {settingsOpen ? <ModelSettingsPage onClose={() => { window.location.hash = ""; }} onSaved={() => { setReasoningChoices({}); void queryClient.invalidateQueries({ queryKey: ["runtime-config"] }); }} /> : <>
+      {settingsOpen && settingsSection ? <SettingsPage section={settingsSection}
+        onClose={() => { window.location.hash = ""; }} theme={theme} onThemeChange={setTheme}
+        onSaved={() => { setReasoningChoices({}); void queryClient.invalidateQueries({ queryKey: ["runtime-config"] }); }}
+        onRestored={(conversation, open) => {
+          queryClient.setQueryData<Conversation[]>(conversationsKey, (current = []) => [conversation, ...current.filter(item => item.id !== conversation.id)]);
+          queryClient.setQueryData(["conversations", conversation.id], conversation);
+          void queryClient.invalidateQueries({ queryKey: conversationsKey, exact: true });
+          useSidebarStore.getState().setCollapsed(workspaceKey(conversation.workspace), false);
+          if (open) { setSearch(""); setSelectedId(conversation.id); window.location.hash = ""; }
+        }}
+        onDelete={conversation => deleteConversation.mutateAsync(conversation)}
+        mcpPanel={<div className="space-y-5">
+          <label className="block text-sm font-medium">项目<select aria-label="MCP 配置项目" value={mcpWorkspace ?? ""} disabled={saveMcpServer.isPending || deleteMcpServer.isPending} onChange={event => { setMcpWorkspaceChoice(event.target.value); setMcpMessage(undefined); saveMcpServer.reset(); deleteMcpServer.reset(); }} className="mt-2 block h-10 w-full rounded-xl border border-line bg-surface px-3 text-xs font-normal">{mcpWorkspaces.map(path => <option key={path} value={path}>{path}</option>)}</select></label>
+          {!mcpWorkspace && <p className="text-sm text-ink-muted">请先新建项目，再配置 MCP 插件。</p>}
+          <McpConfigModal key={mcpWorkspace} embedded open workspace={mcpWorkspace} config={mcpQuery.data}
+            loading={mcpQuery.isLoading} saving={saveMcpServer.isPending}
+            deleting={deleteMcpServer.isPending ? deleteMcpServer.variables?.name : undefined}
+            error={mcpQuery.error ? errorMessage(mcpQuery.error) : saveMcpServer.error ? errorMessage(saveMcpServer.error) : deleteMcpServer.error ? errorMessage(deleteMcpServer.error) : undefined}
+            message={mcpMessage} onSave={server => { setMcpMessage(undefined); saveMcpServer.mutate(server); }}
+            onDelete={name => mcpWorkspace && deleteMcpServer.mutate({ workspace: mcpWorkspace, name })}
+            onClose={() => { window.location.hash = ""; }} />
+        </div>} /> : <>
       <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[264px_minmax(0,1fr)] xl:grid-cols-[264px_minmax(0,1fr)_320px]">
         <div className="hidden min-h-0 lg:block">
           <ConversationSidebar onOpenSettings={openSettings} conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={setSelectedId} onCreateProject={() => setWorkspacePickerOpen(true)} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} />
@@ -523,7 +560,7 @@ export default function App() {
               error={planDecision.error ? errorMessage(planDecision.error) : undefined}
               onDecision={(plan, decision) => selectedId && planDecision.mutate({ conversationId: selectedId, plan, decision })}
               onExit={() => selectedId && exitPlan.mutate(selectedId)} onRevise={() => setDraft("请修改方案：")} />}
-            onOpenSettings={openSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(pendingApproval && decidingRuns.includes(pendingApproval.run_id))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => selectedId && pendingApproval && decideApproval.mutate({ conversationId: selectedId, targetRunId: pendingApproval.run_id, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpMessage(undefined); setMcpOpen(true); }} onToggleTheme={cycleTheme} />
+            onOpenSettings={openModelSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(pendingApproval && decidingRuns.includes(pendingApproval.run_id))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => selectedId && pendingApproval && decideApproval.mutate({ conversationId: selectedId, targetRunId: pendingApproval.run_id, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpWorkspaceChoice(selectedConversation?.workspace ?? runtimeQuery.data?.workspace); setMcpMessage(undefined); window.location.hash = "settings/mcp"; }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>
@@ -546,22 +583,8 @@ export default function App() {
         onClose={() => { if (!createConversation.isPending) { setWorkspacePickerOpen(false); setWorkspacePath(undefined); setWorkspaceSearch(""); } }}
       />
 
-      <McpConfigModal
-        open={mcpOpen}
-        workspace={mcpWorkspace}
-        config={mcpQuery.data}
-        loading={mcpQuery.isLoading}
-        saving={saveMcpServer.isPending}
-        deleting={deleteMcpServer.isPending ? deleteMcpServer.variables?.name : undefined}
-        error={mcpQuery.error ? errorMessage(mcpQuery.error) : saveMcpServer.error ? errorMessage(saveMcpServer.error) : deleteMcpServer.error ? errorMessage(deleteMcpServer.error) : undefined}
-        message={mcpMessage}
-        onSave={(server) => { setMcpMessage(undefined); saveMcpServer.mutate(server); }}
-        onDelete={(name) => mcpWorkspace && deleteMcpServer.mutate({ workspace: mcpWorkspace, name })}
-        onClose={() => { if (!saveMcpServer.isPending && !deleteMcpServer.isPending) setMcpOpen(false); }}
-      />
-
-      {notice && <div role="alert" className="fixed bottom-4 left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-xl border border-danger/20 bg-surface px-3 py-2.5 text-xs text-danger shadow-panel"><AlertCircle className="size-4 shrink-0" /><span className="min-w-0">{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice(undefined)}><X className="size-3.5" /></button></div>}
       </>}
+      {notice && <div role="alert" className="fixed bottom-4 left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-xl border border-danger/20 bg-surface px-3 py-2.5 text-xs text-danger shadow-panel"><AlertCircle className="size-4 shrink-0" /><span className="min-w-0">{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice(undefined)}><X className="size-3.5" /></button></div>}
     </div>
   );
 }
@@ -584,7 +607,7 @@ function useTheme() {
     return () => query.removeEventListener("change", apply);
   }, [theme]);
   const cycleTheme = () => setTheme((value) => value === "system" ? "light" : value === "light" ? "dark" : "system");
-  return { theme, cycleTheme };
+  return { theme, cycleTheme, setTheme };
 }
 
 function showError(error: unknown, setNotice: (message: string) => void) {

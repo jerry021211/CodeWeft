@@ -133,6 +133,20 @@ export const api = {
     return unwrapList(await request<ApiList<Conversation>>(`/conversations${suffix}`));
   },
 
+  async listArchivedConversations(signal?: AbortSignal) {
+    const conversations: Conversation[] = [];
+    const seen = new Set<string>();
+    for (let offset = 0; ; offset += 100) {
+      const page = unwrapList(await request<ApiList<Conversation>>(`/conversations?archived_only=true&limit=100&offset=${offset}`, { signal }));
+      if (page.some(item => !item.archived_at) || (page.length > 0 && page.every(item => seen.has(item.id)))) {
+        throw new Error("归档接口尚未更新，请重启 CodeAgent 后端后重试。");
+      }
+      for (const item of page) seen.add(item.id);
+      conversations.push(...page);
+      if (page.length < 100) return conversations;
+    }
+  },
+
   createConversation(options?: { title?: string; workspace?: string }) {
     return request<Conversation>("/conversations", {
       method: "POST",

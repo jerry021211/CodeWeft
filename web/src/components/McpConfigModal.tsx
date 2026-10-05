@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, CircleAlert, Plug, Server, Trash2, X } from "lucide-react";
 import type { McpConfig, McpTransport, SaveMcpServer } from "@/types/api";
 import { IconButton, Spinner } from "@/components/ui";
+import { cx } from "@/lib/utils";
 
 type Props = {
+  embedded?: boolean;
   open: boolean;
   workspace?: string;
   config?: McpConfig;
@@ -75,15 +77,15 @@ export function McpConfigModal(props: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/55 p-4 backdrop-blur-sm" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && props.onClose()}>
-      <section role="dialog" aria-modal="true" aria-labelledby="mcp-config-title" className="flex max-h-[min(860px,94vh)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl">
+    <div className={props.embedded ? "" : "fixed inset-0 z-[80] grid place-items-center bg-black/55 p-4 backdrop-blur-sm"} role="presentation" onMouseDown={(event) => !props.embedded && event.target === event.currentTarget && props.onClose()}>
+      <section role={props.embedded ? undefined : "dialog"} aria-modal={props.embedded ? undefined : true} aria-labelledby="mcp-config-title" className={cx("flex w-full flex-col overflow-hidden rounded-2xl border border-line bg-surface", !props.embedded && "max-h-[min(860px,94vh)] max-w-3xl shadow-2xl")}>
         <header className="flex items-start gap-3 border-b border-line px-5 py-4">
           <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"><Plug className="size-5" /></div>
           <div className="min-w-0 flex-1">
             <h2 id="mcp-config-title" className="text-sm font-semibold text-ink">MCP 插件配置</h2>
             <p className="mt-1 text-[11px] leading-5 text-ink-muted">为当前项目添加本地或远程 MCP Server。保存后，下一条消息会自动加载新工具。</p>
           </div>
-          <IconButton label="关闭 MCP 配置" onClick={props.onClose}><X className="size-4" /></IconButton>
+          {!props.embedded && <IconButton label="关闭 MCP 配置" onClick={props.onClose}><X className="size-4" /></IconButton>}
         </header>
 
         <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">

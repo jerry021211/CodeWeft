@@ -329,6 +329,34 @@ class WebApiTests(unittest.TestCase):
             len(self.client.get("/api/conversations?archived=true").json()), 1
         )
 
+    def test_archived_conversations_paginate_and_restore_with_history(self) -> None:
+        first = self.repository.create_conversation(title="Archived first", workspace=str(self.workspace))
+        second = self.repository.create_conversation(title="Archived second", workspace=str(self.workspace))
+        active = self.repository.create_conversation(title="Active", workspace=str(self.workspace))
+        message = self.repository.create_message(first.id, role="user", content="Keep this history")
+        for conversation in (first, second):
+            response = self.client.patch(f"/api/conversations/{conversation.id}", json={"archived": True})
+            self.assertEqual(response.status_code, 200)
+        url = "/api/conversations?archived_only=true&limit=1"
+        page_one = self.client.get(url).json()
+        page_two = self.client.get(url + "&offset=1").json()
+        self.assertEqual({page_one[0]["id"], page_two[0]["id"]}, {first.id, second.id})
+        self.assertTrue(all(item["archived_at"] for item in page_one + page_two))
+        self.assertEqual(self.client.get(url + "&offset=2").json(), [])
+        self.assertEqual([item["id"] for item in self.client.get("/api/conversations").json()], [active.id])
+        self.assertEqual(len(self.client.get("/api/conversations?archived=true").json()), 3)
+        history = self.client.get(f"/api/conversations/{first.id}/messages")
+        self.assertEqual(history.json()[0]["id"], message.id)
+        restored = self.client.patch(f"/api/conversations/{first.id}", json={"archived": False})
+        self.assertEqual(restored.status_code, 200)
+        self.assertIsNone(restored.json()["archived_at"])
+        self.assertEqual(restored.json()["workspace"], str(self.workspace))
+        self.assertEqual({item["id"] for item in self.client.get("/api/conversations").json()}, {first.id, active.id})
+        self.assertEqual([item["id"] for item in self.client.get("/api/conversations?archived_only=true").json()], [second.id])
+        self.assertEqual(self.client.get(f"/api/conversations/{first.id}/messages").json(), history.json())
+        self.assertEqual(self.client.get("/api/conversations?limit=0").status_code, 422)
+        self.assertEqual(self.client.get("/api/conversations?offset=-1").status_code, 422)
+
     def test_delete_conversation_cleans_history_and_preserves_other_conversations(self) -> None:
         conversation = self.repository.create_conversation(workspace=str(self.workspace))
         other = self.repository.create_conversation(workspace=str(self.workspace))

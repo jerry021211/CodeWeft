@@ -1064,13 +1064,16 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         self,
         *,
         include_archived: bool = False,
+        archived_only: bool = False,
         query: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[ConversationRecord]:
         conditions: list[str] = []
         parameters: list[Any] = []
-        if not include_archived:
+        if archived_only:
+            conditions.append("archived_at IS NOT NULL")
+        elif not include_archived:
             conditions.append("archived_at IS NULL")
         if query and query.strip():
             conditions.append("title LIKE ? ESCAPE '\\'")

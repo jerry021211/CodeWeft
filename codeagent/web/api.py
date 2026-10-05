@@ -401,11 +401,17 @@ def create_app(
     @app.get("/api/conversations", response_model=list[ConversationResponse])
     def list_conversations(
         archived: bool = Query(default=False),
+        archived_only: bool = Query(default=False),
         search: str | None = Query(default=None, max_length=200),
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
     ) -> list[ConversationResponse]:
         records = repo.list_conversations(
             include_archived=archived,
+            archived_only=archived_only,
             query=search,
+            limit=limit,
+            offset=offset,
         )
         return [_conversation_response(repo, record) for record in records]
 

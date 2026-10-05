@@ -14,7 +14,7 @@ const descriptions = {
   embedding: "为代码检索生成向量，让搜索理解代码语义。需要与服务实际输出一致的向量维度。",
 };
 
-export function ModelSettingsPage({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+export function ModelSettingsPage({ onClose, onSaved, embedded = false }: { onClose: () => void; onSaved: () => void; embedded?: boolean }) {
   const [settings, setSettings] = useState<ModelSettings>();
   const [draft, setDraft] = useState<ModelSettingsInput>();
   const [section, setSection] = useState<ModelServiceName>("chat");
@@ -86,20 +86,20 @@ export function ModelSettingsPage({ onClose, onSaved }: { onClose: () => void; o
   const service = draft?.services[section];
   const storedKey = Boolean(settings?.services[section].has_api_key);
   const Icon = icons[section];
-  return <main className="fixed inset-0 z-[60] flex flex-col bg-canvas text-ink" aria-label="模型设置">
-    <header className="shrink-0 border-b border-line bg-surface">
+  return <section className={cx("flex flex-col text-ink", !embedded && "fixed inset-0 z-[60] bg-canvas")} aria-label="模型设置">
+    {!embedded && <header className="shrink-0 border-b border-line bg-surface">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-3 px-4 sm:px-8">
         <button type="button" onClick={onClose} disabled={busy} className="inline-flex items-center gap-2 text-sm text-ink-muted hover:text-ink disabled:opacity-40"><ArrowLeft className="size-4" />返回对话</button>
         <span className="inline-flex items-center gap-2 text-sm font-semibold"><Settings2 className="size-4 text-accent" />设置</span>
         <span className="text-xs text-ink-faint">本机配置</span>
       </div>
-    </header>
+    </header>}
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-6xl px-4 py-7 sm:px-8 sm:py-10">
-        <div className="mb-7"><h1 className="text-2xl font-semibold tracking-tight">模型与能力</h1><p className="mt-2 text-sm leading-6 text-ink-muted">选择一个对话模型，再按需接入语音识别和向量检索。</p></div>
+      <div className={embedded ? "pb-6" : "mx-auto max-w-6xl px-4 py-7 sm:px-8 sm:py-10"}>
+        {!embedded && <div className="mb-7"><h1 className="text-2xl font-semibold tracking-tight">模型与能力</h1><p className="mt-2 text-sm leading-6 text-ink-muted">选择一个对话模型，再按需接入语音识别和向量检索。</p></div>}
         {loading && <div className="flex items-center gap-3 rounded-2xl border border-line bg-surface p-8 text-sm text-ink-muted"><Spinner />正在读取模型配置…</div>}
-        {!loading && draft && <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
-          <nav aria-label="模型能力" className="flex gap-2 md:flex-col">
+        {!loading && draft && <div className={cx("grid gap-5", !embedded && "md:grid-cols-[220px_minmax(0,1fr)]")}>
+          <nav aria-label="模型能力" className={cx("flex gap-2", !embedded && "md:flex-col")}>
             {(["chat", "speech", "embedding"] as const).map(name => {
               const NavIcon = icons[name]; const item = draft.services[name];
               const enabled = name === "chat" || "enabled" in item && item.enabled;
@@ -161,7 +161,7 @@ export function ModelSettingsPage({ onClose, onSaved }: { onClose: () => void; o
       <button type="button" disabled={busy} onClick={() => void load()} className="rounded-xl border border-line px-4 py-2.5 text-xs text-ink-muted disabled:opacity-40">重新读取</button>
       <button type="button" disabled={busy || !draft || !dirty} onClick={() => void save()} className="inline-flex items-center gap-2 rounded-xl bg-accent px-5 py-2.5 text-xs font-semibold text-white shadow-sm hover:bg-accent-strong disabled:opacity-40">{saving ? <Spinner className="size-4 text-white" /> : <Save className="size-4" />}保存并应用</button>
     </div></footer>
-  </main>;
+  </section>;
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
