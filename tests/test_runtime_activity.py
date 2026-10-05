@@ -59,6 +59,15 @@ class ActivityTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, ModelCallTimeout)
         self.assertEqual(str(caught.exception), "user cancelled")
 
+    def test_cancel_before_stream_registration_closes_the_late_stream(self):
+        closed = []
+        with self.assertRaises(CancelledError):
+            with self.activity.model_request():
+                self.token.cancel("user cancelled")
+                self.activity.interrupt_request()
+                self.activity.set_request_closer(lambda: closed.append(True))
+        self.assertEqual(closed, [True])
+
     def test_human_approval_is_not_a_model_or_worker_timeout(self):
         with self.activity.operation("approval", float("inf")):
             self.clock.now = 1000

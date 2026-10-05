@@ -164,7 +164,13 @@ class ExecutionActivity:
 
     def set_request_closer(self, close: Callable[[], None] | None) -> None:
         with self._lock:
-            self._operations[-1].close = close
+            cancelled = self.cancellation.is_cancelled
+            self._operations[-1].close = None if cancelled else close
+        # Cancellation can win just before a stream becomes available. Do not
+        # leave a newly registered reader waiting for an event that already fired.
+        if cancelled and close is not None:
+            close()
+            self.cancellation.raise_if_cancelled()
 
     def interrupt_request(self) -> None:
         """Close only this response, never the shared SDK/HTTP client."""
