@@ -69,6 +69,8 @@ from codeagent.web.models import (
 )
 from codeagent.web.team_observation import install_observation, read_changes
 from codeagent.web.team_integration_storage import INTEGRATION_SCHEMA, TeamIntegrationStorage
+from codeagent.web.team_lifecycle import TeamLifecycleStorage
+from codeagent.teams.models import SESSION_ACTIVITY_PHASES
 
 
 ACTIVE_RUN_STATUSES = frozenset({"queued", "running"})
@@ -184,7 +186,7 @@ class Repository(Protocol):
     ) -> JsonObject: ...
 
 
-class SQLiteRepository(TeamIntegrationStorage):
+class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage):
     """A single-process, thread-safe SQLite repository.
 
     One connection is protected by a re-entrant lock.  This deliberately
@@ -199,7 +201,11 @@ class SQLiteRepository(TeamIntegrationStorage):
         *,
         recover_incomplete: bool = True,
         timeout: float = 5.0,
+        team_max_attempts_per_task: int = 2,
     ) -> None:
+        if team_max_attempts_per_task < 1:
+            raise ValueError("team_max_attempts_per_task must be at least 1")
+        self.team_max_attempts_per_task = team_max_attempts_per_task
         self.database = str(database)
         if self.database != ":memory:":
             Path(self.database).expanduser().resolve().parent.mkdir(
@@ -820,11 +826,30 @@ class SQLiteRepository(TeamIntegrationStorage):
                               ("integration_revision", "INTEGER NOT NULL DEFAULT 0")),
                 "candidates": (("team_integrated_revision", "INTEGER"), ("superseded_at", "TEXT")),
                 "task_attempts": (("base_integration_revision", "INTEGER NOT NULL DEFAULT 0"),),
+                "agent_sessions": (("activity_phase", "TEXT"),),
             }.items():
                 existing = {r["name"] for r in self._connection.execute(f"PRAGMA table_info({table})")}
                 for name, definition in additions:
                     if name not in existing:
                         self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            # Old heartbeats overloaded waiting_reason with normal progress.
+            # Migrate only the known phase labels; never change execution state.
+            phase_placeholders = ",".join("?" for _ in SESSION_ACTIVITY_PHASES)
+            self._connection.execute(
+                "UPDATE agent_sessions SET activity_phase = COALESCE(activity_phase, waiting_reason), "
+                f"waiting_reason = NULL WHERE waiting_reason IN ({phase_placeholders})",
+                tuple(sorted(SESSION_ACTIVITY_PHASES)),
+            )
+            # Session transitions also happen in transactional task/recovery
+            # helpers. Clear stale progress for every path, not only the UI path.
+            self._connection.execute("""
+                CREATE TRIGGER IF NOT EXISTS clear_agent_session_activity
+                AFTER UPDATE OF state ON agent_sessions
+                WHEN OLD.state IS NOT NEW.state AND NEW.activity_phase IS NOT NULL
+                BEGIN
+                    UPDATE agent_sessions SET activity_phase = NULL WHERE id = NEW.id;
+                END
+            """)
             columns = {
                 str(row["name"])
                 for row in self._connection.execute(
@@ -2227,7 +2252,10 @@ class SQLiteRepository(TeamIntegrationStorage):
             plan = self._team_plan_row(connection, team_run_id, revision)
             if str(plan["status"]) != TeamPlanStatus.DRAFT.value:
                 raise InvalidStateTransitionError("Only a DRAFT Team Plan can be submitted")
-            self._validate_team_plan_tasks(connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}))
+            self._validate_team_plan_tasks(
+                connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}),
+                require_validation_commands=team["integration_mode"] == "managed",
+            )
             connection.execute(
                 """
                 UPDATE team_plan_revisions
@@ -2308,7 +2336,7 @@ class SQLiteRepository(TeamIntegrationStorage):
             )
             active_revision = revision if normalized == "approve" else None
             if normalized == "approve":
-                self._validate_team_plan_tasks(connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}))
+                self._validate_team_plan_tasks(connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}), require_validation_commands=team["integration_mode"] == "managed")
             connection.execute(
                 """
                 UPDATE team_plan_revisions
@@ -2623,7 +2651,7 @@ class SQLiteRepository(TeamIntegrationStorage):
             connection.execute(
                 """
                 UPDATE agent_sessions
-                SET state = ?, waiting_reason = ?, failure_json = ?,
+                SET state = ?, waiting_reason = ?, failure_json = ?, activity_phase = NULL,
                     heartbeat_at = ?, updated_at = ? WHERE id = ?
                 """,
                 (
@@ -2718,6 +2746,12 @@ class SQLiteRepository(TeamIntegrationStorage):
                 raise StorageConflictError("Task revision conflict")
             if str(task["status"]) != TaskStatus.PENDING.value:
                 raise StorageConflictError("Only a pending Task can be claimed")
+            attempt_count = connection.execute(
+                "SELECT COUNT(*) FROM task_attempts WHERE team_run_id = ? AND task_id = ?",
+                (team_run_id, str(task_id)),
+            ).fetchone()[0]
+            if attempt_count >= self.team_max_attempts_per_task:
+                raise StorageConflictError("Task Attempt retry limit reached")
             dependency_reasons = self._dependency_reasons(connection, team, str(task_id))
             if dependency_reasons:
                 raise StorageConflictError("Task dependencies are not complete: " + ", ".join(dependency_reasons))
@@ -2726,6 +2760,9 @@ class SQLiteRepository(TeamIntegrationStorage):
                     raise StorageConflictError("New Attempt must use the current published integration version")
                 attempt_base_commit = str(team["integration_head"])
             task_metadata = _json_loads(task["metadata_json"], {})
+            validate_task_execution(
+                task_metadata, require_validation_commands=team["integration_mode"] == "managed",
+            )
             required = requires_attempt_plan(task_metadata)
             # Callers may assert the expected mode, but cannot grant or bypass approval.
             if plan_required is not None and (
@@ -2735,7 +2772,10 @@ class SQLiteRepository(TeamIntegrationStorage):
                     "Attempt Plan requirement differs from Task metadata"
                 )
             plan_required = required
-            self._validate_team_plan_tasks(connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}))
+            self._validate_team_plan_tasks(
+                connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}),
+                require_validation_commands=team["integration_mode"] == "managed",
+            )
             resource_keys = _team_task_resource_keys(task_metadata)
             self._ensure_resources_available(
                 connection,
@@ -5405,11 +5445,11 @@ class SQLiteRepository(TeamIntegrationStorage):
                 return self._attempt_from_connection(connection, attempt_id)
             team = self._team_row(connection, team_run_id)
             if (
-                str(team["state"]) != TeamRunState.RUNNING.value
+                str(team["state"]) not in {TeamRunState.RUNNING.value, TeamRunState.PAUSED.value}
                 or team["active_plan_revision"] is None
             ):
                 raise InvalidStateTransitionError(
-                    "TeamRun must be running with an approved active plan"
+                    "TeamRun must be running or paused with an approved active plan"
                 )
             attempt_error = _json_loads(attempt["error_json"], {})
             if attempt_error.get("type") == "team_plan_change_required":
@@ -5435,7 +5475,11 @@ class SQLiteRepository(TeamIntegrationStorage):
             plan = self._team_plan_row(connection, team_run_id, active_revision)
             if str(plan["status"]) != TeamPlanStatus.APPROVED.value:
                 raise StorageConflictError("Active Team Plan is not approved")
-            self._ensure_attempt_plan_still_approved(connection, attempt)
+            paused_state = _json_loads(team["metadata_json"], {}).get("pause_attempts", {}).get(attempt_id, {}).get("state")
+            saved_state = paused_state or attempt_error.get("restart_state")
+            resume_state = saved_state if saved_state in {"plan_required", "plan_submitted", "candidate_submitted", "validation_failed"} else "running"
+            if resume_state not in {"plan_required", "plan_submitted"}:
+                self._ensure_attempt_plan_still_approved(connection, attempt)
             if bool(attempt["result_unknown"]) and not acknowledge_unknown_result:
                 raise StorageConflictError(
                     "Unknown write result must be acknowledged before recovery"
@@ -5496,7 +5540,8 @@ class SQLiteRepository(TeamIntegrationStorage):
                 """,
                 (attempt_id,),
             ).fetchone()
-            if assignment is None or int(
+            recovered_revision = _json_loads(team["metadata_json"], {}).get("resumed_task_revisions", {}).get(attempt_id)
+            if assignment is None or int(recovered_revision if recovered_revision is not None else
                 _json_loads(assignment["payload_json"], {}).get("task_revision", -1)
             ) != int(task["revision"]):
                 raise StorageConflictError("Task revision changed after Attempt assignment")
@@ -5587,16 +5632,16 @@ class SQLiteRepository(TeamIntegrationStorage):
                 reason_code = "unknown_write_result"
             else:
                 reason_code = str(session["waiting_reason"] or "manual_recovery")
-            write_enabled = int(is_code)
+            write_enabled = int(is_code and resume_state == "running")
             connection.execute(
                 """
                 UPDATE task_attempts
-                SET session_id = ?, state = 'running', write_enabled = ?,
-                    result_unknown = 0, worker_exited_at = NULL,
+                SET session_id = ?, state = ?, write_enabled = ?,
+                    result_unknown = 0, worker_exited_at = NULL, cancel_requested_at = NULL,
                     finished_at = NULL, error_json = NULL, updated_at = ?
                 WHERE id = ?
                 """,
-                (str(session["id"]), write_enabled, now, attempt_id),
+                (str(session["id"]), resume_state, write_enabled, now, attempt_id),
             )
             if binding is not None:
                 if replacing_session:
@@ -5732,11 +5777,12 @@ class SQLiteRepository(TeamIntegrationStorage):
             connection.execute(
                 """
                 UPDATE agent_sessions
-                SET state = 'work', current_attempt_id = ?, waiting_reason = NULL,
+                SET state = ?, current_attempt_id = ?, waiting_reason = NULL,
                     checkpoint_id = COALESCE(?, checkpoint_id),
                     heartbeat_at = ?, updated_at = ? WHERE id = ?
                 """,
                 (
+                    "work" if resume_state in {"running", "plan_required"} else "waiting",
                     attempt_id,
                     recovery_checkpoint_id,
                     now,
@@ -5747,7 +5793,7 @@ class SQLiteRepository(TeamIntegrationStorage):
             payload = {
                 "reason_code": reason_code,
                 "reason": clean_reason,
-                "do_not_replay": bool(attempt["result_unknown"]),
+                "do_not_replay": bool(attempt["result_unknown"]) or attempt_error.get("type") == "service_restart",
                 "runtime_checks": [
                     "team_plan",
                     "task_revision",
@@ -5834,8 +5880,8 @@ class SQLiteRepository(TeamIntegrationStorage):
                 )
             connection.execute(
                 "UPDATE agent_sessions SET heartbeat_at = ?, updated_at = ?, "
-                "waiting_reason = CASE WHEN state = 'work' AND ? IS NOT NULL "
-                "THEN ? ELSE waiting_reason END WHERE id = ?",
+                "activity_phase = CASE WHEN state = 'work' AND ? IS NOT NULL "
+                "THEN ? ELSE activity_phase END WHERE id = ?",
                 (now, now, activity, activity, session_id),
             )
         return self.get_agent_session(session_id)
@@ -6088,7 +6134,7 @@ class SQLiteRepository(TeamIntegrationStorage):
             task_cancel = False
             result_unknown = int(attempt["result_unknown"])
             model_timeout = reason in {"model_response_timeout", "model_call_timeout"}
-            if model_timeout:
+            if model_timeout or reason == "team_paused":
                 # Do not resurrect already acknowledged historical unknown results.
                 # A still-running write, however, cannot be considered safe.
                 pending_write = connection.execute(
@@ -6312,6 +6358,13 @@ class SQLiteRepository(TeamIntegrationStorage):
                 """,
                 (team_run_id,),
             ).fetchall()
+            attempt_counts = {
+                str(row["task_id"]): int(row["count"])
+                for row in self._connection.execute(
+                    "SELECT task_id, COUNT(*) AS count FROM task_attempts "
+                    "WHERE team_run_id = ? GROUP BY task_id", (team_run_id,),
+                ).fetchall()
+            }
             planned_task_ids: set[str] | None = None
             if team["active_plan_revision"] is not None:
                 active_plan = self._connection.execute(
@@ -6337,11 +6390,16 @@ class SQLiteRepository(TeamIntegrationStorage):
                 dependency_reasons = self._dependency_reasons(self._connection, team, str(task["id"]))
                 reasons = list(dict.fromkeys(dependency_reasons))
                 try:
-                    validate_task_execution(_json_loads(task["metadata_json"], {}))
+                    validate_task_execution(
+                        _json_loads(task["metadata_json"], {}),
+                        require_validation_commands=team["integration_mode"] == "managed",
+                    )
                 except ValueError:
                     reasons.append("task_configuration_conflict")
                 if str(task["status"]) != TaskStatus.PENDING.value:
                     reasons.append(f"task_status:{task['status']}")
+                elif attempt_counts.get(str(task["id"]), 0) >= self.team_max_attempts_per_task:
+                    reasons.append("task_attempt_limit_reached")
                 if str(team["state"]) != TeamRunState.RUNNING.value:
                     reasons.append(f"team_status:{team['state']}")
                 if team["active_plan_revision"] is None:
@@ -6759,7 +6817,10 @@ class SQLiteRepository(TeamIntegrationStorage):
         plan = self._team_plan_row(connection, str(team["id"]), int(attempt["team_plan_revision"]))
         if plan["status"] != "approved":
             raise StorageConflictError("Question Team Plan is not approved")
-        self._validate_team_plan_tasks(connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}))
+        self._validate_team_plan_tasks(
+            connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}),
+            require_validation_commands=team["integration_mode"] == "managed",
+        )
         task = connection.execute(
             "SELECT metadata_json FROM tasks WHERE task_list_id = ? AND id = ?",
             (attempt["task_list_id"], attempt["task_id"]),
@@ -6828,6 +6889,8 @@ class SQLiteRepository(TeamIntegrationStorage):
         session_id: str,
         *,
         limit: int = 100,
+        excluded_message_ids: Sequence[str] = (),
+        included_message_ids: frozenset[str] | None = None,
     ) -> list[TeamMessageRecord]:
         """Mark pending messages delivered to the exact Session generation."""
 
@@ -6844,11 +6907,23 @@ class SQLiteRepository(TeamIntegrationStorage):
                 AgentSessionState.SHUTDOWN.value,
             }:
                 return []
+            message_filter = ""
+            filter_params: list[str] = []
+            for ids, operator in ((excluded_message_ids, "NOT IN"), (included_message_ids, "IN")):
+                if ids is None:
+                    continue
+                if not ids:
+                    if operator == "IN":
+                        return []
+                    continue
+                message_filter += f" AND id {operator} ({','.join('?' for _ in ids)})"
+                filter_params.extend(ids)
             rows = connection.execute(
                 """
                 SELECT * FROM team_messages
                 WHERE team_run_id = ? AND recipient_agent_id = ?
                   AND recipient_generation = ? AND acked_at IS NULL
+                """ + message_filter + """
                 ORDER BY CASE priority WHEN 'control' THEN 0 ELSE 1 END,
                          sequence_no
                 LIMIT ?
@@ -6857,6 +6932,7 @@ class SQLiteRepository(TeamIntegrationStorage):
                     str(session["team_run_id"]),
                     str(session["agent_id"]),
                     int(session["generation"]),
+                    *filter_params,
                     _positive_limit(limit),
                 ),
             ).fetchall()
@@ -7075,14 +7151,20 @@ class SQLiteRepository(TeamIntegrationStorage):
                  "summary": _json_loads(row["payload_json"], {}).get("summary", "")}
                 for row in rows]
 
-    def validate_team_plan_tasks(self, task_list_id: str, plan: Mapping[str, Any]) -> None:
+    def validate_team_plan_tasks(
+        self, task_list_id: str, plan: Mapping[str, Any], *, require_validation_commands: bool = False,
+    ) -> None:
         """Preflight API input before creating a Team; transactions recheck at approval/claim."""
         with self._lock:
-            self._validate_team_plan_tasks(self._connection, task_list_id, plan)
+            self._validate_team_plan_tasks(
+                self._connection, task_list_id, plan,
+                require_validation_commands=require_validation_commands,
+            )
 
     @staticmethod
     def _validate_team_plan_tasks(
-        connection: sqlite3.Connection, task_list_id: str, plan: Mapping[str, Any]
+        connection: sqlite3.Connection, task_list_id: str, plan: Mapping[str, Any],
+        *, require_validation_commands: bool = False,
     ) -> None:
         # Old plans contain descriptive strings, not task references. Their actual
         # Task metadata is still checked at claim time; never infer write permission.
@@ -7102,7 +7184,7 @@ class SQLiteRepository(TeamIntegrationStorage):
             if row is None:
                 raise RecordNotFoundError(f"Team Task not found: {item['task_id']}")
             metadata = _json_loads(row["metadata_json"], {})
-            validate_task_execution(metadata)
+            validate_task_execution(metadata, require_validation_commands=require_validation_commands)
             validate_task_execution({**metadata, **item})
             for key in ("kind", "write_scopes", "risk_level", "plan_required"):
                 if key not in item:
@@ -7774,6 +7856,20 @@ class SQLiteRepository(TeamIntegrationStorage):
                 self._event_condition.notify_all()
         return cursor.rowcount
 
+    def fail_restart_recheck(self, attempt_id: str, reason: str) -> None:
+        """Keep failed preflight visible, without retrying it every scheduler tick."""
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute("SELECT error_json FROM task_attempts WHERE id = ? AND state = 'waiting'", (attempt_id,)).fetchone()
+            if row is None:
+                return
+            error = _json_loads(row["error_json"], {})
+            if error.get("type") != "service_restart":
+                return
+            error.update(auto_recoverable=False, recheck_error=reason)
+            connection.execute("UPDATE task_attempts SET error_json = ?, updated_at = ? WHERE id = ?",
+                               (_json_dumps(error), utc_now_iso(), attempt_id))
+        self._notify_activity()
+
     def recover_incomplete_team_runtime(self) -> int:
         """Freeze interrupted workers while preserving their recoverable Attempts."""
 
@@ -7796,26 +7892,27 @@ class SQLiteRepository(TeamIntegrationStorage):
             attempt_ids = [str(row["id"]) for row in attempts]
             if attempt_ids:
                 placeholders = ",".join("?" for _ in attempt_ids)
-                connection.execute(
-                    f"""
-                    UPDATE task_attempts
-                    SET state = 'waiting', write_enabled = 0, result_unknown = 1,
-                        worker_exited_at = ?, finished_at = NULL, updated_at = ?,
-                        error_json = ?
-                    WHERE id IN ({placeholders})
-                    """,
-                    (
-                        now,
-                        now,
-                        _json_dumps(
-                            {
-                                "type": "service_restart",
-                                "message": "Attempt interrupted by service restart",
-                            }
-                        ),
-                        *attempt_ids,
-                    ),
-                )
+                for attempt in attempts:
+                    # Permission hooks run before begin_tool_execution. A waiting
+                    # approval or model call therefore has no running write here.
+                    in_flight_write = connection.execute(
+                        "SELECT 1 FROM tool_executions WHERE attempt_id = ? "
+                        "AND is_write = 1 AND status = 'running' LIMIT 1",
+                        (attempt["id"],),
+                    ).fetchone() is not None
+                    unknown = bool(attempt["result_unknown"]) or in_flight_write or attempt["state"] in {"validating", "committing"}
+                    previous_error = _json_loads(attempt["error_json"], {})
+                    auto_recoverable = not unknown and not previous_error and not attempt["cancel_requested_at"] and attempt["state"] in {
+                        "assigned", "plan_required", "plan_submitted", "plan_approved", "running", "review_rejected",
+                    }
+                    error = {"type": "service_restart", "message": "Attempt interrupted by service restart",
+                             "restart_state": attempt["state"], "auto_recoverable": auto_recoverable,
+                             "previous_error": previous_error}
+                    connection.execute(
+                        "UPDATE task_attempts SET state = 'waiting', write_enabled = 0, result_unknown = ?, "
+                        "worker_exited_at = ?, finished_at = NULL, updated_at = ?, error_json = ? WHERE id = ?",
+                        (int(unknown), now, now, _json_dumps(error), attempt["id"]),
+                    )
                 connection.execute(
                     f"""
                     UPDATE worktree_bindings
@@ -7849,7 +7946,7 @@ class SQLiteRepository(TeamIntegrationStorage):
                                 for attempt in attempts
                                 if str(attempt["team_run_id"]) == team_run_id
                             ),
-                            "action": "waiting_for_manual_recovery",
+                            "action": "recheck_before_recovery",
                         },
                     )
             connection.execute(
@@ -8212,11 +8309,15 @@ class SQLiteRepository(TeamIntegrationStorage):
         self,
         *,
         run_id: str | None = None,
+        conversation_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
     ) -> list[ApprovalRecord]:
         conditions: list[str] = []
         parameters: list[Any] = []
+        if conversation_id is not None:
+            conditions.append("conversation_id = ?")
+            parameters.append(conversation_id)
         if run_id is not None:
             conditions.append("run_id = ?")
             parameters.append(run_id)
@@ -9061,6 +9162,7 @@ def _row_to_agent_session(row: sqlite3.Row) -> AgentSessionRecord:
         checkpoint_id=row["checkpoint_id"],
         heartbeat_at=str(row["heartbeat_at"]),
         waiting_reason=row["waiting_reason"],
+        activity_phase=row["activity_phase"] if row["state"] == "work" else None,
         failure=_json_loads(row["failure_json"], None),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),

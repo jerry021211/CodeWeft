@@ -234,7 +234,7 @@ class TeamIntegrationStorage:
                 reasons.append("dependency_not_completed")
         return list(dict.fromkeys(reasons))
 
-    def retry_team_integration(self, identifier, *, actor, reason, repair=False, max_attempts=2):
+    def retry_team_integration(self, identifier, *, actor, reason, repair=False):
         """Lead may retry a stopped operation or request a new, same-scope Attempt."""
         from codeagent.web.storage import StorageConflictError
         with self._transaction(immediate=True) as connection:
@@ -256,7 +256,7 @@ class TeamIntegrationStorage:
                     raise StorageConflictError("Candidate is no longer eligible for replacement")
                 attempts = connection.execute("SELECT COUNT(*) FROM task_attempts WHERE team_run_id=? AND task_id=?",
                                               (team["id"], candidate["task_id"])).fetchone()[0]
-                if attempts >= max_attempts:
+                if attempts >= self.team_max_attempts_per_task:
                     raise StorageConflictError("Task Attempt retry limit reached; retain the candidate and resolve the task plan with the user")
                 now = utc_now_iso()
                 connection.execute("UPDATE candidates SET superseded_at=? WHERE id=?", (now, candidate["id"]))

@@ -11,7 +11,7 @@ from codeagent.teams.models import AgentSessionState, TeamMessageRecord
 from codeagent.teams.tasks import validate_task_execution
 from codeagent.tools import SUBAGENT_TOOL_NAME
 from codeagent.runtime.activity import ExecutionActivity
-from codeagent.runtime.cancellation import CancellationToken, ModelCallTimeout
+from codeagent.runtime.cancellation import CancellationToken, CancelledError, ModelCallTimeout
 
 
 class AgentSessionRunner:
@@ -41,31 +41,41 @@ class AgentSessionRunner:
         activity.on_activity = lambda phase: self.repository.heartbeat_agent_session(
             session_id, activity=phase,
         )
-        agent.boundary_callback = lambda _boundary: activity.touch()
         self._restore_latest_checkpoint(agent, session_id, session.generation)
+        consumed_ids: list[str] = []
 
-        pending = [
-            message
-            for message in self.repository.fetch_unacked_team_messages(session_id)
-            if included_message_ids is None or message.id in included_message_ids
-        ]
-        if pending:
+        def receive_messages() -> None:
+            # Keep ACKs coupled to a durable history checkpoint. Exclude messages
+            # already injected this run so they neither repeat nor fill the page.
+            pending = self.repository.fetch_unacked_team_messages(
+                session_id, excluded_message_ids=consumed_ids,
+                included_message_ids=included_message_ids,
+            )
             for message in pending:
                 agent.add_user_message(_message_context(message))
+                consumed_ids.append(message.id)
+
+        def before_boundary(boundary: str) -> None:
+            activity.touch()
+            if boundary == "before_model" and _tools_are_paired(agent.messages):
+                receive_messages()
+
+        agent.boundary_callback = before_boundary
+        receive_messages()
 
         try:
             result = agent.run_until_yield(prompt)
-        except ModelCallTimeout as exc:
-            # Model responses cancelled before tool dispatch are not appended.
-            # Never checkpoint an unmatched tool_use: resuming it could replay a write.
+        except CancelledError as exc:
+            # Tool dispatch pairs interrupted calls before unwinding. Preserve
+            # completed results on user pause as well as model timeout.
             if _tools_are_paired(agent.messages):
                 self.repository.save_agent_session_checkpoint(
                     session_id, messages=agent.messages,
                     context=asdict(agent.context.state),
-                    safe_boundary="model_timeout_before_dispatch",
-                    acknowledged_message_ids=[message.id for message in pending],
-                    waiting_reason=exc.reason_code,
-                    metadata={"reason_code": exc.reason_code},
+                    safe_boundary="model_timeout_before_dispatch" if isinstance(exc, ModelCallTimeout) else "agent_cancelled",
+                    acknowledged_message_ids=consumed_ids,
+                    waiting_reason=getattr(exc, "reason_code", exc.reason),
+                    metadata={"reason_code": getattr(exc, "reason_code", exc.reason)},
                 )
             raise
         waiting_reason = None
@@ -83,7 +93,7 @@ class AgentSessionRunner:
             messages=agent.messages,
             context=asdict(agent.context.state),
             safe_boundary=safe_boundary,
-            acknowledged_message_ids=[message.id for message in pending],
+            acknowledged_message_ids=consumed_ids,
             target_state=target_state,
             waiting_reason=waiting_reason,
             metadata={

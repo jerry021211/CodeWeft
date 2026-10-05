@@ -140,6 +140,47 @@ class TeamWorktreeTests(unittest.TestCase):
         )
         return attempt
 
+    def test_safe_restart_rechecks_real_worktree_without_losing_edits_or_skipping_plan(self):
+        self._confirm()
+        attempt = self._attempt("restart-safe")
+        binding = self.manager.create_for_attempt(attempt)
+        retained = Path(binding.path) / "allowed" / "retained.txt"
+        retained.write_text("completed local edit", encoding="utf-8")
+        before = self.repository.get_task_attempt(attempt.id)
+        self.repository.close()
+        self.repository = SQLiteRepository(self.root / "state.db")
+        self.manager = WorktreeManager(self.repository, self.source, self.root / "managed")
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True, write_enabled=True, worktree_manager=self.manager)
+        try:
+            self.assertFalse(self.repository.get_task_attempt(attempt.id).result_unknown)
+            supervisor._recover_safe_restart_attempts(self.team.id)
+            resumed = self.repository.get_task_attempt(attempt.id)
+            self.assertIsNone(resumed.error)
+            self.assertEqual(resumed.state, before.state)
+            self.assertEqual(resumed.write_enabled, before.write_enabled)
+            self.assertEqual(retained.read_text(encoding="utf-8"), "completed local edit")
+            self.assertEqual(self.repository.get_attempt_worktree_binding(attempt.id).path, binding.path)
+        finally:
+            supervisor.stop()
+
+    def test_safe_restart_stays_blocked_when_real_worktree_diff_is_outside_scope(self):
+        self._confirm()
+        attempt = self._attempt("restart-outside")
+        binding = self.manager.create_for_attempt(attempt)
+        (Path(binding.path) / "outside.txt").write_text("outside change", encoding="utf-8")
+        self.repository.close()
+        self.repository = SQLiteRepository(self.root / "state.db")
+        self.manager = WorktreeManager(self.repository, self.source, self.root / "managed")
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True, write_enabled=True, worktree_manager=self.manager)
+        try:
+            supervisor._recover_safe_restart_attempts(self.team.id)
+            blocked = self.repository.get_task_attempt(attempt.id)
+            self.assertEqual(blocked.state.value, "waiting")
+            self.assertFalse(blocked.write_enabled)
+            self.assertIn("outside", blocked.error["recheck_error"])
+        finally:
+            supervisor.stop()
+
     def _confirm(self, *, allow_dirty: bool = False) -> None:
         self.manager.confirm_baseline(
             self.team.id,
@@ -230,6 +271,60 @@ class TeamWorktreeTests(unittest.TestCase):
             self.assertEqual(resumed.id, attempt.id)
             self.assertTrue(resumed.write_enabled)
             self.assertEqual(self.repository.get_attempt_worktree_binding(attempt.id).id, binding.id)
+        finally:
+            supervisor.stop()
+
+    def test_team_pause_and_legacy_cancel_preserve_uncommitted_code(self):
+        attempt = self._attempt("team-pause")
+        self._confirm()
+        binding = self.manager.create_for_attempt(attempt)
+        edited = Path(binding.path) / "allowed" / "base.txt"
+        edited.write_text("retained changes\n", encoding="utf-8")
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True, worktree_manager=self.manager)
+        try:
+            for action in ["pause", "cancel"]:
+                getattr(supervisor, f"{action}_team")(self.team.id, reason=action, command_id=action)
+                self.assertFalse(self.repository.get_task_attempt(attempt.id).write_enabled)
+                supervisor.resume_team(self.team.id, reason="checked", command_id=f"resume-{action}")
+                self.assertTrue(self.repository.get_task_attempt(attempt.id).write_enabled)
+                self.assertEqual(self.repository.get_attempt_worktree_binding(attempt.id).id, binding.id)
+                self.assertEqual(edited.read_text(encoding="utf-8"), "retained changes\n")
+                self.assertEqual(self._git("status", "--porcelain"), "")
+        finally:
+            supervisor.stop()
+
+    def test_team_resume_blocks_changed_worktree_head(self):
+        attempt = self._attempt("bad-head")
+        self._confirm()
+        binding = self.manager.create_for_attempt(attempt)
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True, worktree_manager=self.manager)
+        try:
+            supervisor.pause_team(self.team.id, reason="pause", command_id="pause")
+            self._git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "unexpected", cwd=Path(binding.path))
+            with self.assertRaisesRegex(WorktreeError, "HEAD no longer"):
+                supervisor.resume_team(self.team.id, reason="resume", command_id="resume")
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "paused")
+            self.assertFalse(self.repository.get_task_attempt(attempt.id).write_enabled)
+        finally:
+            supervisor.stop()
+
+    def test_pause_restart_does_not_bypass_required_attempt_plan(self):
+        attempt = self._attempt("restart-plan", metadata={"plan_required": True})
+        self._confirm()
+        self.manager.create_for_attempt(attempt)
+        self.repository.request_team_pause(self.team.id, reason="pause", command_id="pause")
+        self.repository.close()
+        self.repository = SQLiteRepository(self.root / "state.db")
+        self.manager = WorktreeManager(self.repository, self.source, self.root / "managed")
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True, worktree_manager=self.manager)
+        try:
+            supervisor.dispatch_once(self.team.id)
+            restored = supervisor.resume_attempt(attempt.id, resumed_by="user", reason="checked", command_id="checked", acknowledge_unknown_result=True)
+            self.assertEqual(restored.state.value, "plan_required")
+            self.assertFalse(restored.write_enabled)
+            supervisor.resume_team(self.team.id, reason="continue", command_id="continue")
+            self.assertEqual(self.repository.get_task_attempt(attempt.id).state.value, "plan_required")
+            self.assertFalse(self.repository.get_task_attempt(attempt.id).write_enabled)
         finally:
             supervisor.stop()
 

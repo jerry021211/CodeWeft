@@ -48,6 +48,17 @@ class OneToolCallClient:
 
 
 class PermissionPolicyTests(unittest.TestCase):
+    def test_approval_timeout_is_not_reported_as_a_user_denial(self):
+        from codeagent.permissions import WaitingPermissionBroker
+        broker = WaitingPermissionBroker(default_timeout=0)
+        decision = PermissionPolicy(broker=broker, approval_timeout=0).check("bash", {"command": "Remove-Item example.txt"})
+        self.assertFalse(decision.allowed)
+        self.assertIn("审批等待超时", decision.reason)
+        self.assertNotIn("Permission denied by user", decision.reason)
+        denied = WaitingPermissionBroker(on_request=lambda request: denied.resolve(request.id, False))
+        decision = PermissionPolicy(broker=denied).check("bash", {"command": "Remove-Item example.txt"})
+        self.assertEqual(decision.reason, "Permission denied by user")
+
     def test_mcp_tools_require_approval(self) -> None:
         requests = []
         policy = PermissionPolicy(

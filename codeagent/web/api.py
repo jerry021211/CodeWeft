@@ -197,6 +197,7 @@ def create_app(
                 worktree_manager=worktrees,
                 lead_runner=lead_runner if callable(lead_runner) else None,
                 lead_activity_provider=getattr(scheduler, "team_lead_activities", None),
+                team_lead_control=getattr(scheduler, "control_team_lead", None),
             )
 
     @asynccontextmanager
@@ -546,7 +547,7 @@ def create_app(
         events = repo.list_events(run_id, after_seq=after, limit=limit + 1, activity_only=True)
         page = events[:limit]
         return {
-            "run_id": run.id, "status": run.status,
+            "run_id": run.id, "status": _visible_run_status(run),
             "events": [event.to_dict() for event in page],
             "next_after": page[-1].seq if len(events) > limit else None,
         }
@@ -806,7 +807,7 @@ def create_app(
         run = scheduler.submit(conversation_id, content, **options)
         return CreateRunResponse(
             run_id=run.id,
-            status=run.status,
+            status=_visible_run_status(run),
             queue_position=run.queue_position,
         )
 
@@ -844,6 +845,11 @@ def create_app(
     @app.post("/api/runs/{run_id}/questions/{question_id}/answer", response_model=UserQuestionResponse)
     def answer_question(run_id: str, question_id: str, body: AnswerQuestionRequest):
         return repo.answer_user_question(run_id, question_id, body.answer)
+
+    @app.get("/api/conversations/{conversation_id}/approvals", response_model=list[ApprovalResponse])
+    def pending_approvals(conversation_id: str) -> list[ApprovalResponse]:
+        _require_conversation(repo, conversation_id)
+        return [_approval_response(item) for item in scheduler.list_pending_approvals(conversation_id)]
 
     @app.post(
         "/api/runs/{run_id}/approvals/{approval_id}",
@@ -964,7 +970,9 @@ def create_app(
             raise StorageConflictError(
                 "Team Task list and root conversation must use the same workspace"
             )
-        repo.validate_team_plan_tasks(task_list.id, body.plan)
+        repo.validate_team_plan_tasks(
+            task_list.id, body.plan, require_validation_commands=body.integrationMode == "managed",
+        )
         manager = worktrees.for_workspace(conversation.workspace)
         inspection = manager.inspect_baseline(body.baseCommit)
         snapshot = manager.snapshot_local(body.baseCommit) if body.integrationMode == "managed" else None
@@ -1063,7 +1071,9 @@ def create_app(
         team = repo.get_team_run(team_run_id)
         if team is None:
             raise RecordNotFoundError(f"TeamRun not found: {team_run_id}")
-        repo.validate_team_plan_tasks(team.task_list_id, body.plan)
+        repo.validate_team_plan_tasks(
+            team.task_list_id, body.plan, require_validation_commands=team.integration_mode == "managed",
+        )
         plan_payload = dict(body.plan)
         plan_payload["base_commit"] = team.base_commit
         plan_payload["integration_mode"] = team.integration_mode
@@ -1187,27 +1197,25 @@ def create_app(
             ),
         }
 
+    @app.post("/api/teams/{team_run_id}/pause")
+    def pause_team(team_run_id: str, body: TeamCancelRequest) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        team_supervisor.pause_team(team_run_id, reason=body.reason, command_id=body.commandId)
+        return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
+
+    @app.post("/api/teams/{team_run_id}/resume")
+    def resume_team(team_run_id: str, body: TeamCancelRequest) -> dict[str, Any]:
+        _require_team_enabled(team_enabled, team_supervisor)
+        team_supervisor.resume_team(team_run_id, reason=body.reason, command_id=body.commandId)
+        return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
+
     @app.post("/api/teams/{team_run_id}/cancel")
     def cancel_team(
         team_run_id: str,
         body: TeamCancelRequest,
     ) -> dict[str, Any]:
         _require_team_enabled(team_enabled, team_supervisor)
-        for attempt in repo.list_task_attempts(team_run_id):
-            if attempt.state.value in {"succeeded", "failed", "cancelled", "orphaned"}:
-                continue
-            team_supervisor.cancel_attempt(
-                attempt.id,
-                requested_by="user",
-                reason=body.reason,
-                command_id=f"{body.commandId}:{attempt.id}",
-            )
-        repo.cancel_team_run(
-            team_run_id,
-            cancelled_by="user",
-            reason=body.reason,
-            command_id=body.commandId,
-        )
+        team_supervisor.cancel_team(team_run_id, reason=body.reason, command_id=body.commandId)
         return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
 
     @app.post("/api/teams/{team_run_id}/manual-integration")
@@ -1263,8 +1271,7 @@ def create_app(
             from codeagent.teams.managed_integration import IntegrationService
             IntegrationService(repo, worktrees).resume_delivery(team_run_id, integration_id, reason=body.reason)
         else:
-            repo.retry_team_integration(integration_id, actor="user", reason=body.reason, repair=body.action == "repair",
-                                        max_attempts=getattr(team_supervisor, "max_attempts_per_task", 2))
+            repo.retry_team_integration(integration_id, actor="user", reason=body.reason, repair=body.action == "repair")
         return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
 
     @app.post("/api/teams/{team_run_id}/worktrees/{worktree_id}/disposition")
@@ -1563,7 +1570,11 @@ def _team_recoveries(
                 "task_id": attempt.task_id,
                 "agent_id": attempt.agent_id,
                 "reason_code": reason_code,
-                "summary": summaries.get(reason_code, reason_code),
+                "automatic": bool((attempt.error or {}).get("auto_recoverable")) and not attempt.result_unknown,
+                "summary": (str((attempt.error or {}).get("recheck_error"))
+                    if (attempt.error or {}).get("recheck_error") else
+                    "服务重启后正在自动检查现场，无未完成的写操作" if (attempt.error or {}).get("auto_recoverable")
+                    else summaries.get(reason_code, reason_code)),
                 "recoverable": (
                     attempt.state.value == "waiting"
                     or (
@@ -1593,6 +1604,12 @@ def _team_recoveries(
     return result
 
 
+def _visible_run_status(record: RunRecord) -> str:
+    if record.cancel_requested_at and record.status in ACTIVE_RUN_STATUSES:
+        return "cancelling"
+    return record.status
+
+
 def _conversation_response(
     repository: SQLiteRepository,
     record: ConversationRecord,
@@ -1609,7 +1626,7 @@ def _conversation_response(
         last_message=_message_preview(messages[-1]) if messages else None,
         active_run_id=active_run.id if active_run else None,
         latest_run_id=latest_run.id if latest_run else None,
-        run_status=latest_run.status if latest_run else None,
+        run_status=_visible_run_status(latest_run) if latest_run else None,
         waiting_for_answer=bool(active_run and any(
             item["status"] == "pending" for item in repository.list_user_questions(active_run.id)
         )),
@@ -1667,7 +1684,7 @@ def _run_response(repository: SQLiteRepository, record: RunRecord) -> RunRespons
     return RunResponse(
         id=record.id,
         conversation_id=record.conversation_id,
-        status=record.status,
+        status=_visible_run_status(record),
         queue_position=record.queue_position,
         created_at=record.created_at,
         updated_at=record.updated_at,

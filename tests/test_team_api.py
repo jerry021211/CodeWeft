@@ -46,6 +46,16 @@ class FakeTeamSupervisor:
     def resume_attempt(self, attempt_id: str, **kwargs: object) -> None:
         self.resumed.append((attempt_id, kwargs))
 
+    def pause_team(self, team_id, **kwargs):
+        self.repository.request_team_pause(team_id, **kwargs)
+        self.repository.finish_team_pause(team_id)
+
+    def resume_team(self, team_id, **kwargs):
+        self.repository.resume_team_run(team_id, fingerprints={}, **kwargs)
+
+    def cancel_team(self, team_id, **kwargs):
+        self.repository.cancel_team_run(team_id, cancelled_by="user", **kwargs)
+
 
 @unittest.skipIf(TestClient is None, "FastAPI test dependencies are not installed")
 class TeamApiTests(unittest.TestCase):
@@ -80,10 +90,12 @@ class TeamApiTests(unittest.TestCase):
             self.task_list_id,
             subject="Implement bounded change",
             description="Only write codeagent/.",
-            metadata={"kind": "code", "write_scopes": ["codeagent/"]},
+            metadata={"kind": "code", "write_scopes": ["codeagent/"],
+                      "validation_commands": ["python -m compileall -q codeagent"]},
         )
         self.scheduler = FakeScheduler()
         self.supervisor = FakeTeamSupervisor()
+        self.supervisor.repository = self.repository
         env = SimpleNamespace(
             model_id="test-model",
             max_tokens=4096,
@@ -129,6 +141,16 @@ class TeamApiTests(unittest.TestCase):
         self.assertEqual(self.repository.list_task_attempts(team_id), [])
         self.assertEqual(self.client.get(url, params={"limit": 2}).json(), page)
 
+    def test_pause_resume_and_legacy_recovery_endpoints_return_current_snapshot(self):
+        snapshot = self._create_team()
+        team_id = snapshot["team"]["id"]
+        self.repository.decide_team_plan_revision(team_id, 1, decision="approve", decided_by="user",
+            reason="approved", command_id="approve")
+        for index, (action, state) in enumerate([("pause", "paused"), ("resume", "running"), ("cancel", "cancelled"), ("resume", "running")]):
+            response = self.client.post(f"/api/teams/{team_id}/{action}", json={"reason": "test", "commandId": f"lifecycle-{index}"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["team"]["state"], state)
+
     def test_invalid_analysis_plan_does_not_create_a_team(self) -> None:
         self.repository.update_task(
             self.task_list_id, self.task.task.id,
@@ -142,6 +164,28 @@ class TeamApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422, response.text)
         self.assertIn("analysis Tasks cannot", response.text)
         self.assertEqual(self.repository.list_team_runs(), [])
+
+    def test_managed_plan_rejects_missing_or_malformed_validation_before_snapshot(self) -> None:
+        from unittest.mock import patch
+        from codeagent.worktrees import WorktreeManager
+
+        for commands in (None, [], "python -m unittest", [None], [12], [" "]):
+            with self.subTest(commands=commands):
+                metadata = {"kind": "code", "write_scopes": ["codeagent/"],
+                            "validation_commands": commands}
+                self.repository.update_task(
+                    self.task_list_id, self.task.task.id, changes={"metadata": metadata},
+                )
+                with patch.object(WorktreeManager, "snapshot_local", side_effect=AssertionError("Invalid plan reached snapshot creation")) as snapshot:
+                    response = self.client.post("/api/teams", json={
+                        "rootRunId": self.run.id, "taskListId": self.task_list_id,
+                        "baseCommit": self.base_commit, "teammateCount": 1,
+                        "plan": {"tasks": [{"task_id": self.task.task.id}]},
+                    })
+                    snapshot.assert_not_called()
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("validation", response.text)
+                self.assertEqual(self.repository.list_team_runs(), [])
 
     def _git(self, *args: str) -> str:
         result = subprocess.run(

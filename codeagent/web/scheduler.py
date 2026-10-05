@@ -267,6 +267,7 @@ class RunScheduler:
                 tool_input=public_input,
                 reason=request.reason,
                 expires_at=_approval_expiry(request.timeout),
+                metadata={"summary": _approval_summary(request.tool_name, public_input)},
             )
             approval_emitter = emitter.with_agent(agent_id=request.agent_id,
                 parent_agent_id=emitter.context.agent_id if request.agent_id != emitter.context.agent_id else None) if request.agent_id else emitter
@@ -283,7 +284,7 @@ class RunScheduler:
                 },
             )
 
-        def on_permission_timeout(request: PermissionRequest) -> None:
+        def on_permission_timeout(request: PermissionRequest, reason: str = "approval timeout") -> None:
             approval = self.repository.get_approval(request.id)
             if approval is not None and approval.status == "pending":
                 self.repository.expire_pending_approvals(approval_id=request.id)
@@ -292,7 +293,7 @@ class RunScheduler:
                 {
                     "approval_id": request.id,
                     "tool_name": request.tool_name,
-                    "reason": "approval timeout",
+                    "reason": reason,
                 },
             )
 
@@ -300,6 +301,7 @@ class RunScheduler:
             default_timeout=self.approval_timeout,
             on_request=on_permission,
             on_timeout=on_permission_timeout,
+            on_abandon=lambda request: on_permission_timeout(request, "approval wait cancelled"),
         )
         job = _RunJob(
             run_id=run.id,
@@ -334,23 +336,51 @@ class RunScheduler:
         self._team_worktrees = worktree_manager
 
     def cancel(self, run_id: str) -> RunRecord:
+        activities = []
         with self._lock:
             run = self.repository.request_run_cancel(run_id)
             job = self._controls.get(run_id)
             if job is not None and run.status in {*ACTIVE_RUN_STATUSES, "cancelled"}:
                 job.cancellation.cancel("Cancelled by user")
+                activity = getattr(job.agent, "execution_activity", None)
+                if activity is not None:
+                    activities.append(activity)
+                activities.extend(
+                    activity for activity in self._lead_activities.values()
+                    if activity.cancellation is job.cancellation and activity not in activities
+                )
                 event_type = "run.cancelled" if run.status == "cancelled" else "run.cancelling"
-                job.emitter.emit(event_type, {"status": run.status})
+                job.emitter.emit(event_type, {"status": "cancelled" if run.status == "cancelled" else "cancelling"})
                 if run.status == "cancelled":
                     # The queue retains a harmless tombstone; replay need not wait
                     # for busy workers to dequeue an already cancelled Run.
                     self._release(run_id)
+        # Closing a response can call transport code; never hold the scheduler
+        # lock while interrupting it, and never close the shared HTTP client.
+        for activity in activities:
+            activity.interrupt_request()
         return self.repository.get_run(run_id) or run
 
     def is_run_pending(self, run_id: str) -> bool:
         """Include final event persistence, not just the database Run status."""
         with self._lock:
             return run_id in self._controls
+
+    def list_pending_approvals(self, conversation_id: str) -> list[ApprovalRecord]:
+        """Approval lifetime follows its waiter, not the planning Run or SSE."""
+        with self._lock:
+            approvals = self.repository.list_approvals(conversation_id=conversation_id, status="pending")
+            result = []
+            for approval in approvals:
+                job = self._controls.get(approval.run_id)
+                broker = self._team_approval_brokers.get(approval.id) or (job.broker if job else None)
+                if broker is not None and any(request.id == approval.id for request in broker.pending):
+                    result.append(approval)
+                else:
+                    # Cancelled/restarted workers cannot consume old approvals.
+                    self.repository.expire_pending_approvals(approval_id=approval.id)
+                    self._team_approval_brokers.pop(approval.id, None)
+            return result
 
     def resolve_approval(
         self,
@@ -367,25 +397,83 @@ class RunScheduler:
                     f"Approval already resolved as {approval.decision}: {approval_id}"
                 )
             return approval
-        resolved = self.repository.resolve_approval(approval_id, decision)
         with self._lock:
             job = self._controls.get(run_id)
-        if job is not None:
-            job.broker.resolve(approval_id, decision == "allow")
-            job.emitter.emit(
-                "approval.allowed" if decision == "allow" else "approval.denied",
+            broker = self._team_approval_brokers.get(approval_id) or (job.broker if job else None)
+
+            def persist_decision() -> None:
+                resolved = self.repository.resolve_approval(approval_id, decision)
+                if resolved.status != ("allowed" if decision == "allow" else "denied"):
+                    raise StorageConflictError("审批已失效，请等待新的审批请求。")
+
+            # Persist before waking the exact waiter; an unrelated live Lead Run
+            # must never intercept a Teammate's permission decision.
+            accepted = broker is not None and broker.resolve(approval_id, decision == "allow", before_resolve=persist_decision)
+            self._team_approval_brokers.pop(approval_id, None)
+            if not accepted:
+                self.repository.expire_pending_approvals(approval_id=approval_id)
+                raise StorageConflictError("审批已失效，原操作已停止，请等待新的审批请求。")
+        EventEmitter(RecordingEventSink(self.repository), context=ExecutionContext(
+            conversation_id=approval.conversation_id, run_id=run_id,
+        )).emit("approval.allowed" if decision == "allow" else "approval.denied", {
+            "approval_id": approval_id, "decision": decision, "tool_name": approval.tool_name,
+        })
+        return self.repository.get_approval(approval_id)
+
+    def _team_permission_broker(self, emitter: EventEmitter, team_id: str, attempt_id: str | None = None) -> WaitingPermissionBroker:
+        """Publish permission requests for both foreground and background Team agents."""
+        def on_permission(request: PermissionRequest) -> None:
+            public_input = _public_approval_input(request.tool_name, request.tool_input)
+            with self._lock:
+                persisted = self.repository.create_approval(
+                    emitter.context.run_id,
+                    approval_id=request.id,
+                    tool_name=request.tool_name,
+                    tool_input=public_input,
+                    reason=request.reason,
+                    expires_at=_approval_expiry(request.timeout),
+                    metadata={"summary": _approval_summary(request.tool_name, public_input)},
+                )
+                self._team_approval_brokers[persisted.id] = broker
+            emitter.emit(
+                "approval.requested",
                 {
-                    "approval_id": approval_id,
-                    "decision": decision,
-                    "tool_name": resolved.tool_name,
+                    "approval_id": persisted.id,
+                    "tool_name": persisted.tool_name,
+                    "input": public_input,
+                    "reason": persisted.reason,
+                    "summary": _approval_summary(
+                        persisted.tool_name, persisted.tool_input
+                    ),
+                    "team_run_id": team_id,
+                    "attempt_id": attempt_id,
                 },
             )
-        else:
+
+        def on_timeout(request: PermissionRequest, reason: str = "approval timeout") -> None:
             with self._lock:
-                broker = self._team_approval_brokers.pop(approval_id, None)
-            if broker is not None:
-                broker.resolve(approval_id, decision == "allow")
-        return resolved
+                self._team_approval_brokers.pop(request.id, None)
+            approval = self.repository.get_approval(request.id)
+            if approval is not None and approval.status == "pending":
+                self.repository.expire_pending_approvals(approval_id=request.id)
+            emitter.emit(
+                "approval.expired",
+                {
+                    "approval_id": request.id,
+                    "tool_name": request.tool_name,
+                    "team_run_id": team_id,
+                    "attempt_id": attempt_id,
+                    "reason": reason,
+                },
+            )
+
+        broker = WaitingPermissionBroker(
+            default_timeout=self.approval_timeout,
+            on_request=on_permission,
+            on_timeout=on_timeout,
+            on_abandon=lambda request: on_timeout(request, "approval wait cancelled"),
+        )
+        return broker
 
     def create_team_agent(
         self,
@@ -430,54 +518,7 @@ class RunScheduler:
             ),
         )
 
-        def on_permission(request: PermissionRequest) -> None:
-            public_input = _public_approval_input(request.tool_name, request.tool_input)
-            persisted = self.repository.create_approval(
-                team.root_run_id,
-                approval_id=request.id,
-                tool_name=request.tool_name,
-                tool_input=public_input,
-                reason=request.reason,
-                expires_at=_approval_expiry(request.timeout),
-            )
-            with self._lock:
-                self._team_approval_brokers[persisted.id] = broker
-            emitter.emit(
-                "approval.requested",
-                {
-                    "approval_id": persisted.id,
-                    "tool_name": persisted.tool_name,
-                    "input": public_input,
-                    "reason": persisted.reason,
-                    "summary": _approval_summary(
-                        persisted.tool_name, persisted.tool_input
-                    ),
-                    "team_run_id": team.id,
-                    "attempt_id": attempt.id,
-                },
-            )
-
-        def on_timeout(request: PermissionRequest) -> None:
-            with self._lock:
-                self._team_approval_brokers.pop(request.id, None)
-            approval = self.repository.get_approval(request.id)
-            if approval is not None and approval.status == "pending":
-                self.repository.expire_pending_approvals(approval_id=request.id)
-            emitter.emit(
-                "approval.expired",
-                {
-                    "approval_id": request.id,
-                    "tool_name": request.tool_name,
-                    "team_run_id": team.id,
-                    "attempt_id": attempt.id,
-                },
-            )
-
-        broker = WaitingPermissionBroker(
-            default_timeout=self.approval_timeout,
-            on_request=on_permission,
-            on_timeout=on_timeout,
-        )
+        broker = self._team_permission_broker(emitter, team.id, attempt.id)
         team_factory_method = getattr(self.agent_factory, "for_team_workspace", None)
         if callable(team_factory_method):
             workspace_factory = team_factory_method(
@@ -505,6 +546,15 @@ class RunScheduler:
         """Expose active foreground Lead calls to the existing Team watchdog."""
         with self._lock:
             return tuple(self._lead_activities.values())
+
+    def control_team_lead(self, team_id: str, interrupt: bool) -> bool:
+        with self._lock:
+            activity = self._lead_activities.get(team_id)
+            if activity is not None and interrupt:
+                activity.cancellation.cancel("Team execution stopped")
+                activity.interrupt_request()
+            return activity is not None
+
 
     def run_team_lead_cycle(
         self,
@@ -595,9 +645,7 @@ class RunScheduler:
             agent = workspace_factory.create(
                 event_emitter=emitter,
                 cancellation=token,
-                permission_broker=WaitingPermissionBroker(
-                    default_timeout=self.approval_timeout
-                ),
+                permission_broker=self._team_permission_broker(emitter, team.id),
                 checkpoint=None,
                 team_session=session,
                 worktree_manager=self._team_worktrees,
@@ -605,6 +653,8 @@ class RunScheduler:
             activity = execution_activity or agent.execution_activity or ExecutionActivity(token)
             agent.set_execution_activity(activity)
             with self._lock:
+                if self.repository.get_team_run(team.id).state.value in {"pausing", "paused", "cancelled"}:
+                    raise CancelledError("团队已暂停或结束，请先恢复团队")
                 self._lead_activities[team.id] = activity
             try:
                 result = AgentSessionRunner(self.repository).run(

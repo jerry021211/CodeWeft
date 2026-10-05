@@ -122,6 +122,12 @@ class _PendingRequest:
     event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass(frozen=True, slots=True)
+class PermissionResult:
+    allowed: bool
+    reason: str = ""
+
+
 class WaitingPermissionBroker:
     """Thread-safe broker whose decisions arrive from another runtime thread."""
 
@@ -131,6 +137,7 @@ class WaitingPermissionBroker:
         default_timeout: float | None = 600.0,
         on_request: Callable[[PermissionRequest], None] | None = None,
         on_timeout: Callable[[PermissionRequest], None] | None = None,
+        on_abandon: Callable[[PermissionRequest], None] | None = None,
         poll_interval: float = 0.05,
     ) -> None:
         if default_timeout is not None and default_timeout < 0:
@@ -140,6 +147,7 @@ class WaitingPermissionBroker:
         self._default_timeout = default_timeout
         self._on_request = on_request
         self._on_timeout = on_timeout
+        self._on_abandon = on_abandon
         self._poll_interval = poll_interval
         self._lock = threading.Lock()
         self._pending: dict[str, _PendingRequest] = {}
@@ -162,6 +170,13 @@ class WaitingPermissionBroker:
         timeout: float | None = None,
     ) -> bool:
         """Publish a request and block until allow, deny, timeout, or cancellation."""
+        return self.request_result(tool_name, tool_input, reason, cancellation=cancellation, timeout=timeout).allowed
+
+    def request_result(
+        self, tool_name: str, tool_input: dict[str, Any], reason: str, *,
+        cancellation: CancellationToken | None = None, timeout: float | None = None,
+    ) -> PermissionResult:
+        """Preserve the denial cause without sharing mutable state across agents."""
         binding = _execution.get()
         activity = binding[0] if binding else self.execution_activity
         cancellation = binding[1] if binding else cancellation
@@ -182,7 +197,7 @@ class WaitingPermissionBroker:
         *,
         cancellation: CancellationToken | None,
         timeout: float | None,
-    ) -> bool:
+    ) -> PermissionResult:
         if cancellation is not None:
             cancellation.raise_if_cancelled()
 
@@ -204,6 +219,7 @@ class WaitingPermissionBroker:
         with self._lock:
             self._pending[request.id] = pending
 
+        timed_out = False
         try:
             if self._on_request is not None:
                 self._on_request(request)
@@ -219,9 +235,14 @@ class WaitingPermissionBroker:
 
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
+                    timed_out = True
+                    with self._lock:
+                        if pending.decision is not None:
+                            return PermissionResult(pending.decision, "" if pending.decision else "Permission denied by user")
+                        self._pending.pop(request.id, None)
                     if self._on_timeout is not None:
                         self._on_timeout(request)
-                    return False
+                    return PermissionResult(False, "审批等待超时，操作未执行；这不是用户拒绝。")
                 wait_for = (
                     self._poll_interval
                     if remaining is None
@@ -230,18 +251,23 @@ class WaitingPermissionBroker:
                 if not pending.event.wait(wait_for):
                     continue
                 # resolve() writes the decision before setting the event.
-                return pending.decision is True
+                return PermissionResult(pending.decision is True, "" if pending.decision else "Permission denied by user")
         finally:
             with self._lock:
                 self._pending.pop(request.id, None)
+            if pending.decision is None and not timed_out and self._on_abandon is not None:
+                self._on_abandon(request)
 
-    def resolve(self, request_id: str, allow: bool) -> bool:
+    def resolve(self, request_id: str, allow: bool, *, before_resolve: Callable[[], None] | None = None) -> bool:
         """Resolve an active request; return ``False`` if it is no longer pending."""
 
         with self._lock:
-            pending = self._pending.pop(request_id, None)
+            pending = self._pending.get(request_id)
             if pending is None:
                 return False
+            if before_resolve is not None:
+                before_resolve()
+            self._pending.pop(request_id, None)
             pending.decision = bool(allow)
             pending.event.set()
             return True

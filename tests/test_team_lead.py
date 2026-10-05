@@ -111,6 +111,33 @@ class LeadTeamPlanToolTests(unittest.TestCase):
             ],
         }
 
+    def test_plan_rejects_missing_or_non_string_validation_commands(self) -> None:
+        for commands in ([], [None], [12], [" "]):
+            with self.subTest(commands=commands):
+                metadata = {**self.first.task.metadata, "validation_commands": commands}
+                self.repository.update_task(
+                    self.task_list_id, self.first.task.id, changes={"metadata": metadata},
+                )
+                with self.assertRaisesRegex(ValueError, "validation"):
+                    self.tool._validated_plan(self._plan(), self.base_commit)
+                self.assertEqual(self.repository.list_team_runs(), [])
+
+    def test_planner_allows_literal_environment_probes_without_granting_writes(self) -> None:
+        gate = TeamPlannerToolExecutionGate(self.repository, self.conversation.id, self.task_list_id)
+        for command in (
+            "node --version", "python --version", "python3 --version",
+            "Get-ChildItem -Force -Path . | Measure-Object | Select-Object -ExpandProperty count",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(gate.execute("bash", {"command": command}, lambda **_: "probed"), "probed")
+        for command in (
+            "node --version > version.txt", 'python -c "open(\'x\',\'w\')"',
+            "node --version; npm install", "Get-ChildItem | Measure-Object | Set-Content count.txt",
+            "Get-ChildItem | Select-Object -ExpandProperty $(Remove-Item x)",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(gate.execute("bash", {"command": command}, lambda **_: "executed").startswith("Blocked:"))
+
     def test_submit_creates_only_pending_approval_control_plane_records(self) -> None:
         result = json.loads(
             self.tool.run(
@@ -490,6 +517,8 @@ class LeadTeamPlanToolTests(unittest.TestCase):
         self.assertIn("TeamPlanSubmit", planner_agent.tools)
         self.assertNotIn("write_file", planner_agent.tools)
         self.assertNotIn("subagent", planner_agent.tools)
+        self.assertIsNotNone(planner_agent.execution_activity)
+        self.assertIs(planner_agent.execution_activity.cancellation, planner_agent.cancellation)
         self.assertNotIn("TeamPlanSubmit", disabled_planner.tools)
 
     def test_rejected_plan_resumes_lead_in_planner_profile_with_history(self) -> None:

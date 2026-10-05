@@ -6,6 +6,20 @@ from codeagent.teams.tasks import requires_attempt_plan, validate_task_execution
 
 
 class TeamTaskExecutionTests(unittest.TestCase):
+    def test_managed_code_requires_validation_but_analysis_and_legacy_do_not(self) -> None:
+        validate_task_execution({"kind": "analysis"}, require_validation_commands=True)
+        validate_task_execution({"kind": "code"})
+        for value in (None, [], "python -m unittest", [None], [42], [" "]):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "validation"):
+                validate_task_execution(
+                    {"kind": "code", "validation_commands": value},
+                    require_validation_commands=True,
+                )
+        validate_task_execution(
+            {"kind": "code", "validation_commands": ["python -m unittest"]},
+            require_validation_commands=True,
+        )
+
     def test_attempt_plan_is_a_code_write_requirement(self) -> None:
         cases = [
             ({}, False),

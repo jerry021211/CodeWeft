@@ -306,7 +306,7 @@ class LeadTeamPlanTool:
             if resource.task.status is not TaskStatus.PENDING:
                 raise ValueError(f"Team Task {task_id} must still be pending")
             metadata = resource.task.metadata
-            validate_task_execution(metadata)
+            validate_task_execution(metadata, require_validation_commands=True)
             validate_task_execution({**metadata, **raw})
             if "plan_required" in raw and raw["plan_required"] != metadata.get("plan_required", False):
                 raise ValueError(
@@ -341,18 +341,6 @@ class LeadTeamPlanTool:
                     f"Team Plan scope for Task {task_id} must exactly match its Task "
                     "metadata (kind, write_scopes, risk_level)."
                 )
-            if kind == "code":
-                commands = metadata.get("validation_commands")
-                if (
-                    not isinstance(commands, Sequence)
-                    or isinstance(commands, (str, bytes))
-                    or not commands
-                    or any(not str(command).strip() for command in commands)
-                ):
-                    raise ValueError(
-                        f"Code Task {task_id} metadata must declare at least one "
-                        "validation command"
-                    )
             normalized = dict(raw)
             normalized.update(
                 {

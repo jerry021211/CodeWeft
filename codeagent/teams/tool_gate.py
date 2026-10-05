@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from codeagent.events import redact_payload
+from codeagent.permissions.read_only import is_safe_read_only_command
 from codeagent.teams.models import TaskAttemptState
 from codeagent.teams.tasks import validate_task_execution
 from codeagent.tools import ToolHandler, ToolRegistry, WorkspaceViolationError
@@ -642,6 +643,15 @@ def _shell_has_explicit_write(command: str) -> bool:
 
 
 def _shell_is_definitely_read_only(command: str) -> bool:
+    if is_safe_read_only_command(command):
+        return True
+    # Permit literal discovery pipelines, not arbitrary PowerShell expressions.
+    probe_parts = [part.strip() for part in command.split("|")]
+    if len(probe_parts) > 1 and is_safe_read_only_command(probe_parts[0]) and all(
+        re.fullmatch(r"measure-object|select-object\s+-expandproperty\s+count", part, re.IGNORECASE)
+        for part in probe_parts[1:]
+    ):
+        return True
     if not command.strip() or _CWD_CHANGE.search(command) or _GIT_WRITE.search(command):
         return False
     segments = [item.strip() for item in re.split(r"(?:&&|\|\||;|\|)", command)]

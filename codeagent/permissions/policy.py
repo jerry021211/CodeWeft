@@ -97,8 +97,9 @@ class PermissionPolicy:
     def check(self, tool_name: str, tool_input: dict[str, Any]) -> PermissionDecision:
         if tool_name.startswith("mcp__"):
             reason = "External MCP tool call"
-            if not self._ask(tool_name, tool_input, reason):
-                return PermissionDecision(False, "Permission denied by user")
+            decision = self._approval_decision(tool_name, tool_input, reason)
+            if not decision.allowed:
+                return decision
 
         if tool_name == "bash":
             command = str(tool_input.get("command", ""))
@@ -107,8 +108,10 @@ class PermissionPolicy:
                 return PermissionDecision(False, reason)
 
             reason = self._destructive_command_reason(command)
-            if reason and not self._ask(tool_name, tool_input, reason):
-                return PermissionDecision(False, "Permission denied by user")
+            if reason:
+                decision = self._approval_decision(tool_name, tool_input, reason)
+                if not decision.allowed:
+                    return decision
 
         if tool_name in self.write_tools:
             reason = self._workspace_write_reason(tool_input)
@@ -117,16 +120,23 @@ class PermissionPolicy:
 
         return PermissionDecision(True)
 
-    def _ask(self, tool_name: str, tool_input: dict[str, Any], reason: str) -> bool:
+    def _approval_decision(self, tool_name: str, tool_input: dict[str, Any], reason: str) -> PermissionDecision:
+        detailed_request = getattr(self.broker, "request_result", None)
+        if callable(detailed_request):
+            result = detailed_request(tool_name, tool_input, reason,
+                cancellation=self.cancellation, timeout=self.approval_timeout)
+            return PermissionDecision(result.allowed, result.reason)
         if self.broker is not None:
-            return self.broker.request(
+            allowed = self.broker.request(
                 tool_name,
                 tool_input,
                 reason,
                 cancellation=self.cancellation,
                 timeout=self.approval_timeout,
             )
-        return self.ask(tool_name, tool_input, reason)
+        else:
+            allowed = self.ask(tool_name, tool_input, reason)
+        return PermissionDecision(allowed, "" if allowed else "Permission denied by user")
 
     def _hard_deny_reason(self, command: str) -> str:
         normalized = command.casefold()

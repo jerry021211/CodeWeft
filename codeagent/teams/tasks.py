@@ -4,7 +4,9 @@ from collections.abc import Mapping
 from typing import Any
 
 
-def validate_task_execution(metadata: Mapping[str, Any]) -> None:
+def validate_task_execution(
+    metadata: Mapping[str, Any], *, require_validation_commands: bool = False,
+) -> None:
     """Validate declared capabilities, not the meaning of a natural-language task."""
     if not isinstance(metadata, Mapping):
         raise ValueError("Team Task metadata must be an object")
@@ -35,6 +37,13 @@ def validate_task_execution(metadata: Mapping[str, Any]) -> None:
     risk = metadata.get("risk_level", "low")
     if risk not in ("low", "medium", "high"):
         raise ValueError("Team risk_level must be low, medium, or high")
+    commands = metadata.get("validation_commands", [])
+    if not isinstance(commands, list) or any(
+        not isinstance(command, str) or not command.strip() for command in commands
+    ):
+        raise ValueError("validation_commands must be an array of non-empty command strings")
+    if require_validation_commands and kind == "code" and not commands:
+        raise ValueError("Code Task metadata must declare at least one validation command")
 
 
 def requires_attempt_plan(metadata: Mapping[str, Any]) -> bool:

@@ -54,7 +54,8 @@ class ManagedIntegrationTests(unittest.TestCase):
         for name in names:
             self.tasks[name] = self.repo.create_task(self.list_id, subject=name, description="Implement " + name,
                 blocked_by=[self.tasks[n].task.id for n in (dependencies or {}).get(name, [])],
-                metadata={"kind": "code", "write_scopes": [], "risk_level": "low"})
+                metadata={"kind": "code", "write_scopes": [], "risk_level": "low",
+                          "validation_commands": ["git diff --check"]})
         snapshot = self.manager.snapshot_local()
         self.team = self.repo.create_team_run(conversation_id=self.conversation.id, root_run_id=self.run.id,
             task_list_id=self.list_id, base_commit=snapshot["commit"], integration_mode="managed", metadata=snapshot)
@@ -89,6 +90,52 @@ class ManagedIntegrationTests(unittest.TestCase):
 
     def integrate(self):
         return self.service.process_team(self.team.id)
+
+    def test_pause_during_trial_keeps_version_and_resume_requeues_without_redoing_task(self):
+        from codeagent.runtime import TeamSupervisor
+        self.start()
+        candidate = self.candidate("A", {"new.txt": "finished work\n"})
+        original = self.service._validate
+        def pause_after_validation(git, manager, operation):
+            result = original(git, manager, operation)
+            self.repo.request_team_pause(self.team.id, reason="pause", command_id="pause")
+            return result
+        with patch.object(self.service, "_validate", side_effect=pause_after_validation):
+            trial = self.integrate()
+        self.assertEqual(self.repo.get_team_run(self.team.id).integration_revision, 0)
+        self.assertEqual(trial["status"], "publishing")
+        self.assertFalse((self.source / "new.txt").exists())
+        supervisor = TeamSupervisor(self.repo, lambda *_: None, enabled=True, worktree_manager=self.manager)
+        try:
+            supervisor.dispatch_once(self.team.id)
+            supervisor.resume_team(self.team.id, reason="continue", command_id="resume")
+            self.assertEqual(self.integrate()["status"], "published")
+            self.assertEqual(len(self.repo.list_task_attempts(self.team.id)), 1)
+            self.assertEqual(self.repo.get_task_attempt(candidate.attempt_id).state.value, "succeeded")
+        finally:
+            supervisor.stop()
+
+    def test_pause_during_validation_requeues_only_the_interrupted_trial(self):
+        from codeagent.runtime import TeamSupervisor
+        self.start()
+        self.candidate("A", {"new.txt": "finished work\n"})
+        original = self.service._validate
+        def pause_before_validation(git, manager, operation):
+            self.repo.request_team_pause(self.team.id, reason="pause", command_id="pause")
+            return original(git, manager, operation)
+        with patch.object(self.service, "_validate", side_effect=pause_before_validation):
+            trial = self.integrate()
+        self.assertEqual(trial["status"], "interrupted")
+        self.assertEqual(trial["error"], "team_paused")
+        supervisor = TeamSupervisor(self.repo, lambda *_: None, enabled=True, worktree_manager=self.manager)
+        try:
+            supervisor.dispatch_once(self.team.id)
+            supervisor.resume_team(self.team.id, reason="continue", command_id="resume")
+            self.assertEqual(self.repo.get_team_integration(trial["id"])["status"], "superseded")
+            self.assertEqual(self.integrate()["status"], "published")
+            self.assertEqual(len(self.repo.list_task_attempts(self.team.id)), 1)
+        finally:
+            supervisor.stop()
 
     def test_snapshot_contains_dirty_staged_untracked_and_deleted_files_without_changing_index(self):
         (self.source / "base.txt").write_text("staged\n", encoding="utf-8")

@@ -13,6 +13,11 @@ from typing import Any
 
 JsonObject = dict[str, Any]
 
+SESSION_ACTIVITY_PHASES = frozenset({
+    "executing", "model_waiting", "model_receiving", "tool_executing",
+    "model_retry_wait", "permission_waiting", "user_input_waiting",
+})
+
 
 def integration_summary(record: JsonObject) -> JsonObject:
     """Keep full recovery manifests out of polling responses and model context."""
@@ -27,6 +32,8 @@ class TeamRunState(str, Enum):
     PLANNING = "planning"
     WAITING_APPROVAL = "waiting_approval"
     RUNNING = "running"
+    PAUSING = "pausing"
+    PAUSED = "paused"
     READY_FOR_MANUAL_INTEGRATION = "ready_for_manual_integration"
     COMPLETED = "completed"
     CLOSED_WITH_UNMERGED_CANDIDATES = "closed_with_unmerged_candidates"
@@ -175,6 +182,7 @@ class AgentSessionRecord:
     checkpoint_id: str | None = None
     waiting_reason: str | None = None
     failure: JsonObject | None = None
+    activity_phase: str | None = None
 
     def to_dict(self) -> JsonObject:
         result = asdict(self)

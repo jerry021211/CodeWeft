@@ -50,6 +50,55 @@ class TeamPersistenceTests(unittest.TestCase):
         self.repository.close()
         self.temp_dir.cleanup()
 
+    def test_managed_validation_is_rechecked_at_submit_approval_and_claim(self) -> None:
+        conversation = self.repository.create_conversation(workspace=self.temp_dir.name)
+        run = self.repository.create_run(conversation.id, status="running")
+        task_list_id = conversation.active_task_list_id
+        team = self.repository.create_team_run(
+            conversation_id=conversation.id, root_run_id=run.id,
+            task_list_id=task_list_id, base_commit="b" * 40, integration_mode="managed",
+        )
+        task = self.repository.create_task(
+            task_list_id, subject="Code change", description="Validate this change",
+            metadata={"kind": "code", "write_scopes": ["src/"]},
+        )
+        plan = self.repository.create_team_plan_revision(
+            team.id, plan={"tasks": [{"task_id": task.task.id}]},
+            created_by=team.lead_agent_id, command_id="managed-plan",
+        )
+        with self.assertRaisesRegex(ValueError, "validation command"):
+            self.repository.submit_team_plan_revision(team.id, plan.revision, command_id="submit")
+
+        def validation(commands):
+            return self.repository.update_task(
+                task_list_id, task.task.id, changes={"metadata": {"validation_commands": commands}},
+            )
+
+        validation(["python -m unittest"])
+        self.repository.submit_team_plan_revision(team.id, plan.revision, command_id="submit")
+        validation(None)
+        with self.assertRaisesRegex(ValueError, "validation command"):
+            self.repository.decide_team_plan_revision(
+                team.id, plan.revision, decision="approve", decided_by="user",
+                reason="test", command_id="approve",
+            )
+        validation(["python -m unittest"])
+        self.repository.decide_team_plan_revision(
+            team.id, plan.revision, decision="approve", decided_by="user",
+            reason="test", command_id="approve",
+        )
+        member = self.repository.create_team_agent(team.id, name="Worker")
+        session = self.repository.create_agent_session(team.id, member.id)
+        current_task = validation(None)
+        self.assertIn("task_configuration_conflict", self.repository.list_task_scheduling(team.id, allow_code=True)[0].reasons)
+        with self.assertRaisesRegex(ValueError, "validation command"):
+            self.repository.claim_task_attempt(
+                team.id, task_id=task.task.id, agent_id=member.id, session_id=session.id,
+                expected_task_revision=current_task.revision, command_id="claim",
+            )
+        self.assertEqual(self.repository.list_task_attempts(team.id), [])
+        self.assertEqual(self.repository.get_agent_session(session.id).state, AgentSessionState.IDLE)
+
     def _create_plan(self, suffix: str = "1"):
         plan = self.repository.create_team_plan_revision(
             self.team.id,

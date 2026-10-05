@@ -6,13 +6,15 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from codeagent import Agent, AgentConfig, ModelResponse, ToolRegistry
 from codeagent.context import ContextManager
 from codeagent.context.models import RuntimeState
-from codeagent.events import TokenTotals
+from codeagent.events import TokenTotals, EventEmitter, ExecutionContext, RecordingEventSink
+from codeagent.permissions import WaitingPermissionBroker
 from codeagent.prompts import PromptMode
-from codeagent.runtime import CancelledError
+from codeagent.runtime import CancelledError, CancellationToken
 from codeagent.teams import AgentSessionState, MessageBus
 from codeagent.tools import TodoStore
 from codeagent.web.scheduler import RunScheduler
@@ -465,6 +467,44 @@ class SchedulerTests(unittest.TestCase):
         scheduler.stop()
         self.assertEqual(self.repository.get_run(run.id).status, "cancelled")
 
+    def test_planner_cancel_closes_blocked_model_stream_without_another_chunk(self):
+        from codeagent.runtime.activity import ExecutionActivity
+
+        started, closed = threading.Event(), threading.Event()
+
+        class WaitingAgent(_FakeAgent):
+            def run(inner, prompt):
+                inner.messages.append({"role": "user", "content": prompt})
+                with inner.execution_activity.model_request():
+                    inner.execution_activity.set_request_closer(closed.set)
+                    started.set()
+                    if not closed.wait(3):
+                        raise AssertionError("Cancellation did not close the stream")
+                    inner.cancellation.raise_if_cancelled()
+
+        class Factory(_FakeFactory):
+            def create(inner, *, event_emitter, cancellation, **kwargs):
+                agent = WaitingAgent(event_emitter, cancellation)
+                agent.execution_activity = ExecutionActivity(cancellation)
+                return agent
+
+        scheduler = RunScheduler(self.repository, Factory())
+        try:
+            run = scheduler.submit(self.conversation.id, "plan", use_team=True)
+            self.assertTrue(started.wait(2))
+            scheduler.cancel(run.id)
+            self.assertTrue(closed.wait(0.5))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and self.repository.get_run(run.id).status != "cancelled":
+                time.sleep(0.01)
+            self.assertEqual(self.repository.get_run(run.id).status, "cancelled")
+            cancelling = [e for e in self.repository.list_events(run.id) if e.type == "run.cancelling"]
+            self.assertEqual(cancelling[-1].payload["status"], "cancelling")
+            self.assertEqual(self.repository.list_team_runs(), [])
+        finally:
+            closed.set()
+            scheduler.stop()
+
     def test_permission_round_trip_is_persisted_and_resumes_run(self):
         scheduler = RunScheduler(self.repository, _ApprovalFactory())
         run = scheduler.submit(self.conversation.id, "执行")
@@ -516,9 +556,74 @@ class SchedulerTests(unittest.TestCase):
             tool_input={"command": "Remove-Item temp.txt"},
             reason="Potentially destructive command",
         )
+        self.repository.resolve_approval(approval.id, "allow")
         scheduler.resolve_approval(run.id, approval.id, "allow")
         with self.assertRaises(ValueError):
             scheduler.resolve_approval(run.id, approval.id, "deny")
+
+    def test_team_approval_reaches_exact_waiter_after_planning_and_during_lead_run(self):
+        scheduler = RunScheduler(self.repository, _FakeFactory())
+        run = self.repository.create_run(self.conversation.id, status="completed")
+        self.repository.create_run(self.conversation.id, status="running")
+        emitter = EventEmitter(RecordingEventSink(self.repository), context=ExecutionContext(
+            conversation_id=self.conversation.id, run_id=run.id, agent_id="worker"))
+        broker = scheduler._team_permission_broker(emitter, "team", "attempt")
+        results = []
+        worker = threading.Thread(target=lambda: results.append(broker.request("bash", {"command": "delete"}, "confirm", timeout=2)))
+        worker.start()
+        deadline = time.monotonic() + 1
+        approvals = []
+        while time.monotonic() < deadline and not approvals:
+            approvals = scheduler.list_pending_approvals(self.conversation.id)
+            time.sleep(0.005)
+        self.assertEqual(len(approvals), 1)
+        # Even a live root job sharing the planning Run must not steal this ID.
+        with patch.dict(scheduler._controls, {run.id: SimpleNamespace(broker=WaitingPermissionBroker())}):
+            scheduler.resolve_approval(run.id, approvals[0].id, "allow")
+        worker.join(1)
+        self.assertEqual(results, [True])
+        self.assertEqual(scheduler.list_pending_approvals(self.conversation.id), [])
+        self.assertIn("approval.allowed", [event.type for event in self.repository.list_events(run.id)])
+
+    def test_cancelled_team_waits_expire_and_cannot_be_approved(self):
+        scheduler = RunScheduler(self.repository, _FakeFactory())
+        run = self.repository.create_run(self.conversation.id, status="completed")
+        emitter = EventEmitter(RecordingEventSink(self.repository), context=ExecutionContext(
+            conversation_id=self.conversation.id, run_id=run.id))
+        # Same broker path serves background Lead and Teammate requests.
+        for attempt_id in (None, "attempt"):
+            broker = scheduler._team_permission_broker(emitter, "team", attempt_id)
+            token = CancellationToken()
+            errors = []
+            def request():
+                try:
+                    broker.request("bash", {}, "confirm", cancellation=token, timeout=2)
+                except CancelledError as error:
+                    errors.append(error)
+            worker = threading.Thread(target=request)
+            worker.start()
+            deadline = time.monotonic() + 1
+            approvals = []
+            while time.monotonic() < deadline and not approvals:
+                approvals = scheduler.list_pending_approvals(self.conversation.id)
+                time.sleep(0.005)
+            self.assertEqual(len(approvals), 1)
+            token.cancel("team_paused")
+            worker.join(1)
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(self.repository.get_approval(approvals[0].id).status, "expired")
+            self.assertEqual(scheduler.list_pending_approvals(self.conversation.id), [])
+            with self.assertRaises(ValueError):
+                scheduler.resolve_approval(run.id, approvals[0].id, "allow")
+            self.assertNotIn(approvals[0].id, scheduler._team_approval_brokers)
+        self.assertEqual(sum(event.type == "approval.expired" for event in self.repository.list_events(run.id)), 2)
+
+    def test_orphan_approvals_are_removed_from_pending_queue(self):
+        scheduler = RunScheduler(self.repository, _FakeFactory())
+        run = self.repository.create_run(self.conversation.id, status="completed")
+        old = self.repository.create_approval(run.id, tool_name="bash", tool_input={}, reason="old")
+        self.assertEqual(scheduler.list_pending_approvals(self.conversation.id), [])
+        self.assertEqual(self.repository.get_approval(old.id).status, "expired")
 
 
 if __name__ == "__main__":

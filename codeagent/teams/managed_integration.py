@@ -14,6 +14,10 @@ from codeagent.worktrees.manager import WorktreeError
 from codeagent.worktrees.snapshots import LocalGit, exclusive_file
 
 
+class _TeamPaused(WorktreeError):
+    """A resumable pause boundary, not a failed validation or foreign Git ref."""
+
+
 class IntegrationService:
     def __init__(self, repository, worktrees, *, validation_timeout=600, stop_event=None):
         self.repository = repository
@@ -133,6 +137,8 @@ class IntegrationService:
         if self.stop_event is not None and self.stop_event.is_set():
             raise WorktreeError("Team runtime is stopping")
         team = self.repository.get_team_run(op["team_run_id"])
+        if team.state.value in {"pausing", "paused"}:
+            raise _TeamPaused("team_paused")
         if (team.state.value != "running" or team.integration_head != op["parent_head"]
                 or team.integration_revision != op["parent_revision"] or team.active_plan_revision != op["plan_revision"]):
             raise WorktreeError("Team was cancelled or changed while integration was running")
@@ -158,7 +164,7 @@ class IntegrationService:
             # An unexpected ref/tree is not a transient database failure. Freeze
             # it instead of continuously trying to publish unrecognized state.
             self.repository.update_team_integration(op["id"],
-                status="recovery_required" if isinstance(exc, WorktreeError) else None, error=str(exc))
+                status="recovery_required" if isinstance(exc, WorktreeError) and not isinstance(exc, _TeamPaused) else None, error=str(exc))
             return self.repository.get_team_integration(op["id"])
 
     def _delivery(self, git, manager, team):

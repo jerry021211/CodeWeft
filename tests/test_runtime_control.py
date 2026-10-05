@@ -85,10 +85,12 @@ class PermissionBrokerTests(unittest.TestCase):
     def test_waiting_broker_honors_cancellation_and_cleans_up(self) -> None:
         token = CancellationToken()
         published = threading.Event()
+        abandoned = []
         broker = WaitingPermissionBroker(
             default_timeout=None,
             on_request=lambda request: published.set(),
             poll_interval=0.002,
+            on_abandon=lambda request: abandoned.append(request.id),
         )
         errors: list[BaseException] = []
 
@@ -109,6 +111,23 @@ class PermissionBrokerTests(unittest.TestCase):
         self.assertIsInstance(errors[0], CancelledError)
         self.assertEqual(str(errors[0]), "run stopped")
         self.assertEqual(broker.pending, ())
+        self.assertEqual(len(abandoned), 1)
+        self.assertFalse(broker.resolve(abandoned[0], True))
+
+    def test_permission_is_persisted_before_waiter_is_released(self) -> None:
+        persisted = []
+        def approve(request):
+            broker.resolve(request.id, True, before_resolve=lambda: persisted.append(request.id))
+        broker = WaitingPermissionBroker(on_request=approve)
+        self.assertTrue(broker.request("bash", {}, "confirm"))
+        self.assertEqual(len(persisted), 1)
+
+    def test_timeout_does_not_also_report_abandonment(self) -> None:
+        expired, abandoned = [], []
+        broker = WaitingPermissionBroker(default_timeout=0, on_timeout=expired.append, on_abandon=abandoned.append)
+        self.assertFalse(broker.request("bash", {}, "confirm"))
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(abandoned, [])
 
     def test_request_callback_failure_does_not_leave_pending_state(self) -> None:
         def fail(_request: object) -> None:

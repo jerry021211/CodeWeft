@@ -45,6 +45,7 @@ class _WorkerJob:
     activity: ExecutionActivity
     cancel_requested: bool = False
     suspect: bool = False
+    pause_requested: bool = False
 
 
 @dataclass(slots=True)
@@ -81,14 +82,15 @@ class TeamSupervisor:
         heartbeat_timeout: float = 120.0,
         model_response_timeout: float = 300.0,
         model_call_timeout: float = 600.0,
-        max_attempts_per_task: int = 2,
+        max_attempts_per_task: int | None = None,
         worktree_manager: WorktreeManager | None = None,
         lead_runner: Any | None = None,
         lead_activity_provider: Callable[[], tuple[ExecutionActivity, ...]] | None = None,
+        team_lead_control: Callable[[str, bool], bool] | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
-        if max_attempts_per_task < 1:
+        if max_attempts_per_task is not None and max_attempts_per_task < 1:
             raise ValueError("max_attempts_per_task must be at least 1")
         if any(
             not math.isfinite(value) or value <= 0
@@ -104,10 +106,14 @@ class TeamSupervisor:
         self.heartbeat_timeout = max(0.01, float(heartbeat_timeout))
         self.model_response_timeout = model_response_timeout
         self.model_call_timeout = model_call_timeout
-        self.max_attempts_per_task = max_attempts_per_task
+        if max_attempts_per_task is not None:
+            # One process-wide policy for dispatch, transactional claims and status.
+            self.repository.team_max_attempts_per_task = max_attempts_per_task
         self.worktree_manager = worktree_manager
         self.lead_runner = lead_runner
         self.lead_activity_provider = lead_activity_provider
+        self.team_lead_control = team_lead_control
+        self._control_lock = threading.RLock()
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="codeagent-team",
@@ -119,6 +125,10 @@ class TeamSupervisor:
         self._lock = threading.RLock()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+
+    @property
+    def max_attempts_per_task(self) -> int:
+        return self.repository.team_max_attempts_per_task
 
     def start(self) -> None:
         if not self.enabled:
@@ -162,11 +172,16 @@ class TeamSupervisor:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def dispatch_once(self, team_run_id: str | None = None) -> int:
+        with self._control_lock:
+            return self._dispatch_once(team_run_id)
+
+    def _dispatch_once(self, team_run_id: str | None = None) -> int:
         """Reap workers and atomically assign as many currently ready Tasks as fit."""
 
         if not self.enabled or self._stopping.is_set():
             return 0
         self._reap_finished()
+        self._settle_pausing_teams()
         self._mark_stale_workers()
         self._schedule_integrations()
         self._schedule_candidate_validations()
@@ -186,6 +201,7 @@ class TeamSupervisor:
         for team in teams:
             if team is None or team.state is not TeamRunState.RUNNING:
                 continue
+            self._recover_safe_restart_attempts(team.id)
             self._ensure_planned_teammates(team)
             resumed = self._resume_existing_attempts(team.id, available_slots - scheduled)
             scheduled += resumed
@@ -213,17 +229,14 @@ class TeamSupervisor:
                 : max(0, team.max_teammates - active_team_attempts)
             ]
             tasks = self.repository.list_task_resources(team.task_list_id)
-            for task, session in zip(
-                [item for item in tasks if decisions[item.task.id].schedulable],
-                idle_sessions,
-            ):
+            for task in tasks:
                 if scheduled >= available_slots:
                     return scheduled
-                previous = self.repository.list_task_attempts(
-                    team.id, task_id=task.task.id
-                )
-                if len(previous) >= self.max_attempts_per_task:
+                if not idle_sessions:
+                    break
+                if not decisions[task.task.id].schedulable:
                     continue
+                session = idle_sessions[0]
                 metadata = task.task.metadata
                 is_code = str(metadata.get("kind") or "analysis").lower() == "code"
                 if is_code:
@@ -242,6 +255,10 @@ class TeamSupervisor:
                         command_id=f"dispatch:{team.id}:{task.task.id}:{uuid4().hex}",
                     )
                 except Exception:
+                    # A competing claim may have taken this session. A task-only
+                    # conflict must not consume an otherwise idle teammate.
+                    if self.repository.get_agent_session(session.id).state is not AgentSessionState.IDLE:
+                        idle_sessions.pop(0)
                     continue
                 if is_code:
                     try:
@@ -256,6 +273,7 @@ class TeamSupervisor:
                             },
                         )
                         continue
+                idle_sessions.pop(0)
                 cancellation = CancellationToken()
                 activity = self._new_activity(cancellation)
                 future = self._executor.submit(
@@ -320,6 +338,23 @@ class TeamSupervisor:
             if teammate.id not in active_session_agents:
                 self.repository.create_agent_session(team.id, teammate.id)
 
+    def _recover_safe_restart_attempts(self, team_run_id: str) -> None:
+        from codeagent.web.storage import StorageError
+        for attempt in self.repository.list_task_attempts(team_run_id):
+            error = attempt.error or {}
+            if (attempt.state.value != "waiting" or attempt.result_unknown
+                    or error.get("type") != "service_restart" or not error.get("auto_recoverable")):
+                continue
+            task = self.repository.get_task_resource(attempt.task_list_id, attempt.task_id)
+            if task.task.metadata.get("kind") == "code" and not self.write_enabled:
+                continue
+            try:
+                self.resume_attempt(attempt.id, resumed_by="runtime",
+                    reason="重启后检查通过：没有未完成的写操作，继续任务；旧审批失效，权限操作需重新审批。",
+                    command_id=f"restart-recheck:{attempt.id}:{attempt.session_id}")
+            except (WorktreeError, StorageError, ValueError, OSError) as exc:
+                self.repository.fail_restart_recheck(attempt.id, str(exc))
+
     def _resume_existing_attempts(self, team_run_id: str, limit: int) -> int:
         """Resume paused workers without creating Attempts or reacquiring leases."""
 
@@ -375,6 +410,82 @@ class TeamSupervisor:
             active_ids.add(attempt.id)
             resumed += 1
         return resumed
+
+    def pause_team(self, team_id: str, *, reason: str, command_id: str) -> None:
+        with self._control_lock:
+            self.repository.request_team_pause(team_id, reason=reason, command_id=command_id)
+            if self.repository.get_team_run(team_id).state.value != "pausing":
+                return
+            self._interrupt_team(team_id, pause=True)
+            self._settle_pausing_teams()
+
+    def _interrupt_team(self, team_id: str, *, pause: bool) -> None:
+        for job in list(self._jobs.values()):
+            if self.repository.get_task_attempt(job.attempt_id).team_run_id != team_id:
+                continue
+            job.pause_requested = pause
+            job.cancellation.cancel("team_paused" if pause else "Team cancelled")
+            job.activity.interrupt_request()
+        lead = self._lead_jobs.get(team_id)
+        if lead:
+            lead.cancellation.cancel("team_paused" if pause else "Team cancelled")
+            lead.activity.interrupt_request()
+        if self.team_lead_control:
+            self.team_lead_control(team_id, True)
+
+    def _team_has_jobs(self, team_id: str) -> bool:
+        return (any(self.repository.get_task_attempt(j.attempt_id).team_run_id == team_id for j in self._jobs.values())
+            or team_id in self._lead_jobs or team_id in self._integration_jobs
+            or any(self.repository.get_candidate(j.candidate_id).team_run_id == team_id for j in self._validation_jobs.values())
+            or bool(self.team_lead_control and self.team_lead_control(team_id, False)))
+
+    def _settle_pausing_teams(self) -> None:
+        for team in self.repository.list_team_runs(state="pausing"):
+            self._interrupt_team(team.id, pause=True)
+            if not self._team_has_jobs(team.id):
+                for attempt in self.repository.list_task_attempts(team.id):
+                    session = self.repository.get_agent_session(attempt.session_id)
+                    if session.state is AgentSessionState.WORK and attempt.state.value not in {"succeeded", "failed", "cancelled", "orphaned"}:
+                        self.repository.pause_attempt_after_worker_exit(attempt.id, reason="team_paused")
+                self.repository.finish_team_pause(team.id)
+
+    def resume_team(self, team_id: str, *, reason: str, command_id: str) -> None:
+        with self._control_lock:
+            self._reap_finished()
+            if self._team_has_jobs(team_id):
+                raise WorktreeError("团队仍有模型调用、工具或验证尚未退出，请等待停止完成")
+            team = self.repository.get_team_run(team_id)
+            if team.state.value == "running":
+                return
+            if team.state.value == "paused":
+                # A user's explicit resume may repair safe restart sessions while
+                # the Team is still paused; dispatch remains disabled until commit.
+                self._recover_safe_restart_attempts(team_id)
+            fingerprints = {}
+            for attempt in self.repository.list_task_attempts(team_id):
+                if attempt.state.value in {"succeeded", "failed"}:
+                    continue
+                task = self.repository.get_task_resource(attempt.task_list_id, attempt.task_id)
+                if task.task.metadata.get("kind") != "code":
+                    continue
+                binding = self.repository.get_attempt_worktree_binding(attempt.id)
+                if self.worktree_manager is None or binding is None:
+                    raise WorktreeError(f"任务 {attempt.task_id} 的工作目录不可用")
+                binding = self.worktree_manager.validate_recoverable_binding(binding.id)
+                for path in self.worktree_manager.recovery_changed_paths(binding.id):
+                    repository_lease = any(r.resource_kind == "repository" for r in self.repository.list_resource_leases(team_id, attempt_id=attempt.id))
+                    if not _path_allowed_for_recovery(path, binding.write_scopes, repository_lease=repository_lease):
+                        raise WorktreeError(f"工作目录含有超出任务范围的修改：{path}")
+                fingerprints[attempt.id] = binding.fingerprint
+            self.repository.resume_team_run(team_id, fingerprints=fingerprints, reason=reason, command_id=command_id)
+
+    def cancel_team(self, team_id: str, *, reason: str, command_id: str) -> None:
+        with self._control_lock:
+            self.repository.cancel_team_run(team_id, cancelled_by="user", reason=reason, command_id=command_id)
+            self._interrupt_team(team_id, pause=False)
+            for attempt in self.repository.list_task_attempts(team_id):
+                if attempt.state.value not in {"succeeded", "failed", "cancelled", "orphaned"}:
+                    self.cancel_attempt(attempt.id, requested_by="user", reason=reason, command_id=f"{command_id}:{attempt.id}")
 
     def cancel_attempt(
         self,
@@ -537,6 +648,16 @@ class TeamSupervisor:
         with self._lock:
             finished = [job for job in self._jobs.values() if job.future.done()]
         for job in finished:
+            if job.pause_requested:
+                # Read/observe the Future only after it has exited. Keep leases.
+                try:
+                    job.future.result()
+                except Exception:
+                    pass
+                self.repository.pause_attempt_after_worker_exit(job.attempt_id, reason="team_paused")
+                with self._lock:
+                    self._jobs.pop(job.attempt_id, None)
+                continue
             try:
                 result = job.future.result()
             except ModelCallTimeout as exc:
@@ -755,6 +876,8 @@ class TeamSupervisor:
         if self.lead_runner is None:
             return
         for team in self.repository.list_team_runs():
+            if team.state.value not in {"planning", "waiting_approval", "running", "ready_for_manual_integration"}:
+                continue
             with self._lock:
                 if (
                     len(self._jobs)

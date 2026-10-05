@@ -363,13 +363,14 @@ class WebAgentFactory:
                 self.task_service,
                 execution.conversation_id,
             ).wrap(agent.tools)
-        if team_session is not None:
-            assert worktree_manager is not None
+        if team_session is not None or team_planner:
             agent.set_execution_activity(ExecutionActivity(
                 cancellation,
                 response_timeout=self.env.team_model_response_timeout,
                 model_timeout=self.env.team_model_call_timeout,
             ))
+        if team_session is not None:
+            assert worktree_manager is not None
             assert team_agent is not None
             assert team is not None
             registry = agent.tools.copy_without({"remember", "subagent"})

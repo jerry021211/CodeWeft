@@ -5,6 +5,7 @@ import unittest
 import json
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from codeagent import Agent, AgentConfig, ModelResponse, ToolRegistry
 from codeagent.context import ContextManager
@@ -112,6 +113,46 @@ class TeamSessionTests(unittest.TestCase):
             command_id=f"claim-{suffix}",
         )
         return task, agent, session, attempt
+
+    def test_heartbeat_progress_does_not_become_a_waiting_reason(self):
+        _, _, session, attempt = self._create_claimed_teammate("progress")
+        current = self.repository.heartbeat_agent_session(session.id, activity="model_receiving")
+        self.assertEqual(current.state.value, "work")
+        self.assertEqual(current.to_dict()["activity_phase"], "model_receiving")
+        self.assertIsNone(current.waiting_reason)
+        self.repository.pause_attempt_after_worker_exit(attempt.id, reason="model_response_timeout")
+        current = self.repository.heartbeat_agent_session(session.id, activity="tool_executing")
+        self.assertEqual(current.state.value, "waiting")
+        self.assertEqual(current.waiting_reason, "model_response_timeout")
+        self.assertIsNone(current.to_dict()["activity_phase"])
+        self.repository.resume_task_attempt(attempt.id, resumed_by="user", reason="checked",
+            command_id="resume-progress", validated_worktree_fingerprint=None)
+        self.assertIsNone(self.repository.get_agent_session(session.id).activity_phase)
+
+    def test_old_activity_labels_migrate_without_changing_real_waits_or_task_state(self):
+        import sqlite3
+        from contextlib import closing
+        _, _, running, attempt = self._create_claimed_teammate("legacy-progress")
+        _, _, waiting, waiting_attempt = self._create_claimed_teammate("real-wait")
+        self.repository.pause_attempt_after_worker_exit(waiting_attempt.id, reason="waiting_for_lead_answer:q1")
+        self.repository.close()
+        with closing(sqlite3.connect(self.database)) as db:
+            with db:
+                for operation in ("insert", "update", "delete"):
+                    db.execute(f"DROP TRIGGER observe_agent_sessions_{operation}")
+                db.execute("DROP TRIGGER clear_agent_session_activity")
+                db.execute("ALTER TABLE agent_sessions DROP COLUMN activity_phase")
+                db.execute("UPDATE agent_sessions SET waiting_reason = 'model_receiving' WHERE id = ?", (running.id,))
+        self.repository = SQLiteRepository(self.database, recover_incomplete=False)
+        migrated = self.repository.get_agent_session(running.id)
+        self.assertEqual(migrated.activity_phase, "model_receiving")
+        self.assertIsNone(migrated.waiting_reason)
+        self.assertEqual(migrated.state.value, "work")
+        self.assertEqual(self.repository.get_task_attempt(attempt.id).state.value, "running")
+        self.assertEqual(self.repository.get_agent_session(waiting.id).waiting_reason, "waiting_for_lead_answer:q1")
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database, recover_incomplete=False)
+        self.assertEqual(self.repository.get_agent_session(running.id).activity_phase, "model_receiving")
 
     def _agent(self, client=None):
         return Agent(
@@ -231,6 +272,74 @@ class TeamSessionTests(unittest.TestCase):
         question = self._question(attempt, blocking=False)
         self._answer(question)
         self.assertEqual(self.repository.get_agent_session(session.id).state.value, "work")
+
+    def test_running_worker_receives_answer_next_turn_and_checkpoints_it_once(self) -> None:
+        _, _, session, attempt = self._create_claimed_teammate("live-answer")
+        question = self._question(attempt, blocking=False)
+        requests = []
+        owner = self
+
+        class Client:
+            def create_message(self, **kwargs):
+                requests.append(json.dumps(kwargs["messages"], ensure_ascii=False))
+                if len(requests) == 1:
+                    owner._answer(question, answer="Use the live reply.")
+                    return ModelResponse("tool_use", [{
+                        "type": "tool_use", "id": "progress", "name": "unknown_read_tool", "input": {},
+                    }])
+                # Delivery must not ACK until the conversation is durably saved.
+                answer = next(m for m in owner.repository.list_team_messages(owner.team.id) if m.type == "ANSWER")
+                owner.assertIsNone(answer.acked_at)
+                return ModelResponse("end_turn", [{"type": "text", "text": "done"}])
+
+        runner = AgentSessionRunner(self.repository)
+        runner.run(self._agent(Client()), session.id)
+        self.assertEqual(len(requests), 2)
+        self.assertNotIn("Use the live reply.", requests[0])
+        self.assertEqual(requests[1].count("Use the live reply."), 1)
+        answer = next(m for m in self.repository.list_team_messages(self.team.id) if m.type == "ANSWER")
+        self.assertIsNotNone(answer.acked_at)
+        checkpoint = self.repository.get_latest_agent_session_checkpoint(session.id)
+        self.assertEqual(str(checkpoint.messages).count("Use the live reply."), 1)
+        resumed = _EndTurnClient()
+        runner.run(self._agent(resumed), session.id)
+        self.assertEqual(str(resumed.calls[0]["messages"]).count("Use the live reply."), 1)
+
+    def test_live_message_survives_model_timeout_checkpoint(self) -> None:
+        _, _, session, attempt = self._create_claimed_teammate("live-timeout")
+        question = self._question(attempt, blocking=False)
+        agent = self._agent()
+
+        def interrupted_run(_prompt):
+            self._answer(question, answer="Answer before timeout.")
+            agent.boundary_callback("before_model")
+            agent.boundary_callback("before_model")
+            raise ModelCallTimeout("model_call_timeout")
+
+        with patch.object(Agent, "run_until_yield", side_effect=interrupted_run):
+            with self.assertRaises(ModelCallTimeout):
+                AgentSessionRunner(self.repository).run(agent, session.id)
+        checkpoint = self.repository.get_latest_agent_session_checkpoint(session.id)
+        self.assertEqual(checkpoint.safe_boundary, "model_timeout_before_dispatch")
+        self.assertEqual(str(checkpoint.messages).count("Answer before timeout."), 1)
+        self.assertEqual(self.repository.fetch_unacked_team_messages(session.id), [])
+
+    def test_new_messages_are_not_hidden_behind_a_full_unacked_page(self) -> None:
+        _, _, session, _ = self._create_claimed_teammate("full-inbox")
+        messages = []
+        for index in range(105):
+            messages.append(MessageBus(self.repository).send(
+                self.team.id, sender_type="runtime", recipient_type="teammate",
+                recipient_agent_id=session.agent_id, recipient_generation=session.generation,
+                message_type="SYSTEM_ERROR", payload={
+                    "reason": f"notice-{index}", "reason_code": "test", "effective_scope": "task",
+                },
+                dedupe_key=f"notice-{index}",
+            ))
+        client = _EndTurnClient()
+        AgentSessionRunner(self.repository).run(self._agent(client), session.id)
+        self.assertIn("notice-104", str(client.calls[0]["messages"]))
+        self.assertTrue(all(self.repository.get_team_message(m.id).acked_at for m in messages))
 
     def test_assignment_contains_only_direct_dependency_reports(self) -> None:
         task, _, _, attempt = self._create_claimed_teammate("design")

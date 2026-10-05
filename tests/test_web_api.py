@@ -60,6 +60,9 @@ class FakeScheduler:
             raise LookupError(approval_id)
         return self.repository.resolve_approval(approval_id, decision)
 
+    def list_pending_approvals(self, conversation_id: str):
+        return self.repository.list_approvals(conversation_id=conversation_id, status="pending")
+
     def reload_mcp(self, workspace: str) -> bool:
         self.mcp_reloads.append(workspace)
         return True
@@ -98,6 +101,19 @@ class WebApiTests(unittest.TestCase):
         self.repository.close()
         self.temp_dir.cleanup()
 
+    def test_pending_cancellation_is_visible_in_run_activity_and_conversation(self) -> None:
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        run = self.repository.create_run(conversation.id)
+        self.repository.start_run(run.id)
+        response = self.client.post(f"/api/runs/{run.id}/cancel")
+        self.assertEqual(response.json()["status"], "cancelling")
+        self.assertEqual(self.client.get(f"/api/runs/{run.id}").json()["status"], "cancelling")
+        self.assertEqual(self.client.get(f"/api/runs/{run.id}/activity").json()["status"], "cancelling")
+        conversations = self.client.get("/api/conversations").json()
+        self.assertEqual(next(c for c in conversations if c["id"] == conversation.id)["run_status"], "cancelling")
+        self.repository.update_run_status(run.id, "cancelled")
+        self.assertEqual(self.client.get(f"/api/runs/{run.id}").json()["status"], "cancelled")
+
     def test_user_question_answer_contract(self) -> None:
         conversation = self.repository.create_conversation(workspace=self.workspace)
         run = self.repository.create_run(conversation.id)
@@ -135,6 +151,28 @@ class WebApiTests(unittest.TestCase):
             response = self.client.post(f"/api/conversations/{conversation.id}/runs", json=body)
             self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(self.scheduler.web_search_choices[-1], choice if choice is not None else True)
+
+    def test_approvals_follow_conversation_after_planning_run_finishes(self):
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        planning = self.repository.create_run(conversation.id, status="completed")
+        latest = self.repository.create_run(conversation.id)
+        other = self.repository.create_conversation(workspace=self.workspace)
+        other_run = self.repository.create_run(other.id)
+        def approval(run):
+            return self.repository.create_approval(run.id, tool_name="bash", tool_input={"command": "remove"}, reason="confirm")
+        old = approval(planning)
+        self.repository.expire_pending_approvals(approval_id=old.id)
+        worker = approval(planning)
+        lead = approval(latest)
+        approval(other_run)
+        url = f"/api/conversations/{conversation.id}/approvals"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual({item["id"] for item in response.json()}, {worker.id, lead.id})
+        self.assertEqual(next(item for item in response.json() if item["id"] == worker.id)["run_id"], planning.id)
+        self.client.post(f"/api/runs/{planning.id}/approvals/{worker.id}", json={"decision": "allow"})
+        self.assertEqual([item["id"] for item in self.client.get(url).json()], [lead.id])
+        self.assertEqual(self.client.get('/api/conversations/missing/approvals').status_code, 404)
 
     def test_activity_history_is_paginated_without_text_delta_replay(self):
         conversation = self.repository.create_conversation(workspace=self.workspace)

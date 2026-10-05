@@ -6,6 +6,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from codeagent import Agent, AgentConfig, ModelResponse
 from codeagent.runtime import TeamSupervisor
@@ -157,6 +158,171 @@ class TeamSupervisorTests(unittest.TestCase):
                 {attempt.state for attempt in attempts},
                 {TaskAttemptState.WAITING},
             )
+        finally:
+            supervisor.stop()
+
+    def test_team_pause_waits_for_worker_then_resumes_same_attempt_and_checkpoint(self):
+        self._task("pause", metadata={"exclusive_resources": ["service:test"]})
+        self._teammate("pause")
+        started, release = threading.Event(), threading.Event()
+        supervisor = TeamSupervisor(self.repository,
+            lambda _s, _a, token: self._agent(_BlockingClient(started, release), token), enabled=True, max_workers=1)
+        try:
+            supervisor.dispatch_once(self.team.id)
+            self.assertTrue(started.wait(1))
+            attempt_id = supervisor.active_attempt_ids()[0]
+            supervisor.pause_team(self.team.id, reason="pause", command_id="pause")
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "pausing")
+            with self.assertRaisesRegex(Exception, "尚未退出"):
+                supervisor.resume_team(self.team.id, reason="early", command_id="early")
+            release.set()
+            self._wait_for_supervisor(supervisor)
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "paused")
+            attempt = self.repository.get_task_attempt(attempt_id)
+            self.assertEqual(attempt.state.value, "waiting")
+            self.assertEqual(self.repository.list_resource_leases(self.team.id, attempt_id=attempt_id)[0].state, "active")
+            self.assertIsNotNone(self.repository.get_latest_agent_session_checkpoint(attempt.session_id))
+            self.assertEqual(supervisor.dispatch_once(self.team.id), 0)
+            supervisor.resume_team(self.team.id, reason="continue", command_id="resume")
+            supervisor.resume_team(self.team.id, reason="continue", command_id="resume")
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "running")
+            self.assertEqual(self.repository.get_task_attempt(attempt_id).state.value, "running")
+            self.assertEqual(len(self.repository.list_task_attempts(self.team.id)), 1)
+            messages = [m for m in self.repository.list_team_messages(self.team.id) if m.type == "ATTEMPT_RESUMED"]
+            self.assertEqual(len(messages), 1)
+        finally:
+            release.set()
+            supervisor.stop()
+
+    def test_legacy_cancelled_team_restores_task_lease_and_clears_cancel_signal(self):
+        task = self._task("legacy", metadata={"exclusive_resources": ["service:test"]})
+        agent, session = self._teammate("legacy")
+        attempt = self.repository.claim_task_attempt(self.team.id, task_id=task.task.id,
+            agent_id=agent.id, session_id=session.id, expected_task_revision=task.revision, command_id="claim")
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            supervisor.cancel_team(self.team.id, reason="old stop", command_id="cancel")
+            self.assertEqual(self.repository.get_task_attempt(attempt.id).state.value, "cancelled")
+            supervisor.resume_team(self.team.id, reason="recover", command_id="resume")
+            restored = self.repository.get_task_attempt(attempt.id)
+            self.assertEqual(restored.state.value, "running")
+            self.assertIsNone(restored.cancel_requested_at)
+            self.assertEqual(self.repository.get_task_resource(self.task_list_id, task.task.id).task.status.value, "in_progress")
+            self.assertEqual(self.repository.list_resource_leases(self.team.id, attempt_id=attempt.id)[0].state, "active")
+            self.assertTrue(all(m.acked_at for m in self.repository.list_team_messages(self.team.id) if m.type == "CANCEL"))
+        finally:
+            supervisor.stop()
+
+    def test_team_resume_failure_is_atomic_and_survives_restart(self):
+        attempts = []
+        for suffix in ["one", "two"]:
+            task = self._task(suffix)
+            agent, session = self._teammate(suffix)
+            attempts.append(self.repository.claim_task_attempt(self.team.id, task_id=task.task.id,
+                agent_id=agent.id, session_id=session.id, expected_task_revision=task.revision, command_id=suffix))
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            supervisor.pause_team(self.team.id, reason="pause", command_id="pause")
+            self.repository.close()
+            self.repository = SQLiteRepository(self.database)
+            supervisor.repository = self.repository
+            with self.repository._transaction() as db:
+                db.execute("UPDATE tasks SET revision = revision + 1 WHERE task_list_id = ? AND id = ?", (self.task_list_id, attempts[1].task_id))
+            with self.assertRaisesRegex(StorageConflictError, "版本已变化"):
+                supervisor.resume_team(self.team.id, reason="resume", command_id="resume")
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "paused")
+            self.assertEqual(self.repository.get_task_attempt(attempts[0].id).state.value, "waiting")
+        finally:
+            supervisor.stop()
+
+    def test_paused_team_does_not_wake_lead(self):
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True,
+                                    lead_runner=lambda *_args, **_kwargs: self.fail("paused lead woke"))
+        try:
+            supervisor.pause_team(self.team.id, reason="pause", command_id="pause")
+            self.assertEqual(supervisor.dispatch_once(self.team.id), 0)
+            self.assertEqual(supervisor._lead_jobs, {})
+            supervisor.resume_team(self.team.id, reason="resume", command_id="resume")
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "running")
+        finally:
+            supervisor.stop()
+
+    def test_restart_during_pause_requires_inspection_before_team_resumes(self):
+        task = self._task("restart-pause")
+        agent, session = self._teammate("restart-pause")
+        attempt = self.repository.claim_task_attempt(self.team.id, task_id=task.task.id, agent_id=agent.id,
+            session_id=session.id, expected_task_revision=task.revision, command_id="claim")
+        self.repository.begin_tool_execution(attempt.id, tool_call_id="interrupted-write", tool_name="bash",
+            risk="medium", is_write=True, input={}, worktree_id=None)
+        self.repository.request_team_pause(self.team.id, reason="pause", command_id="pause")
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database)
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            self.assertEqual(supervisor.dispatch_once(self.team.id), 0)
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "paused")
+            with self.assertRaisesRegex(StorageConflictError, "结果不确定"):
+                supervisor.resume_team(self.team.id, reason="resume", command_id="resume")
+            supervisor.resume_attempt(attempt.id, resumed_by="user", reason="checked interrupted operations",
+                                      command_id="checked", acknowledge_unknown_result=True)
+            self.assertEqual(supervisor.dispatch_once(self.team.id), 0)
+            supervisor.resume_team(self.team.id, reason="resume", command_id="resume")
+            self.assertEqual(self.repository.get_task_attempt(attempt.id).state.value, "running")
+        finally:
+            supervisor.stop()
+
+    def test_exhausted_task_does_not_starve_next_ready_task(self) -> None:
+        exhausted = self._task("exhausted")
+        ready = self._task("ready")
+        agent, session = self._teammate("only")
+        supervisor = TeamSupervisor(
+            self.repository, lambda *_: None, enabled=True,
+            max_attempts_per_task=3,
+        )
+        try:
+            for index in range(3):
+                task = self.repository.get_task_resource(self.task_list_id, exhausted.task.id)
+                attempt = self.repository.claim_task_attempt(
+                    self.team.id, task_id=task.task.id, agent_id=agent.id,
+                    session_id=session.id, expected_task_revision=task.revision,
+                    command_id=f"failure-{index}",
+                )
+                self.repository.fail_attempt_after_worker_exit(
+                    attempt.id, error={"message": "test failure"},
+                )
+            decisions = {d.task_id: d for d in self.repository.list_task_scheduling(self.team.id)}
+            self.assertIn("task_attempt_limit_reached", decisions[exhausted.task.id].reasons)
+            self.assertTrue(decisions[ready.task.id].schedulable)
+            task = self.repository.get_task_resource(self.task_list_id, exhausted.task.id)
+            with self.assertRaisesRegex(StorageConflictError, "retry limit"):
+                self.repository.claim_task_attempt(
+                    self.team.id, task_id=task.task.id, agent_id=agent.id,
+                    session_id=session.id, expected_task_revision=task.revision,
+                    command_id="over-limit",
+                )
+            with patch.object(supervisor, "_run_worker"):
+                self.assertEqual(supervisor.dispatch_once(self.team.id), 1)
+            self.assertEqual(len(self.repository.list_task_attempts(self.team.id, task_id=ready.task.id)), 1)
+            self.assertEqual(len(self.repository.list_task_attempts(self.team.id, task_id=exhausted.task.id)), 3)
+        finally:
+            supervisor.stop()
+
+    def test_failed_claim_does_not_consume_idle_session(self) -> None:
+        skipped = self._task("claim-conflict")
+        ready = self._task("ready-after-conflict")
+        self._teammate("only")
+        claim = self.repository.claim_task_attempt
+
+        def claim_with_conflict(*args, **kwargs):
+            if kwargs["task_id"] == skipped.task.id:
+                raise StorageConflictError("Task revision conflict")
+            return claim(*args, **kwargs)
+
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            with patch.object(self.repository, "claim_task_attempt", side_effect=claim_with_conflict), patch.object(supervisor, "_run_worker"):
+                self.assertEqual(supervisor.dispatch_once(self.team.id), 1)
+            self.assertEqual(len(self.repository.list_task_attempts(self.team.id, task_id=ready.task.id)), 1)
         finally:
             supervisor.stop()
 
@@ -661,6 +827,8 @@ class TeamSupervisorTests(unittest.TestCase):
             expected_task_revision=task.revision,
             command_id="claim-restart",
         )
+        self.repository.begin_tool_execution(attempt.id, tool_call_id="interrupted-write", tool_name="bash",
+            risk="medium", is_write=True, input={}, worktree_id=None)
         lead_session = self.repository.list_agent_sessions(
             self.team.id, role="lead"
         )[0]
@@ -720,6 +888,94 @@ class TeamSupervisorTests(unittest.TestCase):
             )],
             [pending.id],
         )
+
+    def test_restart_without_incomplete_write_rechecks_and_resumes_same_attempt(self):
+        task = self._task("safe-restart")
+        agent, session = self._teammate("safe")
+        attempt = self.repository.claim_task_attempt(self.team.id, task_id=task.task.id, agent_id=agent.id,
+            session_id=session.id, expected_task_revision=task.revision, command_id="claim-safe")
+        self.repository.begin_tool_execution(attempt.id, tool_call_id="read", tool_name="read_file",
+            risk="low", is_write=False, input={}, worktree_id=None)
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database)
+        recovered = self.repository.get_task_attempt(attempt.id)
+        self.assertFalse(recovered.result_unknown)
+        self.assertTrue(recovered.error["auto_recoverable"])
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            supervisor._recover_safe_restart_attempts(self.team.id)
+            recovered = self.repository.get_task_attempt(attempt.id)
+            self.assertEqual(recovered.state.value, "running")
+            self.assertNotEqual(recovered.session_id, session.id)
+            self.assertEqual(len(self.repository.list_task_attempts(self.team.id)), 1)
+            self.assertEqual(self.repository.list_tool_executions(attempt.id)[0].status, "failed")
+            supervisor._recover_safe_restart_attempts(self.team.id)
+            self.assertEqual(self.repository.get_task_attempt(attempt.id).session_id, recovered.session_id)
+        finally:
+            supervisor.stop()
+
+    def test_restart_while_waiting_for_approval_does_not_imply_unknown_write(self):
+        task = self._task("approval-restart")
+        agent, session = self._teammate("approval")
+        attempt = self.repository.claim_task_attempt(self.team.id, task_id=task.task.id, agent_id=agent.id,
+            session_id=session.id, expected_task_revision=task.revision, command_id="claim-approval")
+        self.repository.create_approval(self.run.id, tool_name="bash", tool_input={"command": "Remove-Item example"}, reason="confirm")
+        self.repository.request_team_pause(self.team.id, reason="pause", command_id="pause")
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database)
+        recovered = self.repository.get_task_attempt(attempt.id)
+        self.assertFalse(recovered.result_unknown)
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            self.assertEqual(supervisor.dispatch_once(self.team.id), 0)
+            self.assertEqual(self.repository.get_team_run(self.team.id).state.value, "paused")
+            self.assertEqual(self.repository.get_task_attempt(attempt.id).state.value, "waiting")
+            supervisor.resume_team(self.team.id, reason="continue", command_id="resume")
+            self.assertEqual(self.repository.get_task_attempt(attempt.id).state.value, "running")
+        finally:
+            supervisor.stop()
+
+    def test_acknowledged_historical_write_does_not_block_every_future_restart(self):
+        task = self._task("acknowledged")
+        agent, session = self._teammate("acknowledged")
+        attempt = self.repository.claim_task_attempt(self.team.id, task_id=task.task.id, agent_id=agent.id,
+            session_id=session.id, expected_task_revision=task.revision, command_id="claim-acknowledged")
+        self.repository.begin_tool_execution(attempt.id, tool_call_id="old-write", tool_name="bash",
+            risk="medium", is_write=True, input={}, worktree_id=None)
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database)
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            supervisor._recover_safe_restart_attempts(self.team.id)
+            self.assertEqual(self.repository.get_task_attempt(attempt.id).state.value, "waiting")
+            self.assertTrue(self.repository.get_task_attempt(attempt.id).result_unknown)
+            supervisor.resume_attempt(attempt.id, resumed_by="user", reason="checked", command_id="ack",
+                                      acknowledge_unknown_result=True)
+        finally:
+            supervisor.stop()
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database)
+        self.assertFalse(self.repository.get_task_attempt(attempt.id).result_unknown)
+
+    def test_restart_recheck_failure_remains_visible_and_is_not_retried_every_tick(self):
+        task = self._task("changed-revision")
+        agent, session = self._teammate("changed")
+        attempt = self.repository.claim_task_attempt(self.team.id, task_id=task.task.id, agent_id=agent.id,
+            session_id=session.id, expected_task_revision=task.revision, command_id="claim-changed")
+        self.repository.close()
+        self.repository = SQLiteRepository(self.database)
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True)
+        try:
+            with patch.object(supervisor, "resume_attempt", side_effect=StorageConflictError("Task revision changed")) as resume:
+                supervisor._recover_safe_restart_attempts(self.team.id)
+                supervisor._recover_safe_restart_attempts(self.team.id)
+                self.assertEqual(resume.call_count, 1)
+            recovered = self.repository.get_task_attempt(attempt.id)
+            self.assertEqual(recovered.state.value, "waiting")
+            self.assertFalse(recovered.error["auto_recoverable"])
+            self.assertIn("revision", recovered.error["recheck_error"])
+        finally:
+            supervisor.stop()
 
     def test_supervisor_can_interrupt_foreground_lead_model_wait(self) -> None:
         from codeagent.runtime.activity import ExecutionActivity
