@@ -1,6 +1,6 @@
-# CodeAgent Web
+# CodeWeft Web
 
-本机 CodeAgent 的 React 工作台。开发服务器会把 `/api` 代理到 `http://127.0.0.1:8765`，生产构建输出到 `web/dist/`，由后端同源托管。
+本机 CodeWeft 的 React 工作台。开发服务器会把 `/api` 代理到 `http://127.0.0.1:8765`，生产构建输出到 `web/dist/`，由后端同源托管。
 
 ```powershell
 npm.cmd install

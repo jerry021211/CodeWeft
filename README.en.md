@@ -1,4 +1,4 @@
-<h1 align="center">CodeAgent</h1>
+<h1 align="center">CodeWeft</h1>
 
 <p align="center"><a href="README.md">简体中文</a> · <strong>English</strong></p>
 
@@ -20,9 +20,11 @@
   <a href="#development-and-validation">Development and validation</a>
 </p>
 
-CodeAgent connects model APIs, code search, file editing, command execution, and task management into a coding workflow. Describe a task in your browser or terminal, let the agent find the relevant implementation, edit files, and run checks, and follow its tool calls, task progress, token usage, and file changes.
+CodeWeft connects model APIs, code search, file editing, command execution, and task management into a coding workflow. Describe a task in your browser or terminal, let the agent find the relevant implementation, edit files, and run checks, and follow its tool calls, task progress, token usage, and file changes.
 
 The agent runtime is built in Python, with a local React + TypeScript web workbench. Model protocols, tools, permissions, context management, and collaboration are organized as separate components, making the project useful both for everyday development and for studying or extending coding agent runtimes.
+
+**Why CodeWeft?** A weft connects the threads of a fabric. CodeWeft connects models, tools, and collaborating agents to take local coding tasks from understanding to verified changes. The Python package and commands remain `codeagent`, preserving existing configuration and data directories.
 
 ## Features
 
@@ -195,4 +197,4 @@ Reproducible bug reports and improvement suggestions are welcome through [Issues
 
 ## Acknowledgments
 
-The project draws on [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) and its approach to separating the agent loop from tools, permissions, memory, and other capabilities. CodeAgent builds on these ideas with a local web workbench, context management, code retrieval, and multi-agent collaboration.
+The project draws on [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) and its approach to separating the agent loop from tools, permissions, memory, and other capabilities. CodeWeft builds on these ideas with a local web workbench, context management, code retrieval, and multi-agent collaboration.

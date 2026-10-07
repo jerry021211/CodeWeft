@@ -1,4 +1,4 @@
-# CodeAgent 使用指南
+# CodeWeft 使用指南
 
 [返回项目首页](../README.md)
 
@@ -67,7 +67,7 @@ codeagent/
 项目现在包含一个本机单用户 Coding Cockpit：左侧管理会话，中间显示对话、
 流式回复和 Agent 动作，右侧展示 Token、持久化任务、子 Agent、恢复记录、文件改动与
 脱敏后的调试事件。消息、Run、审批、模型调用用量、事件流和 checkpoint 持久化在
-CodeAgent 外部数据目录的 `state/state.db`。新建对话时可以从页面选择任意已有的本机项目
+CodeWeft 外部数据目录的 `state/state.db`。新建对话时可以从页面选择任意已有的本机项目
 目录；每个对话永久绑定自己的工作区，后续执行使用该目录专属的 Agent 和工具状态。
 
 安装并构建：
@@ -145,7 +145,7 @@ Team 成员继承启动任务的选择。摘要、记忆和搜索改写等辅助
 模型响应期限或短 HTTP 超时限制，执行期间不累计本分支的活跃时间预算。手动取消、Token
 预算和每次向量构建的块数限制仍有效；其他工具和主模型调用保留原有时限。
 独立索引命令 `python -m codeagent.code_search index --workspace <目录>` 也默认不限时，
-需要限制时可显式传入 `--timeout <秒数>`。修改后需重启 CodeAgent 后端生效，已有索引可继续复用。
+需要限制时可显式传入 `--timeout <秒数>`。修改后需重启 CodeWeft 后端生效，已有索引可继续复用。
 
 旧的 `subagent(description)` 保持前台串行行为。独立调查可使用
 `subagent(description, access="read_only")`，同轮多个调用可以同时执行；再传
@@ -337,7 +337,7 @@ CLI 会在 `todo_write` 更新计划时打印用户可见的任务表：
 ## Task System：当前会话直接执行
 
 交互式会话注册 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。Task 持久化在
-CodeAgent 外部数据目录的 `state/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
+CodeWeft 外部数据目录的 `state/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
 任务业务对象保持九字段：`id`、`subject`、`description`、`activeForm`、`owner`、
 `status`、`blocks`、`blockedBy`、`metadata`；TaskList、revision 和时间戳位于
 独立持久化外壳中。
@@ -501,7 +501,7 @@ RECOVERY_SIDE_QUERY_MAX_RETRIES=2
 
 - 所有项目、工作区及 Team Worktree 共用同一份全局技能库，不扫描项目内的 `.skills`。
 - 启动时扫描 `SKILLS_DIR` 指定的目录，默认是 `CODEAGENT_DATA_DIR/skills`。
-- 相对路径统一相对于 CodeAgent 数据目录解析；也支持指定全局技能库的绝对路径。
+- 相对路径统一相对于 CodeWeft 数据目录解析；也支持指定全局技能库的绝对路径。
 - 每个 skill 放在独立目录中，并提供 `SKILL.md`。
 - Agent 的 system prompt 只注入 skill catalog：名称、描述和适用场景。
 - 完整 `SKILL.md` 不会常驻 system prompt；模型需要时调用 `load_skill(name)` 按需加载。
@@ -719,7 +719,7 @@ Copy-Item mcp.json.example mcp.json
 
 Web 工作台标题栏提供插头形状的“MCP 插件配置”按钮，可以直接添加本地命令或远程
 HTTP Server、套用常用模板并删除已有配置。保存或删除后会自动刷新对应工作区的 MCP
-缓存，下一条消息直接生效；如果当时有任务正在运行，页面会提示重启 CodeAgent。
+缓存，下一条消息直接生效；如果当时有任务正在运行，页面会提示重启 CodeWeft。
 对话 checkpoint 会持久化当前 `tool_schema_hash`。恢复旧对话时如果发现工具定义已经
 变化，系统提示会明确要求模型以本轮注册工具为准，忽略历史消息中过时的工具可用性判断。
 

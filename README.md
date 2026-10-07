@@ -1,4 +1,4 @@
-<h1 align="center">CodeAgent</h1>
+<h1 align="center">CodeWeft</h1>
 
 <p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
 
@@ -20,9 +20,11 @@
   <a href="#开发与验证">开发与验证</a>
 </p>
 
-CodeAgent 将模型接入、代码检索、文件编辑、命令执行和任务管理连接成完整的编程流程。你可以在浏览器或终端中提出需求，让 Agent 在指定项目里查找实现、修改文件并运行验证，同时查看工具调用、任务进度、Token 用量和文件变化。
+CodeWeft 将模型接入、代码检索、文件编辑、命令执行和任务管理连接成完整的编程流程。你可以在浏览器或终端中提出需求，让 Agent 在指定项目里查找实现、修改文件并运行验证，同时查看工具调用、任务进度、Token 用量和文件变化。
 
 项目以 Python 实现 Agent 运行时，以 React + TypeScript 提供本机 Web 工作台。模型协议、工具、权限、上下文和协作能力独立组织，适合日常项目开发，也适合学习和扩展 Coding Agent 的执行机制。
+
+**名字的含义：** Weft 是织物的纬线。CodeWeft 将模型、工具与多个 Agent 的协作连接起来，在本地项目中完成从理解需求到验证修改的流程。Python 包与命令继续使用 `codeagent`，已有配置和数据目录兼容。
 
 ## 核心能力
 
