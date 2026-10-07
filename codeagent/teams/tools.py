@@ -38,7 +38,8 @@ class SubmitAttemptPlanTool:
                     "items": {"type": "string"},
                 },
                 "planned_tests": {"type": "array", "items": {"type": "string"}},
-                "write_scopes": {"type": "array", "items": {"type": "string"}},
+                "write_scopes": {"type": "array", "items": {"type": "string"},
+                                 "description": "Repository-relative paths, optionally directory/**; must stay within the task's approved scope. Other glob patterns are not supported."},
                 "risk_level": {
                     "type": "string",
                     "enum": ["low", "medium", "high"],
@@ -452,7 +453,7 @@ class TeamCandidateReviewTool:
         )
         if decision == "accept" and reviewed.user_approval_required:
             return (
-                f"Candidate {reviewed.id} accepted by Lead; high-risk user approval "
+                f"Candidate {reviewed.id} accepted by Lead; explicit manual policy approval "
                 "is required before Runtime validation."
             )
         return json.dumps(reviewed.to_dict(), ensure_ascii=False, indent=2)

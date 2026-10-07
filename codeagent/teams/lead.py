@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from codeagent.tasks import TaskStatus
 from codeagent.teams.models import TeamPlanStatus, TeamRunState
+from codeagent.teams.scopes import normalize_scopes
 from codeagent.teams.tasks import validate_task_execution
 from codeagent.tools.base import ToolDefinition
 
@@ -84,6 +85,7 @@ class LeadTeamPlanTool:
                                         },
                                         "write_scopes": {
                                             "type": "array",
+                                            "description": "Repository-relative file or directory paths, optionally ending in /** (for example server/** or DESIGN.md). Other glob patterns are not supported.",
                                             "items": {"type": "string"},
                                         },
                                         "risk_level": {
@@ -366,14 +368,7 @@ class LeadTeamPlanTool:
 def _normalize_scopes(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError("write_scopes must be an array")
-    result: list[str] = []
-    for raw in value:
-        scope = str(raw).replace("\\", "/").strip().strip("/")
-        if not scope or any(part in {"", ".", ".."} for part in scope.split("/")):
-            raise ValueError(f"Invalid write scope: {raw}")
-        if scope not in result:
-            result.append(scope)
-    return result
+    return normalize_scopes(value)
 
 
 __all__ = ["LeadTeamPlanTool"]

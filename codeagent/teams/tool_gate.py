@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from codeagent.teams.scopes import path_is_allowed, path_is_scope_parent
 from codeagent.events import redact_payload
 from codeagent.permissions.read_only import is_safe_read_only_command
 from codeagent.teams.models import TaskAttemptState
@@ -382,18 +382,12 @@ class TeamToolExecutionGate:
         return [path for path in paths if not self._path_allowed(path, scopes)]
 
     def _path_allowed(self, path: str, scopes: tuple[str, ...]) -> bool:
-        normalized = _path_key(path)
         if not scopes:
             return self._has_repository_lease()
-        for scope in scopes:
-            allowed = _scope_root(scope)
-            if normalized == allowed or normalized.startswith(allowed + "/"):
-                return True
-        return False
+        return path_is_allowed(path, scopes)
 
     def _path_is_scope_parent(self, path: str, scopes: tuple[str, ...]) -> bool:
-        normalized = _path_key(path)
-        return any(_scope_root(scope).startswith(normalized + "/") for scope in scopes)
+        return path_is_scope_parent(path, scopes)
 
     def _has_repository_lease(self) -> bool:
         attempt = self.repository.get_task_attempt(self.attempt_id)
@@ -711,18 +705,6 @@ def _strip_shell_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
-
-
-def _path_key(value: str) -> str:
-    normalized = str(value).replace("\\", "/").strip("/")
-    return normalized.casefold() if os.name == "nt" else normalized
-
-
-def _scope_root(scope: str) -> str:
-    normalized = _path_key(scope)
-    if normalized.endswith("/**"):
-        return normalized[:-3].rstrip("/")
-    return normalized
 
 
 __all__ = [

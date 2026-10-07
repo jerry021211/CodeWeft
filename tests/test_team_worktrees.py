@@ -410,14 +410,14 @@ class TeamWorktreeTests(unittest.TestCase):
         binding = self.manager.create_for_attempt(attempt)
         return attempt, binding
 
-    def _create_attempt_plan(self, attempt, suffix: str):
+    def _create_attempt_plan(self, attempt, suffix: str, scope: str = "allowed"):
         return self.repository.create_attempt_plan(
             attempt.id,
             summary=f"Plan {suffix}",
             planned_files=["allowed/base.txt"],
             planned_commands=["write_file"],
             planned_tests=["git diff --check"],
-            write_scopes=["allowed"],
+            write_scopes=[scope],
             risk_level="high",
             created_by=attempt.agent_id,
             command_id=f"create-attempt-plan-{suffix}",
@@ -1521,6 +1521,51 @@ class TeamWorktreeTests(unittest.TestCase):
         finally:
             supervisor.stop()
 
+    def test_recursive_scope_survives_plan_gate_recovery_and_candidate_commit(self) -> None:
+        self._confirm()
+        attempt = self._attempt("recursive", "allowed/**", {"risk_level": "high"})
+        binding = self.manager.create_for_attempt(attempt)
+        plan = self._create_attempt_plan(attempt, "recursive", "allowed/**")
+        self.repository.submit_attempt_plan(attempt.id, plan.revision, command_id="submit-recursive-plan")
+        self.repository.decide_attempt_plan(
+            attempt.id, plan.revision, decision="approve", decided_by="agent_lead",
+            reason="approved recursive scope", command_id="approve-recursive-plan",
+            validated_worktree_fingerprint=binding.fingerprint,
+        )
+        registry = ToolRegistry()
+        registry.register(WriteFileTool(workspace_guard=WorkspaceGuard(Path(binding.path))))
+        gate = TeamToolExecutionGate(self.repository, self.manager, attempt.id).wrap(registry)
+        self.assertIn("Wrote", gate.execute("write_file", {"file_path": "allowed/nested/new.txt", "content": "nested\n"}))
+        self.repository.pause_attempt_after_worker_exit(attempt.id, reason="protocol_incomplete")
+        supervisor = TeamSupervisor(self.repository, lambda *_: None, enabled=True, write_enabled=True, worktree_manager=self.manager)
+        try:
+            resumed = supervisor.resume_attempt(attempt.id, resumed_by="user", reason="scope fix checked", command_id="resume-recursive")
+            self.assertEqual(resumed.state, TaskAttemptState.RUNNING)
+        finally:
+            supervisor.stop()
+        candidates = CandidateService(self.repository, self.manager)
+        candidate = candidates.submit(attempt.id, summary="recursive scope candidate")
+        self.assertEqual(candidate.status, CandidateStatus.SUBMITTED)
+        self.assertIn("allowed/nested/new.txt", candidate.untracked_files)
+        candidates.review(candidate.id, decision="accept", reviewed_by="agent_lead", reason="checked", command_id="accept-recursive")
+        self.assertFalse(self.repository.get_candidate(candidate.id).user_approval_required)
+        committed = candidates.validate_and_commit(candidate.id)
+        self.assertIsNotNone(committed.commit_hash)
+        self.assertEqual(self._git("show", f"{committed.commit_hash}:allowed/nested/new.txt"), "nested")
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.base_commit)
+
+    def test_recursive_candidate_still_rejects_real_outside_files_with_details(self) -> None:
+        self._confirm()
+        attempt = self._attempt("recursive-outside", "allowed/**")
+        binding = self.manager.create_for_attempt(attempt)
+        (Path(binding.path) / "allowed" / "base.txt").write_text("valid change\n", encoding="utf-8")
+        (Path(binding.path) / "outside.txt").write_text("outside change\n", encoding="utf-8")
+        with self.assertRaises(StorageConflictError) as error:
+            CandidateService(self.repository, self.manager).submit(attempt.id, summary="must reject")
+        self.assertIn('"outside_paths":["outside.txt"]', str(error.exception))
+        self.assertIn('"approved_write_scopes":["allowed/**"]', str(error.exception))
+        self.assertTrue(self.repository.get_worktree_binding(binding.id).write_enabled)
+
     def test_candidate_freezes_diff_and_lead_rework_reopens_scoped_writes(self) -> None:
         self._confirm()
         attempt = self._attempt("candidate-rework")
@@ -1596,8 +1641,45 @@ class TeamWorktreeTests(unittest.TestCase):
             CandidateStatus.SUBMITTED,
         )
 
-    def test_high_risk_candidate_needs_separate_immutable_user_approval(self) -> None:
+    def test_legacy_risk_gate_upgrade_preserves_pause_unknown_results_and_decisions(self):
         self._confirm()
+        attempt, binding = self._plan_required_attempt("legacy-gate")
+        plan = self._create_attempt_plan(attempt, "legacy-gate")
+        self.repository.submit_attempt_plan(attempt.id, plan.revision, command_id="legacy-plan-submit")
+        self.repository.decide_attempt_plan(attempt.id, plan.revision, decision="approve", decided_by="agent_lead",
+            reason="reviewed", command_id="legacy-plan-approve",
+            validated_worktree_fingerprint=self.manager.validate_binding(binding.id).fingerprint)
+        (Path(binding.path) / "allowed" / "base.txt").write_text("change\n", encoding="utf-8")
+        service = CandidateService(self.repository, self.manager)
+        candidate = service.submit(attempt.id, summary="legacy risk gate")
+        with self.repository._transaction(immediate=True) as db:
+            db.execute("UPDATE candidates SET user_approval_required=1 WHERE id=?", (candidate.id,))
+        service.review(candidate.id, decision="accept", reviewed_by="agent_lead", reason="reviewed", command_id="legacy-accept")
+        for state, unknown, policy, decision in [
+            ("paused", 0, "{}", None),
+            ("running", 1, "{}", None),
+            ("running", 0, '{"manual_candidate_approval":true}', None),
+            ("running", 0, "{}", "rejected"),
+        ]:
+            with self.repository._transaction(immediate=True) as db:
+                db.execute("UPDATE team_runs SET state=?,metadata_json=? WHERE id=?", (state, policy, self.team.id))
+                db.execute("UPDATE task_attempts SET result_unknown=? WHERE id=?", (unknown, attempt.id))
+                db.execute("UPDATE candidates SET user_decision=? WHERE id=?", (decision, candidate.id))
+            self.repository.release_risk_only_candidate_approvals(self.team.id)
+            self.assertTrue(self.repository.get_candidate(candidate.id).user_approval_required)
+            self.assertEqual(self.repository.get_candidate(candidate.id).user_decision, decision)
+        with self.repository._transaction(immediate=True) as db:
+            db.execute("UPDATE candidates SET user_decision=NULL WHERE id=?", (candidate.id,))
+        self.repository.release_risk_only_candidate_approvals(self.team.id)
+        self.repository.release_risk_only_candidate_approvals(self.team.id)
+        self.assertFalse(self.repository.get_candidate(candidate.id).user_approval_required)
+        self.assertEqual(self.repository.get_task_attempt(attempt.id).state, TaskAttemptState.VALIDATING)
+        self.assertIsNone(self.repository.get_candidate(candidate.id).user_decision)
+
+    def test_explicit_manual_policy_needs_separate_immutable_user_approval(self) -> None:
+        self._confirm()
+        with self.repository._transaction(immediate=True) as connection:
+            connection.execute("UPDATE team_runs SET metadata_json=? WHERE id=?", ('{"manual_candidate_approval": true}', self.team.id))
         attempt, binding = self._plan_required_attempt("candidate-approval")
         plan = self._create_attempt_plan(attempt, "candidate-approval")
         self.repository.submit_attempt_plan(

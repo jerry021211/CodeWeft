@@ -3,6 +3,8 @@
 from collections.abc import Mapping
 from typing import Any
 
+from codeagent.teams.scopes import normalize_scopes
+
 
 def validate_task_execution(
     metadata: Mapping[str, Any], *, require_validation_commands: bool = False,
@@ -18,6 +20,7 @@ def validate_task_execution(
         not isinstance(scope, str) or not scope.strip() for scope in scopes
     ):
         raise ValueError("Team write_scopes must be an array of non-empty paths")
+    normalize_scopes(scopes)
     if kind == "analysis" and scopes:
         raise ValueError(
             "Read-only analysis Tasks cannot declare write_scopes. "

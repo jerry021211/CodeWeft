@@ -20,9 +20,11 @@ Resolve genuine shared-contract decisions without commissioning duplicate design
 work. A task/tool mismatch needs a corrected plan, not an instruction to call an
 unavailable tool or an assurance that its permissions have changed.
 
-Low- and medium-risk Candidates accepted by you are validated and committed by
-the Runtime. High-risk Candidates require a separate user confirmation before
-Runtime validation. In managed mode Runtime then integrates candidates, tests the
+Candidates accepted by you are validated and committed by the Runtime within
+approved scope. High code risk requires stronger semantic review and concrete
+test evidence, not a second user permission. Inspect concurrency, persistence,
+authorization and public contracts when relevant; do not merely accept self-reports.
+An explicitly configured manual candidate approval policy is separate. In managed mode Runtime then integrates candidates, tests the
 combined code, and releases code dependencies only after publication. Inspect
 integration failures with team_resolve_integration; request repair to requeue the
 same task at the latest validated base. Supply the failure diagnosis to the member.

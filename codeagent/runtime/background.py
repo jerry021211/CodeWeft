@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import math
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -10,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
+from codeagent.teams.scopes import path_is_allowed
 from codeagent.runtime.cancellation import CancellationToken, CancelledError
 from codeagent.runtime.cancellation import ModelCallTimeout
 from codeagent.runtime.activity import ExecutionActivity, MODEL_TIMEOUT_REASONS
@@ -939,6 +939,7 @@ class TeamSupervisor:
         if self.worktree_manager is None:
             return
         for team in self.repository.list_team_runs(state=TeamRunState.RUNNING.value):
+            self.repository.release_risk_only_candidate_approvals(team.id)
             for candidate in self.repository.list_candidates(team.id):
                 if candidate.status is not CandidateStatus.ACCEPTED:
                     continue
@@ -1039,12 +1040,7 @@ def _path_allowed_for_recovery(
 ) -> bool:
     if not scopes:
         return repository_lease
-    normalized = _path_key(path)
-    return any(
-        normalized == _scope_root(scope)
-        or normalized.startswith(_scope_root(scope) + "/")
-        for scope in scopes
-    )
+    return path_is_allowed(path, scopes)
 
 
 def _has_repository_lease(repository: Any, team_run_id: str, attempt_id: str) -> bool:
@@ -1055,16 +1051,6 @@ def _has_repository_lease(repository: Any, team_run_id: str, attempt_id: str) ->
             team_run_id, attempt_id=attempt_id
         )
     )
-
-
-def _path_key(value: str) -> str:
-    normalized = str(value).replace("\\", "/").strip("/")
-    return normalized.casefold() if os.name == "nt" else normalized
-
-
-def _scope_root(scope: str) -> str:
-    normalized = _path_key(scope)
-    return normalized[:-3].rstrip("/") if normalized.endswith("/**") else normalized
 
 
 # Kept as an import-compatible name for the former extension point.

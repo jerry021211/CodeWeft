@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator, Protocol
 from uuid import uuid4
 
+from codeagent.teams.scopes import normalize_scopes, scope_is_within, path_is_allowed
 from codeagent.events import RunEvent, TokenUsage, redact_payload, utc_now_iso
 from codeagent.runtime.data_paths import RuntimeDataPaths
 from codeagent.tasks import (
@@ -3907,10 +3908,9 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             if task is None:
                 raise RecordNotFoundError(f"Task not found: {attempt['task_id']}")
             task_metadata = _json_loads(task["metadata_json"], {})
-            user_approval_required = (
-                str(task_metadata.get("risk_level") or "low").strip().lower()
-                == "high"
-            )
+            # Code complexity changes review depth, not the user's authorization.
+            team_policy = self._team_row(connection, attempt["team_run_id"])
+            user_approval_required = bool(_json_loads(team_policy["metadata_json"], {}).get("manual_candidate_approval", False))
             if (
                 str(binding["base_commit"]) != str(base_commit)
                 or str(binding["head_commit"]) != str(worktree_head)
@@ -3928,11 +3928,11 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 and str(item["resource_kind"]) == "repository"
                 for item in leases
             )
-            if not repository_lease and any(
-                not _scope_is_within(item, scopes) for item in all_paths
-            ):
+            outside_paths = [item for item in all_paths if not path_is_allowed(item, scopes)]
+            if not repository_lease and outside_paths:
                 raise StorageConflictError(
-                    "Candidate contains files outside the approved write scope"
+                    "Candidate contains files outside the approved write scope: "
+                    + _json_dumps({"outside_paths": outside_paths, "approved_write_scopes": scopes})
                 )
             active = connection.execute(
                 """
@@ -4350,6 +4350,30 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         self._notify_activity()
         return self.get_candidate(candidate_id)
 
+    def release_risk_only_candidate_approvals(self, team_run_id):
+        """Upgrade pending legacy risk gates only while a Team is explicitly running.
+
+        Preserve user decisions and explicit manual policies; do not resume Teams.
+        """
+        with self._transaction(immediate=True) as connection:
+            team = self._team_row(connection, team_run_id)
+            if team["state"] != "running" or _json_loads(team["metadata_json"], {}).get("manual_candidate_approval"):
+                return
+            rows = connection.execute("SELECT * FROM candidates WHERE team_run_id=? AND user_approval_required=1 AND user_decision IS NULL AND status IN ('submitted','accepted')", (team_run_id,)).fetchall()
+            for row in rows:
+                attempt = connection.execute("SELECT * FROM task_attempts WHERE id=?", (row["attempt_id"],)).fetchone()
+                if attempt is None or attempt["result_unknown"] or attempt["state"] == "orphaned":
+                    continue
+                if row["status"] == "accepted":
+                    session = connection.execute("SELECT waiting_reason FROM agent_sessions WHERE id=?", (attempt["session_id"],)).fetchone()
+                    if session is None or session["waiting_reason"] != "user_candidate_approval":
+                        continue
+                connection.execute("UPDATE candidates SET user_approval_required=0 WHERE id=?", (row["id"],))
+                if row["status"] == "accepted":
+                    connection.execute("UPDATE task_attempts SET state='validating',updated_at=? WHERE id=? AND state='waiting' AND result_unknown=0", (utc_now_iso(), row["attempt_id"]))
+                    connection.execute("UPDATE agent_sessions SET waiting_reason='runtime_validation' WHERE current_attempt_id=? AND waiting_reason='user_candidate_approval'", (row["attempt_id"],))
+                self._append_team_event(connection, team, "team.candidate.approval_policy_updated", {"candidate_id": row["id"], "reason": "risk_level governs review, not candidate permission"})
+
     def decide_candidate_user_approval(
         self,
         candidate_id: str,
@@ -4359,7 +4383,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         reason: str,
         command_id: str,
     ) -> CandidateRecord:
-        """Record the separate user gate required by a high-risk Candidate."""
+        """Record the separate user gate required by an explicit approval policy."""
 
         normalized = str(decision).strip().lower()
         if normalized not in {"approve", "reject"}:
@@ -4383,7 +4407,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 )
             if str(candidate["status"]) != CandidateStatus.ACCEPTED.value:
                 raise InvalidStateTransitionError(
-                    "Candidate is not awaiting high-risk user approval"
+                    "Candidate is not awaiting explicit user approval"
                 )
             if candidate["user_decision"] is not None:
                 raise InvalidStateTransitionError(
@@ -9015,10 +9039,7 @@ def _team_task_resource_keys(metadata: Mapping[str, Any]) -> list[tuple[str, str
     write_scopes = metadata.get("write_scopes") or []
     if not isinstance(write_scopes, Sequence) or isinstance(write_scopes, str):
         raise ValueError("Task write_scopes must be a list")
-    for raw_scope in write_scopes:
-        scope = str(raw_scope).replace("\\", "/").strip().strip("/")
-        if not scope or any(part in {"", ".", ".."} for part in scope.split("/")):
-            raise ValueError(f"Invalid Task write scope: {raw_scope}")
+    for scope in normalize_scopes(write_scopes):
         result.append(("path", scope.casefold()))
     if task_kind == "code" and not result:
         result.append(("repository", "*"))
@@ -9034,13 +9055,7 @@ def _team_task_resource_keys(metadata: Mapping[str, Any]) -> list[tuple[str, str
 
 
 def _normalize_write_scopes(scopes: Sequence[str]) -> list[str]:
-    result: list[str] = []
-    for raw_scope in scopes:
-        scope = str(raw_scope).replace("\\", "/").strip().strip("/")
-        if not scope or any(part in {"", ".", ".."} for part in scope.split("/")):
-            raise ValueError(f"Invalid write scope: {raw_scope}")
-        result.append(scope)
-    return list(dict.fromkeys(result))
+    return normalize_scopes(scopes)
 
 
 def _normalize_risk_level(value: str) -> str:
@@ -9057,12 +9072,7 @@ def _risk_rank(value: str) -> int:
 
 
 def _scope_is_within(scope: str, approved_scopes: Sequence[str]) -> bool:
-    normalized = str(scope).replace("\\", "/").strip("/").casefold()
-    return any(
-        normalized == approved.casefold()
-        or normalized.startswith(approved.casefold().rstrip("/") + "/")
-        for approved in approved_scopes
-    )
+    return scope_is_within(scope, approved_scopes)
 
 
 def _attempt_scope_hash(
@@ -9097,11 +9107,8 @@ def _team_resources_overlap(
         return False
     if first_kind != "path":
         return first_key == second_key
-    first = first_key.rstrip("/")
-    second = second_key.rstrip("/")
-    return first == second or first.startswith(second + "/") or second.startswith(
-        first + "/"
-    )
+    # Existing lease keys may still contain /**; compare their covered paths.
+    return scope_is_within(first_key, [second_key]) or scope_is_within(second_key, [first_key])
 
 
 def _row_to_conversation(row: sqlite3.Row) -> ConversationRecord:

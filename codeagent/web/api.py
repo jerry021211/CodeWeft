@@ -1203,7 +1203,7 @@ def create_app(
             status_code=409,
             detail=(
                 "Candidate semantic review is performed by the Root/Lead. Only a "
-                "separate high-risk user approval is accepted here."
+                "separate policy-required user approval is accepted here."
             ),
         )
 
