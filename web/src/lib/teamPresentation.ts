@@ -51,13 +51,16 @@ export function teamExecutionState(team?: TeamSnapshot) {
   const recoveries = team?.recoveries ?? [];
   const manual = recoveries.filter(item => !item.automatic).length;
   const automatic = recoveries.length - manual;
-  return { working, manual, automatic,
+  const integrationBlocked = (team?.integrations ?? []).filter(op => ["validation_failed", "conflicted", "interrupted", "recovery_required"].includes(op.status)).length;
+  return { working, manual, automatic, integrationBlocked,
+    waitingIntegration: team?.team.state === "running" && integrationBlocked > 0 && working === 0,
     waitingRecovery: team?.team.state === "running" && manual > 0 && working === 0 };
 }
 export function teamStatusLabel(team: TeamSnapshot) {
   const progress = teamExecutionState(team);
   if (team.team.state === "running") {
     if (progress.waitingRecovery) return "团队等待恢复";
+    if (progress.waitingIntegration) return "团队等待集成问题处理";
     if (progress.manual) return "团队部分任务等待恢复";
     if (progress.automatic && !progress.working) return "团队正在检查恢复现场";
   }

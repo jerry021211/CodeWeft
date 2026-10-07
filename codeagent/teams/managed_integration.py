@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from codeagent.teams.candidates import CandidateService
+from codeagent.teams.validation import validate_checks, command_label, diagnose
 from codeagent.worktrees.manager import WorktreeError
 from codeagent.worktrees.snapshots import LocalGit, exclusive_file
 
@@ -54,28 +55,52 @@ class IntegrationService:
                 return self._delivery(git, manager, team)
             return None
 
-    def _commands(self, team, candidate=None):
+    def _available_tasks(self, team, candidate=None):
         ids = {c.task_id for c in self.repository.list_candidates(team.id)
                if c.team_integrated_revision is not None and not c.superseded_at}
+        ids.update(r.task.id for r in self.repository.list_task_resources(team.task_list_id)
+                   if r.task.metadata.get("kind", "analysis") == "analysis" and r.task.status.value == "completed")
         if candidate:
             ids.add(candidate.task_id)
+        return ids
+
+    def _commands(self, team, candidate=None):
+        ids = self._available_tasks(team, candidate)
         commands = ["git diff --check HEAD^ HEAD"]
         commands.extend(team.metadata.get("mandatory_validation_commands", []))
         plan = self.repository.get_team_plan_revision(team.id, team.active_plan_revision).plan
-        commands.extend(plan.get("integration_validation_commands", []))
+        # Legacy unscoped Team checks are final acceptance gates, not gates for
+        # each partial candidate. They are never dropped from final delivery.
+        if candidate is None:
+            commands.extend(plan.get("integration_validation_commands", []))
+        for check in validate_checks(plan):
+            ready = set(map(str, check.get("requires_tasks", []))) <= ids
+            if candidate is None and not ready:
+                raise WorktreeError(f"Required validation prerequisites are missing: {check['id']}")
+            if ready and (candidate is None or check["stage"] == "integration"):
+                commands.extend(check["steps"])
         for resource in self.repository.list_task_resources(team.task_list_id):
             if resource.task.id in ids:
                 commands.extend(resource.task.metadata.get("validation_commands", []))
-        if any(not isinstance(c, str) or not c.strip() for c in commands):
-            raise WorktreeError("Team validation commands must be non-empty strings")
-        return list(dict.fromkeys(commands))
+        # Keep structured steps and their working directories intact.
+        return list({command_label(c): c for c in commands}.values())
 
     def _begin(self, git, team, *, candidate=None):
         identifier = "integration_" + uuid4().hex
         path = git.root / team.id / "integration" / identifier
-        return self.repository.begin_team_integration(team.id, identifier=identifier,
+        op = self.repository.begin_team_integration(team.id, identifier=identifier,
             kind="candidate" if candidate else "delivery", candidate_id=candidate.id if candidate else None,
             worktree_path=str(path), commands=self._commands(team, candidate))
+        if candidate:
+            plan = self.repository.get_team_plan_revision(team.id, team.active_plan_revision).plan
+            ids = self._available_tasks(team, candidate)
+            pending = [{"id": c["id"], "reason": "等待最终交付" if c["stage"] == "delivery" else "等待所需任务集成",
+                        "requires_tasks": c.get("requires_tasks", [])}
+                       for c in validate_checks(plan) if c["stage"] == "delivery" or not set(map(str, c.get("requires_tasks", []))) <= ids]
+            if plan.get("integration_validation_commands"):
+                pending.append({"id": "final-acceptance", "reason": "所有任务集成后执行整体验收", "requires_tasks": []})
+            op = self.repository.update_team_integration(identifier, result={"pending_checks": pending})
+        return op
 
     def _integrate(self, git, manager, team, candidate):
         op = self._begin(git, team, candidate=candidate)
@@ -119,12 +144,15 @@ class IntegrationService:
         for command in op["commands"]:
             status, exit_code, output, duration = runner._run_validation(path, command)
             log = manager.write_artifact(op["team_run_id"], f"{op['id']}-{len(records)}.log", output)
-            records.append({"command": command, "status": status, "exit_code": exit_code,
+            records.append({"command": command_label(command), "status": status, "exit_code": exit_code,
                             "output_ref": log, "duration_ms": duration, "commit": op["trial_commit"]})
+            if status != "passed":
+                records[-1]["diagnostic"] = diagnose(status, output)
+                records[-1]["output_excerpt"] = output[-6000:]
             self.repository.update_team_integration(op["id"], validations=records)
             if status != "passed":
                 self.repository.update_team_integration(op["id"], status="recovery_required" if status == "timed_out" else "validation_failed",
-                    error=f"Combined validation {status}: {command}")
+                    error=f"Combined validation {status}: {command_label(command)}", result={**op.get("result", {}), "diagnostic": records[-1]["diagnostic"]})
                 return False
             if git.text("rev-parse", "HEAD", cwd=path) != op["trial_commit"] or git.tree(path) != expected:
                 self.repository.update_team_integration(op["id"], status="validation_failed",

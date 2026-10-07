@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 import { Bot, Check, CircleAlert, GitBranch, ShieldCheck, Users, X } from "lucide-react";
-import type { TaskRecord, TeamRecovery, TeamSnapshot } from "@/types/api";
+import type { TaskRecord, TeamSnapshot } from "@/types/api";
 import { cx, formatNumber, formatTime, prettyJson, tokenTotal } from "@/lib/utils";
 import { EmptyPanel, StatusDot } from "@/components/ui";
 import { TeamObserver } from "@/components/TeamObserver";
 import { api } from "@/lib/api";
 import { teamSessionGroups } from "@/lib/teamPresentation";
+import { RecoveryCard } from "@/components/TeamRecoveryCard";
+import { TeamDeliveryProgress } from "@/components/TeamDeliveryProgress";
 import { TeamSessions } from "@/components/TeamSessions";
 
 type Props = {
@@ -40,7 +42,6 @@ export function TeamPanel({
   const [reason, setReason] = useState("");
   const [observing, setObserving] = useState(false);
   const [targetRef, setTargetRef] = useState("HEAD");
-  const [deliveryAcknowledged, setDeliveryAcknowledged] = useState(false);
   const [integrationDiff, setIntegrationDiff] = useState<{ integration_head: string; diff: string; truncated: boolean }>();
   const [diffError, setDiffError] = useState("");
   const managed = team?.team.integration_mode === "managed";
@@ -131,7 +132,8 @@ export function TeamPanel({
                 {typeof pendingPlan.plan.shared_context === "string" && pendingPlan.plan.shared_context && (
                   <details className="mb-2 text-[10px] text-ink-muted"><summary className="cursor-pointer">公共约定（审批内容）</summary><p className="mt-1 whitespace-pre-wrap break-words">{pendingPlan.plan.shared_context}</p></details>
                 )}
-                {Array.isArray(pendingPlan.plan.integration_validation_commands) && pendingPlan.plan.integration_validation_commands.length > 0 && <details className="mb-2 text-[10px] text-ink-muted"><summary>组合验证命令（审批内容）</summary><pre className="mt-1 whitespace-pre-wrap">{pendingPlan.plan.integration_validation_commands.map(String).join("\n")}</pre></details>}
+                {Array.isArray(pendingPlan.plan.integration_validation_commands) && pendingPlan.plan.integration_validation_commands.length > 0 && <details className="mb-2 text-[10px] text-ink-muted"><summary>最终验收命令（所有成果到齐后执行）</summary><pre className="mt-1 whitespace-pre-wrap">{pendingPlan.plan.integration_validation_commands.map(String).join("\n")}</pre></details>}
+                {Array.isArray(pendingPlan.plan.validation_checks) && pendingPlan.plan.validation_checks.length > 0 && <details className="mb-2 text-xs text-ink-muted"><summary>分阶段验证安排与前置任务</summary><pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(pendingPlan.plan.validation_checks, null, 2)}</pre></details>}
                 <div className="mb-3 space-y-2">
                   {team.tasks.filter(({ task }) => !Array.isArray(pendingPlan.plan.tasks) || pendingPlan.plan.tasks.some((item) => item && typeof item === "object" && String(item.task_id) === task.id)).map(({ task }) => <TaskDetails key={task.id} task={task} />)}
                 </div>
@@ -139,9 +141,9 @@ export function TeamPanel({
               </DecisionCard>
             )}
             {highRiskApprovals.map((candidate) => (
-              <DecisionCard key={candidate.id} title={`高风险 Candidate · Task #${candidate.task_id}`} detail={candidate.summary}>
-                <div className="mb-2 text-[9px] text-ink-faint">{candidate.changed_files.length} 个变更文件{candidate.known_risks.length ? ` · ${candidate.known_risks.length} 项已知风险` : ""}</div>
-                <DecisionButtons busy={busy} disabled={!reason.trim()} positive="批准 Runtime 验证" negative="拒绝并返工" onPositive={() => requireReason(() => onCandidateApproval(candidate.id, "approve", reason.trim()))} onNegative={() => requireReason(() => onCandidateApproval(candidate.id, "reject", reason.trim()))} />
+              <DecisionCard key={candidate.id} title={`成果确认 · 任务 #${candidate.task_id}`} detail="当前团队启用了显式人工成果审批策略。查看下方成果说明后决定。">
+                <div className="mb-2 text-[9px] text-ink-faint">{new Set([...candidate.changed_files, ...candidate.untracked_files]).size} 个变更文件{candidate.known_risks.length ? ` · ${candidate.known_risks.length} 项成员说明` : ""}</div>
+                <DecisionButtons busy={busy} disabled={false} positive="继续自动验证" negative="拒绝并返工" onPositive={() => onCandidateApproval(candidate.id, "approve", reason.trim() || "用户同意继续自动验证")} onNegative={() => requireReason(() => onCandidateApproval(candidate.id, "reject", reason.trim()))} />
               </DecisionCard>
             ))}
           </div>
@@ -205,30 +207,12 @@ export function TeamPanel({
           <Heading icon={<Bot className="size-3.5" />} title="Root / Lead 审查队列" count={submittedAttemptPlans.length + reviewCandidates.length} />
           <div className="space-y-2 text-[9px] text-ink-muted">
             {submittedAttemptPlans.map((plan) => <div key={plan.id} className="rounded-xl border border-line p-3">Attempt Plan p{plan.revision} · {plan.summary}<div className="mt-1 text-ink-faint">等待 Root/Lead 自动审查</div></div>)}
-            {reviewCandidates.map((candidate) => <div key={candidate.id} className="rounded-xl border border-line p-3">Candidate · Task #{candidate.task_id} · {candidate.summary}<div className="mt-1 text-ink-faint">等待 Root/Lead 语义审查</div></div>)}
+            {reviewCandidates.map((candidate) => <div key={candidate.id} className="rounded-xl border border-line p-3">任务 #{candidate.task_id} · 成员已交付（说明见下方成果记录）<div className="mt-1 text-ink-faint">等待 Root/Lead 语义审查</div></div>)}
           </div>
         </section>
       )}
 
-      {managed && (team.integrations ?? []).length > 0 && <section>
-        <Heading icon={<GitBranch className="size-3.5" />} title="自动集成与本地回写" count={team.integrations?.length ?? 0} />
-        <div className="space-y-2">{team.integrations?.map((operation) => <div key={operation.id} className="rounded-xl border border-line p-3 text-[10px]">
-          <div className="font-semibold">{operation.kind === "delivery" ? "回写主项目" : "候选集成"} · {integrationLabel(operation.status)}</div>
-          {operation.error && <p className="mt-1 whitespace-pre-wrap break-words text-warning">{operation.error}</p>}
-          {operation.validations.map((v, i) => <div key={i} className="mt-1 break-words text-ink-muted">{v.command} · {v.status}</div>)}
-          {["conflicted", "validation_failed", "interrupted"].includes(operation.status) && onResolveIntegration && <>
-            <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="填写处理说明" className="mt-2 w-full rounded border border-line bg-surface px-2 py-1" />
-            <button disabled={busy || !reason.trim()} onClick={() => onResolveIntegration(operation.id, "retry", reason.trim())} className="mt-2 rounded bg-accent px-2 py-1 text-white disabled:opacity-40">重新验证与集成</button>
-            {operation.kind === "candidate" && <button disabled={busy || !reason.trim()} onClick={() => onResolveIntegration(operation.id, "repair", reason.trim())} className="ml-2 rounded border border-line px-2 py-1 disabled:opacity-40">安排原任务修复</button>}
-          </>}
-          {operation.status === "recovery_required" && <p className="mt-2 text-warning">结果需要检查，现场已保留：{operation.worktree_path}</p>}
-          {operation.status === "recovery_required" && onResolveIntegration && <div className="mt-2 space-y-2">
-            <label className="flex items-start gap-2"><input type="checkbox" checked={deliveryAcknowledged} onChange={(event) => setDeliveryAcknowledged(event.target.checked)} />我已检查保留现场并确认旧验证进程已停止；继续时仍会核对版本和文件。</label>
-            <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="填写检查说明" className="w-full rounded border border-line bg-surface px-2 py-1" />
-            <button disabled={busy || !deliveryAcknowledged || !reason.trim()} onClick={() => onResolveIntegration(operation.id, "resume", reason.trim())} className="rounded bg-accent px-2 py-1 text-white disabled:opacity-40">检查并恢复</button>
-          </div>}
-        </div>)}</div>
-      </section>}
+      <TeamDeliveryProgress team={team} busy={busy} onResolve={onResolveIntegration} />
 
       <TeamSessions team={team} />
 
@@ -245,8 +229,8 @@ export function TeamPanel({
         </div>
       </section>
 
-      <section>
-        <Heading icon={<GitBranch className="size-3.5" />} title="候选提交与 Worktree" count={team.candidates.length} />
+      <details>
+        <summary className="cursor-pointer text-xs text-ink-muted">提交、验证与工作目录明细</summary>
         <div className="space-y-2">
           {team.candidates.map((candidate) => (
             <div key={candidate.id} className="rounded-xl border border-line p-3 text-[9px]">
@@ -272,7 +256,7 @@ export function TeamPanel({
             </div>
           ))}
         </div>
-      </section>
+      </details>
 
       {team.manual_integration.commands.length > 0 && (
         <section>
@@ -334,10 +318,6 @@ function schedulingLabel(value: string): string {
   return labels[value] ?? value;
 }
 
-function integrationLabel(status: string) {
-  return ({ preparing: "试合并", validating: "组合验证", publishing: "发布版本", published: "已集成", applying: "正在回写", delivered: "已回写，待你本地测试", conflicted: "合并冲突", validation_failed: "验证失败", interrupted: "执行中断", recovery_required: "需要检查现场", superseded: "已安排重试或修复" } as Record<string, string>)[status] ?? status;
-}
-
 function Metric({ label, value }: { label: string; value: string }) {
   return <div><div className="text-ink-faint">{label}</div><div className="mt-0.5 truncate font-mono text-ink">{value}</div></div>;
 }
@@ -348,52 +328,6 @@ function DecisionCard({ title, detail, children }: { title: string; detail: stri
 
 function DecisionButtons({ busy, disabled, positive, negative, onPositive, onNegative }: { busy?: boolean; disabled?: boolean; positive: string; negative: string; onPositive: () => void; onNegative: () => void }) {
   return <div className="flex gap-2"><button type="button" disabled={busy || disabled} onClick={onPositive} className="rounded-lg bg-accent px-2.5 py-1.5 text-[9px] font-semibold text-white disabled:opacity-40">{positive}</button><button type="button" disabled={busy || disabled} onClick={onNegative} className="rounded-lg border border-line px-2.5 py-1.5 text-[9px] text-ink-muted disabled:opacity-40">{negative}</button></div>;
-}
-
-function RecoveryCard({ recovery, taskName, teammateName, busy, onResume }: { recovery: TeamRecovery; taskName?: string; teammateName?: string; busy?: boolean; onResume: (attemptId: string, reason: string, acknowledgeUnknownResult: boolean) => void }) {
-  const [reason, setReason] = useState("");
-  const [acknowledged, setAcknowledged] = useState(false);
-  if (recovery.automatic) return <div className="rounded-xl border border-line p-3 text-xs text-ink-muted" role="status">
-    Task #{recovery.task_id} · 正在自动检查恢复现场；若团队已暂停，将在继续执行后检查。
-  </div>;
-  const ready = recovery.recoverable && reason.trim() && (!recovery.result_unknown || acknowledged);
-  return (
-    <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 text-[9px]">
-      <div className="flex items-start gap-2">
-        <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-warning" />
-        <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-semibold text-ink">Task #{recovery.task_id}{taskName ? ` · ${taskName}` : ""}</div>
-          <div className="mt-1 text-ink-faint">Teammate：{teammateName || recovery.agent_id}</div>
-          <div className="mt-1 leading-4 text-ink-muted">{recovery.summary}</div>
-        </div>
-      </div>
-      <div className="mt-2 space-y-1 leading-4 text-ink-muted">
-        <div>工具：{recovery.tool_name || "未记录"} · {recovery.tool_executed ? "可能已执行" : "未执行或未确认执行"}</div>
-        {recovery.allowed_scopes.length > 0 && <div>允许范围：{recovery.allowed_scopes.join(", ")}</div>}
-        {recovery.outside_paths.length > 0 && <div className="text-warning">越界文件：{recovery.outside_paths.join(", ")}</div>}
-        {recovery.worktree_path && <div className="break-all font-mono text-ink-faint">Worktree：{recovery.worktree_path}</div>}
-        {recovery.blocking_checks.length > 0 && <div>待确认：{recovery.blocking_checks.map(recoveryCheckLabel).join("；")}</div>}
-        <div>恢复时Runtime会重新检查Plan、租约、Worktree绑定和实际Diff。</div>
-      </div>
-      <textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="填写已完成的人工检查或处理说明（必填）" className="mt-2 min-h-14 w-full resize-y rounded-lg border border-line bg-surface px-2.5 py-2 text-[9px] text-ink outline-none focus:border-accent" />
-      {recovery.result_unknown && (
-        <label className="mt-2 flex items-start gap-2 leading-4 text-warning">
-          <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} className="mt-0.5" />
-          <span>我已检查Worktree现状，并理解Runtime不会自动重放上一次写操作。</span>
-        </label>
-      )}
-      {!recovery.recoverable && <div className="mt-2 text-danger">该遗留记录当前不能直接恢复，请保留现场并取消或等待兼容恢复。</div>}
-      <button type="button" disabled={busy || !ready} onClick={() => onResume(recovery.attempt_id, reason.trim(), acknowledged)} className="mt-2 rounded-lg bg-accent px-2.5 py-1.5 text-[9px] font-semibold text-white disabled:opacity-40">重新检查并继续</button>
-    </div>
-  );
-}
-
-function recoveryCheckLabel(value: string): string {
-  const labels: Record<string, string> = {
-    unknown_result_acknowledgement_required: "确认未知写结果",
-    runtime_recheck_required: "等待Runtime重新校验现场",
-  };
-  return labels[value] ?? value;
 }
 
 function teamStatus(state: string): "running" | "warning" | "success" | "error" | "idle" {

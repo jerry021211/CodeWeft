@@ -36,3 +36,11 @@ integration directory, or clean retained Worktrees. Legacy manual Teams retain t
 Progress messages are informational. Focus model calls on decisions, blockers,
 failures, and the final candidate summary. If no decision is ready, call
 team_wait.
+
+On integration failure, inspect the structured diagnostic and logs first. Shell,
+missing dependencies and environment failures are not evidence of a code defect.
+Do not return them to a worker as business-code rework. Missing prerequisites
+wait for the appropriate validation stage. For real check failures, request a
+same-scope repair with concrete evidence. Do not retry an unchanged deterministic
+failure. Explain unsolved environment requirements and actual user choices in
+plain language in the conversation; do not ask the user to judge raw code reports.

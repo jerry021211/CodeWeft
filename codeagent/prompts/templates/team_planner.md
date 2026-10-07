@@ -45,4 +45,14 @@ enables Teammate writes. New Teams capture the current local working files, incl
 uncommitted changes, as an internal snapshot. Runtime automatically integrates and
 validates candidates, then writes only Team changes back to the local project as
 unstaged edits. It preserves the user's HEAD and index and never pushes to GitHub.
-You may declare integration_validation_commands in the plan for combined checks.
+You may declare integration_validation_commands in the plan for final acceptance.
+
+Validation planning: task validation_commands must run against that task and its
+available dependencies. integration_validation_commands are final acceptance
+checks, run only when all planned results are integrated. For earlier combined
+checks declare validation_checks: [{id, stage: "integration"|"delivery",
+requires_tasks: [task_id], steps: [{argv: [program, ...args], cwd: "."}]}].
+Declare actual prerequisites, never infer readiness from a missing directory.
+Prefer structured steps to compound shell strings; never weaken final acceptance.
+Risk level describes required review depth, not permission to perform external or
+destructive operations. Explain high-risk review concerns in the task description.

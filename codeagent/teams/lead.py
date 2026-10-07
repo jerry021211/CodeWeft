@@ -65,7 +65,20 @@ class LeadTeamPlanTool:
                             "integration_validation_commands": {
                                 "type": "array",
                                 "items": {"type": "string", "minLength": 1},
-                                "description": "Build and test commands run on every combined integration version and final local delivery.",
+                                "description": "Final acceptance commands run after all planned results are integrated and before local delivery. Use validation_checks for earlier checks with explicit prerequisites.",
+                            },
+                            "validation_checks": {
+                                "type": "array",
+                                "description": "Checks with explicit prerequisites. Integration checks run once required task results are integrated; delivery checks run before final local delivery. All checks are mandatory at delivery.",
+                                "items": {"type": "object", "properties": {
+                                    "id": {"type": "string"},
+                                    "stage": {"type": "string", "enum": ["integration", "delivery"]},
+                                    "requires_tasks": {"type": "array", "items": {"type": "string"}},
+                                    "steps": {"type": "array", "items": {"type": "object", "properties": {
+                                        "argv": {"type": "array", "items": {"type": "string"}},
+                                        "cwd": {"type": "string"}
+                                    }, "required": ["argv"]}}
+                                }, "required": ["id", "stage", "requires_tasks", "steps"]}
                             },
                             "shared_context": {
                                 "type": "string",
@@ -283,6 +296,8 @@ class LeadTeamPlanTool:
     ) -> dict[str, Any]:
         if not isinstance(plan, Mapping) or not plan:
             raise ValueError("Team Plan cannot be empty")
+        from codeagent.teams.validation import validate_checks
+        validate_checks(plan)
         shared_context = plan.get("shared_context", "")
         commands = plan.get("integration_validation_commands", [])
         if not isinstance(commands, list) or any(not isinstance(c, str) or not c.strip() for c in commands):

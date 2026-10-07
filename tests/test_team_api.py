@@ -390,6 +390,15 @@ class TeamApiTests(unittest.TestCase):
             expected_task_revision=task.revision,
             command_id="claim-recovery-api-task",
         )
+        execution = self.repository.begin_tool_execution(
+            attempt.id, tool_call_id="failed-submission", tool_name="team_submit_candidate",
+            risk="low", is_write=False, input={}, worktree_id=None,
+        )
+        self.repository.finish_tool_execution(
+            execution.id, status="failed",
+            error='StorageConflictError: Candidate contains files outside the approved write scope: '
+                  '{"outside_paths":["web/app.ts"],"approved_write_scopes":["server/**"]}',
+        )
         self.repository.pause_attempt_after_worker_exit(
             attempt.id,
             reason="protocol_incomplete",
@@ -402,6 +411,10 @@ class TeamApiTests(unittest.TestCase):
         self.assertEqual(recoveries[0]["attempt_id"], attempt.id)
         self.assertEqual(recoveries[0]["reason_code"], "protocol_incomplete")
         self.assertTrue(recoveries[0]["recoverable"])
+        self.assertIn("代码成果提交失败", recoveries[0]["summary"])
+        self.assertEqual(recoveries[0]["tool_status"], "failed")
+        self.assertIn("web/app.ts", recoveries[0]["tool_error"])
+        self.assertEqual(recoveries[0]["outside_paths"], ["web/app.ts"])
 
         resumed = self.client.post(
             f"/api/teams/{team_id}/attempts/{attempt.id}/resume",

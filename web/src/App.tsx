@@ -549,6 +549,8 @@ export default function App() {
           <ChatWorkspace planMode={planMode} planLocked={planningActive} onPlanModeChange={selectPlanMode}
             teams={teamsQuery.data} team={team} teamBusy={teamCommand.isPending}
             teamError={teamsQuery.error ? errorMessage(teamsQuery.error) : teamCommand.error ? errorMessage(teamCommand.error) : undefined}
+            onResumeAttempt={(attemptId, reason, acknowledgeUnknownResult) => teamCommand.mutate({ kind: "resume-attempt", attemptId, reason, acknowledgeUnknownResult })}
+            onResolveIntegration={(integrationId, action, reason) => teamCommand.mutate({ kind: "resolve-integration", integrationId, action, reason })}
             onPauseTeam={() => teamCommand.mutate({ kind: "pause", reason: "用户暂停团队，保留工作现场" })}
             onResumeTeam={() => teamCommand.mutate({ kind: "resume", reason: "用户检查并恢复团队" })}
             planningSnapshot={plansQuery.data} planBusy={planDecision.isPending || exitPlan.isPending}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import shutil
 import os
 import tempfile
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from codeagent.teams.validation import validate_step, portable_chain, decode_output, command_label
 from codeagent.runtime_platform import current_runtime_platform
 from codeagent.teams.models import CandidateRecord, CandidateStatus
 from codeagent.worktrees import WorktreeError, WorktreeManager
@@ -239,14 +241,46 @@ class CandidateService:
             raise WorktreeError("Candidate changed after review")
 
     def _run_validation(
-        self, cwd: Path, command: str
+        self, cwd: Path, command: str | dict[str, Any]
     ) -> tuple[str, int, str, int]:
         started = time.monotonic()
-        argv = (
-            ["git", "-C", str(cwd), "diff", "--check", "HEAD"]
-            if command == "git diff --check HEAD"
-            else current_runtime_platform().command_argv(command)
-        )
+        outputs = []
+        try:
+            validate_step(command)
+            chain = portable_chain(command) if isinstance(command, str) else None
+            steps = [{"argv": argv} for argv in chain] if chain else [command]
+            for step in steps:
+                step_cwd = cwd
+                if isinstance(step, dict):
+                    step_cwd = (cwd / step.get("cwd", ".")).resolve()
+                    step_cwd.relative_to(cwd.resolve())
+                    if not step_cwd.is_dir():
+                        raise FileNotFoundError(f"Validation working directory does not exist: {step_cwd}")
+                    argv = list(step["argv"])
+                    executable = shutil.which(argv[0])
+                    if executable is None:
+                        raise FileNotFoundError(f"Validation executable not found: {argv[0]}")
+                    argv[0] = executable
+                    if os.name == "nt" and executable.lower().endswith((".cmd", ".bat")):
+                        if any(any(c in arg for c in '&|<>^%!\r\n') for arg in argv):
+                            raise ValueError("Batch validation arguments contain shell metacharacters; use an explicit script")
+                        argv = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", subprocess.list2cmdline(argv)]
+                else:
+                    argv = (["git", "-C", str(cwd), "diff", "--check", "HEAD"]
+                            if step == "git diff --check HEAD" else current_runtime_platform().command_argv(step))
+                remaining = self.validation_timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    return "timed_out", 124, "\n".join(outputs) + "\nValidation time budget exhausted before next step", round((time.monotonic() - started) * 1000)
+                status, code, output, _ = self._run_validation_process(step_cwd, argv, timeout=remaining)
+                outputs.append(f"$ {command_label(step)}\n{output}")
+                if status != "passed":
+                    return status, code, "\n".join(outputs), round((time.monotonic() - started) * 1000)
+            return "passed", 0, "\n".join(outputs), round((time.monotonic() - started) * 1000)
+        except (OSError, ValueError) as exc:
+            return "failed", 1, "\n".join([*outputs, f"{type(exc).__name__}: {exc}"]), round((time.monotonic() - started) * 1000)
+
+    def _run_validation_process(self, cwd, argv, *, timeout=None):
+        started = time.monotonic()
         from codeagent.tools.bash import BashTool
         options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
         # Files avoid waiting forever for inherited stdout pipes when a timed
@@ -260,14 +294,14 @@ class CandidateService:
             )
             timed_out = False
             try:
-                proc.wait(timeout=self.validation_timeout)
+                proc.wait(timeout=self.validation_timeout if timeout is None else timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 cleaned = BashTool._stop_process(proc)
             stdout.seek(0)
             stderr.seek(0)
-            output = stdout.read().decode("utf-8", "replace")
-            errors = stderr.read().decode("utf-8", "replace")
+            output = decode_output(stdout.read())
+            errors = decode_output(stderr.read())
             if errors:
                 output += f"\n[stderr]\n{errors}"
             if timed_out:

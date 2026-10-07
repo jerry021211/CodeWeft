@@ -1505,7 +1505,7 @@ def _team_snapshot(
             item.to_dict() for item in messages
         ],
         "integration_checks": repository.list_manual_integration_checks(team_run_id),
-        "integrations": [integration_summary(r) for r in repository.list_team_integrations(team_run_id)],
+        "integrations": [_integration_view(r) for r in repository.list_team_integrations(team_run_id)],
         "usage": usage,
         "manual_integration": {
             "required": team.integration_mode != "managed",
@@ -1517,6 +1517,31 @@ def _team_snapshot(
             "automatic_merge": team.integration_mode == "managed",
         },
     }
+
+
+def _integration_view(record):
+    """Expose bounded failure evidence, including legacy journals, without writes."""
+    from codeagent.teams.validation import diagnose
+    view = integration_summary(record)
+    view["validations"] = [dict(v) for v in record.get("validations", [])]
+    for validation in view["validations"]:
+        if validation.get("status") == "passed":
+            continue
+        if not validation.get("output_excerpt"):
+            try:
+                path = Path(validation["output_ref"]).resolve()
+                artifacts = Path(record["worktree_path"]).resolve().parent.parent / "artifacts"
+                path.relative_to(artifacts)
+                with path.open("rb") as stream:
+                    stream.seek(0, 2)
+                    stream.seek(max(0, stream.tell() - 12000))
+                    validation["output_excerpt"] = stream.read().decode("utf-8", "replace")[-6000:]
+            except (OSError, ValueError, KeyError):
+                validation["output_excerpt"] = "日志暂时无法读取，工作现场仍保留。"
+        validation.setdefault("diagnostic", diagnose(validation["status"], validation["output_excerpt"]))
+        if not view["result"].get("diagnostic"):
+            view["result"]["diagnostic"] = validation["diagnostic"]
+    return view
 
 
 def _team_recoveries(
@@ -1547,7 +1572,7 @@ def _team_recoveries(
         "model_call_timeout": "本轮模型调用达到总时限；未执行迟到的工具调用，可检查并恢复",
         "scope_violation": "Worktree现场需要处理后重新检查",
         "unknown_write_result": "写操作结果未知，禁止自动重放",
-        "protocol_incomplete": "Teammate未完成规定的Team提交动作",
+        "protocol_incomplete": "成员已停止，但尚未成功提交代码成果或任务报告；工作现场已保留",
         "agent_iteration_limit": "Teammate达到本次最大迭代次数",
         "agent_runtime_failed": "模型运行失败后需要人工确认继续",
         "agent_result_ready": "旧版本worker已退出但Attempt尚未完成",
@@ -1573,14 +1598,28 @@ def _team_recoveries(
         if attempt.state.value not in {"waiting", "orphaned"}:
             continue
         executions = repository.list_tool_executions(attempt.id)
+        # A restart must not inherit an unrelated historical submission error.
+        relevant_executions = (
+            [item for item in executions if item.result_unknown]
+            if reason_code in {"service_restart", "unknown_write_result"}
+            else [item for item in executions if item.session_id == attempt.session_id]
+        )
         tool = next(
             (
                 item
-                for item in reversed(executions)
+                for item in reversed(relevant_executions)
                 if item.result_unknown or item.status in {"failed", "scope_violation"}
             ),
             None,
         )
+        if reason_code == "protocol_incomplete":
+            last_submission = next(
+                (item for item in reversed(relevant_executions)
+                 if item.tool_name in {"team_submit_candidate", "team_submit_report"}),
+                None,
+            )
+            if last_submission is not None and last_submission.status == "failed":
+                tool = last_submission
         scope_message = next(
             (
                 item
@@ -1591,12 +1630,28 @@ def _team_recoveries(
         )
         attempted = (
             str(scope_message.payload.get("attempted") or "")
-            if scope_message is not None
+            if scope_message is not None and reason_code == "scope_violation"
             else ""
         )
         outside_paths = [
             item.strip() for item in attempted.split(",") if item.strip()
         ]
+        submission_failed = bool(
+            reason_code == "protocol_incomplete" and tool is not None
+            and tool.tool_name == "team_submit_candidate" and tool.status == "failed"
+        )
+        if submission_failed:
+            # Older records have only a generic error; do not invent file names.
+            outside_paths = []
+            marker = "Candidate contains files outside the approved write scope: "
+            if marker in str(tool.error or ""):
+                try:
+                    details = json.loads(str(tool.error).split(marker, 1)[1])
+                    paths = details.get("outside_paths") if isinstance(details, dict) else None
+                    if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
+                        outside_paths = paths
+                except (ValueError, TypeError):
+                    pass
         blocking_checks = ["runtime_recheck_required"]
         if attempt.result_unknown:
             blocking_checks.insert(0, "unknown_result_acknowledgement_required")
@@ -1610,6 +1665,7 @@ def _team_recoveries(
                 "summary": (str((attempt.error or {}).get("recheck_error"))
                     if (attempt.error or {}).get("recheck_error") else
                     "服务重启后正在自动检查现场，无未完成的写操作" if (attempt.error or {}).get("auto_recoverable")
+                    else "代码成果提交失败，任务已暂停；本地修改仍保留在工作目录中" if submission_failed
                     else summaries.get(reason_code, reason_code)),
                 "recoverable": (
                     attempt.state.value == "waiting"
@@ -1621,6 +1677,8 @@ def _team_recoveries(
                 "result_unknown": attempt.result_unknown,
                 "tool_name": tool.tool_name if tool is not None else None,
                 "tool_call_id": tool.tool_call_id if tool is not None else None,
+                "tool_status": tool.status if tool is not None else None,
+                "tool_error": tool.error if tool is not None else None,
                 "tool_executed": bool(
                     tool
                     and (

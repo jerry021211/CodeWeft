@@ -10,9 +10,12 @@ const directory = mkdtempSync(join(tmpdir(), "codeagent-team-presentation-"));
 const bundle = join(directory, "team.cjs");
 await build({ stdin: { contents: `export * from './src/lib/teamPresentation'; export { api } from './src/lib/api';
 export { TeamConversation } from './src/components/TeamConversation';
+export { TeamPanel } from './src/components/TeamPanel';
+export { TeamDeliveryProgress } from './src/components/TeamDeliveryProgress';
+export { ComposerTeamStatus } from './src/components/ComposerTeamStatus';
 export { createElement } from 'react'; export { renderToStaticMarkup } from 'react-dom/server';`, resolveDir: resolve(".") },
   tsconfig: "tsconfig.app.json", bundle: true, platform: "node", format: "cjs", outfile: bundle });
-const { teamMembers, isTeamActive, teamStatusLabel, sessionProgress, api, TeamConversation, createElement, renderToStaticMarkup } = createRequire(import.meta.url)(bundle);
+const { teamMembers, isTeamActive, teamStatusLabel, sessionProgress, api, TeamConversation, TeamPanel, TeamDeliveryProgress, ComposerTeamStatus, createElement, renderToStaticMarkup } = createRequire(import.meta.url)(bundle);
 after(() => { unlinkSync(bundle); rmdirSync(directory); });
 
 function snapshot(state = "running") {
@@ -27,6 +30,24 @@ function event(seq, agent, type, payload) {
   return { id: `e${seq}`, seq, agent_id: agent, parent_agent_id: "lead", run_id: "planning-run", type,
     occurred_at: "2026-10-05T00:00:00Z", payload };
 }
+
+test("failed candidate recovery exposes the failure and offending files without claiming unknown execution", () => {
+  const team = { team: { id: "team", state: "running", base_commit: "base" }, usage: {},
+    agents: [], sessions: [], attempts: [], tasks: [], candidates: [], plans: [],
+    attempt_plans: [], worktrees: [], validation_runs: [], scheduling: [], messages: [],
+    manual_integration: { commands: [] },
+    recoveries: [{ attempt_id: "attempt", task_id: "1", agent_id: "a", reason_code: "protocol_incomplete",
+      summary: "代码成果提交失败，任务已暂停", recoverable: true, result_unknown: false,
+      tool_name: "team_submit_candidate", tool_status: "failed", tool_error: "Candidate outside approved scope",
+      tool_executed: false, allowed_scopes: ["server/**"], outside_paths: ["web/app.ts"], blocking_checks: [] }],
+  };
+  const html = renderToStaticMarkup(createElement(TeamPanel, { enabled: true, team }));
+  assert.match(html, /提交代码成果/);
+  assert.match(html, /查看失败原因/);
+  assert.match(html, /web\/app.ts/);
+  assert.match(html, /Candidate outside approved scope/);
+  assert.doesNotMatch(html, /未执行或未确认执行|执行结果待核实|我已检查Worktree现状/);
+});
 
 test("running Team does not inherit its completed planning run status", () => {
   const team = snapshot();
@@ -142,4 +163,44 @@ test("incremental activity reads use their cursor even when the parent run compl
     assert.equal(page.status, "completed");
     assert.match(urls[0], /after=50$/);
   } finally { globalThis.fetch = original; }
+});
+
+
+test("main conversation exposes task-specific failure logs and keeps long reports collapsed", () => {
+  const team = snapshot();
+  team.recoveries = []; team.scheduling = [];
+  team.candidates = [{ id: "candidate", task_id: "1", status: "committed", summary: "实现说明", changed_files: ["core.py"], untracked_files: ["core.py", "cli.py"], known_risks: ["外部连接尚未验证"] }];
+  team.integrations = [{ id: "operation", kind: "candidate", candidate_id: "candidate", status: "validation_failed",
+    result: { diagnostic: { category: "environment", summary: "验证命令无法启动", owner: "lead" } },
+    validations: [{ command: "python --version", status: "failed", exit_code: 1, output_excerpt: "FileNotFoundError: python" }] }];
+  const html = renderToStaticMarkup(createElement(TeamConversation, { team, onResolveIntegration: () => {} }));
+  assert.match(html, /任务 #1 · 实现订单事务/);
+  assert.match(html, /验证命令无法启动/);
+  assert.match(html, /FileNotFoundError: python/);
+  assert.match(html, /2 个文件/);
+  assert.match(html, /环境处理后重新验证/);
+  assert.doesNotMatch(html, /交给 Lead 安排修复/);
+  assert.match(html, /<details[^>]*><summary[^>]*>成果说明与审查记录/);
+  assert.doesNotMatch(html, /<details[^>]*open/);
+});
+
+test("composer labels blocked integration instead of presenting idle workers as running", () => {
+  const team = snapshot(); team.sessions = [];
+  team.integrations = [{ id: "failed", status: "validation_failed" }];
+  assert.equal(teamStatusLabel(team), "团队等待集成问题处理");
+  const html = renderToStaticMarkup(createElement(ComposerTeamStatus, { team }));
+  assert.match(html, /1 项检查需处理/);
+  assert.doesNotMatch(html, /等待调度、审查或集成/);
+  team.integrations[0].status = "superseded";
+  assert.equal(teamStatusLabel(team), "团队正在执行");
+});
+
+test("known recovery failures can be rechecked directly in the conversation", () => {
+  const team = snapshot(); team.scheduling = [];
+  team.recoveries = [{ attempt_id: "aa", task_id: "1", agent_id: "a", recoverable: true,
+    result_unknown: false, summary: "提交失败，需重新核验", allowed_scopes: ["**"], outside_paths: [], blocking_checks: [] }];
+  const html = renderToStaticMarkup(createElement(TeamConversation, { team, onResumeAttempt: () => {} }));
+  assert.match(html, /补充处理说明（选填）/);
+  assert.match(html, /重新检查并继续/);
+  assert.doesNotMatch(html, /填写现场核验说明（必填）/);
 });

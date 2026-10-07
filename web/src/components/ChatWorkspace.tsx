@@ -27,6 +27,8 @@ type Props = {
   teamError?: string;
   onPauseTeam?: () => void;
   onResumeTeam?: () => void;
+  onResumeAttempt?: (id: string, reason: string, acknowledge: boolean) => void;
+  onResolveIntegration?: import("@/components/TeamDeliveryProgress").ResolveIntegration;
   planningSnapshot?: PlanningSnapshot;
   planBusy?: boolean;
   planError?: string;
@@ -104,7 +106,9 @@ export function ChatWorkspace(props: Props) {
     {teamsByRun[id]?.map(team => <TeamConversation key={team.team.id} team={team} busy={props.teamBusy}
       error={team.team.id === props.team?.team.id ? props.teamError : undefined}
       onPause={team.team.id === props.team?.team.id ? props.onPauseTeam : undefined}
-      onResume={team.team.id === props.team?.team.id ? props.onResumeTeam : undefined} />)}
+      onResume={team.team.id === props.team?.team.id ? props.onResumeTeam : undefined}
+      onResolveIntegration={team.team.id === props.team?.team.id ? props.onResolveIntegration : undefined}
+      onResumeAttempt={team.team.id === props.team?.team.id ? props.onResumeAttempt : undefined} />)}
   </Fragment>;
   const hasPlans = Object.keys(plansByRun).length > 0 || Object.keys(teamsByRun).length > 0;
   const displayedTeam = props.team && (isTeamActive(props.team) || props.team.team.root_run_id === props.run?.runId) ? props.team : undefined;

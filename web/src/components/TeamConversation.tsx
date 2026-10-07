@@ -1,3 +1,5 @@
+import { RecoveryCard } from "@/components/TeamRecoveryCard";
+import { TeamDeliveryProgress, type ResolveIntegration } from "@/components/TeamDeliveryProgress";
 import { useMemo, useState } from "react";
 import { Bot, ChevronDown, CircleAlert, Users } from "lucide-react";
 import type { TeamSnapshot } from "@/types/api";
@@ -7,7 +9,7 @@ import { cx } from "@/lib/utils";
 import { Spinner, StatusDot } from "@/components/ui";
 import { ProcessStep } from "@/components/ThinkingProcess";
 
-export function TeamConversation({ team, busy, error, onPause, onResume }: { team: TeamSnapshot; busy?: boolean; error?: string; onPause?: () => void; onResume?: () => void }) {
+export function TeamConversation({ team, busy, error, onPause, onResume, onResolveIntegration, onResumeAttempt }: { team: TeamSnapshot; busy?: boolean; error?: string; onPause?: () => void; onResume?: () => void; onResolveIntegration?: ResolveIntegration; onResumeAttempt?: (id: string, reason: string, acknowledge: boolean) => void }) {
   const active = isTeamActive(team);
   const activity = useTeamActivity(team.team.id, team.team.root_run_id, active);
   const members = useMemo(() => teamMembers(team, activity.events), [team, activity.events]);
@@ -72,7 +74,12 @@ export function TeamConversation({ team, busy, error, onPause, onResume }: { tea
           return <li key={task.id}><span className="text-ink">{task.subject}</span><p className="mt-0.5 text-[11px]">{scheduling?.schedulable ? "等待空闲成员领取" : dependencies.length ? `等待依赖：${dependencies.join("、")}` : "等待调度条件满足"}</p></li>;
         })}</ul>
       </details>}
-      {attention && <p role="status" className="rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">团队需要你的处理，请在右侧“团队”面板查看审批或恢复事项。</p>}
+      <TeamDeliveryProgress team={team} busy={busy} onResolve={onResolveIntegration} />
+      {(team.recoveries ?? []).map(recovery => onResumeAttempt ? <RecoveryCard key={recovery.attempt_id} recovery={recovery}
+        taskName={team.tasks.find(t => t.task.id === recovery.task_id)?.task.subject}
+        teammateName={team.agents.find(a => a.id === recovery.agent_id)?.name} busy={busy} onResume={onResumeAttempt} />
+        : <p key={recovery.attempt_id} role="status" className="rounded-lg bg-warning/10 p-3 text-xs">{recovery.summary}</p>)}
+      {attention && !(team.recoveries ?? []).length && <p className="text-xs text-warning">团队配置了人工成果确认，请在团队面板查看成果说明后继续。</p>}
       {team.team.integration_mode === "managed" && <p className="flex items-center gap-2 px-2 pt-1 text-[11px] text-ink-faint"><StatusDot status={team.team.state === "completed" ? "success" : "idle"} />集成版本 C{team.team.integration_revision ?? 0} · 任务交付后仍需经过审查、集成与验证</p>}
     </div>
   </section>;

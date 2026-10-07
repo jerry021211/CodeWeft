@@ -249,6 +249,8 @@ class TeamIntegrationStorage:
             if not reason.strip():
                 raise ValueError("Resolution reason is required")
             if repair:
+                # Diagnostics guide the Lead; they are not authorization gates.
+                # A dependency error can still require a scoped manifest repair.
                 if not op["candidate_id"]:
                     raise StorageConflictError("Local delivery conflicts need local resolution before retry")
                 candidate = connection.execute("SELECT * FROM candidates WHERE id=?", (op["candidate_id"],)).fetchone()
@@ -278,5 +280,6 @@ class TeamIntegrationStorage:
             self._insert_team_message(connection, team=team, sender_type="runtime", recipient_type="lead",
                 recipient_agent_id=team["lead_agent_id"], recipient_generation=session["generation"],
                 message_type="VALIDATION_RESULT", payload={"candidate_id": "", "validation_run_id": identifier,
-                    "integration_id": identifier, "status": status, "summary": summary},
+                    "integration_id": identifier, "status": status, "summary": summary,
+                    "next_action": "Inspect validation logs with team_resolve_integration(action=inspect). Diagnose environment versus code failure before retry or repair."},
                 dedupe_key=dedupe_key, created_at=utc_now_iso(), priority="control")

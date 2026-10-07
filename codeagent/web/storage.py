@@ -7212,6 +7212,8 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
     ) -> None:
         # Old plans contain descriptive strings, not task references. Their actual
         # Task metadata is still checked at claim time; never infer write permission.
+        from codeagent.teams.validation import validate_checks
+        validate_checks(plan)
         shared_context = plan.get("shared_context", "")
         commands = plan.get("integration_validation_commands", [])
         if not isinstance(commands, list) or any(not isinstance(c, str) or not c.strip() for c in commands):

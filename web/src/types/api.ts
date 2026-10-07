@@ -280,6 +280,8 @@ export type TeamRecovery = {
   tool_name?: string | null;
   tool_call_id?: string | null;
   tool_executed: boolean;
+  tool_status?: string | null;
+  tool_error?: string | null;
   allowed_scopes: string[];
   outside_paths: string[];
   worktree_path?: string | null;
@@ -328,7 +330,9 @@ export type TeamSnapshot = {
     trial_commit?: string | null;
     worktree_path: string;
     error?: string | null;
-    validations: Array<{ command: string; status: string; output_ref: string }>;
+    validations: Array<{ command: string; status: string; output_ref: string; exit_code?: number;
+      output_excerpt?: string; diagnostic?: { category: string; owner: string; summary: string } }>;
+    result?: { diagnostic?: { category: string; owner: string; summary: string }; pending_checks?: Array<{ id: string; reason: string }> };
   }>;
   usage: TeamTokenUsage;
   manual_integration: {

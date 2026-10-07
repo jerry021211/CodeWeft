@@ -49,7 +49,7 @@ class ManagedIntegrationTests(unittest.TestCase):
         result = subprocess.run(["git", "-C", str(cwd or self.source), *args], capture_output=True, check=True)
         return result.stdout.decode("utf-8", "replace").strip()
 
-    def start(self, names=("A",), dependencies=None, commands=None):
+    def start(self, names=("A",), dependencies=None, commands=None, checks=None):
         self.tasks = {}
         for name in names:
             self.tasks[name] = self.repo.create_task(self.list_id, subject=name, description="Implement " + name,
@@ -61,7 +61,7 @@ class ManagedIntegrationTests(unittest.TestCase):
             task_list_id=self.list_id, base_commit=snapshot["commit"], integration_mode="managed", metadata=snapshot)
         plan = self.repo.create_team_plan_revision(self.team.id, plan={"tasks": [
             {"task_id": r.task.id, **r.task.metadata} for r in self.tasks.values()],
-            "integration_validation_commands": commands or []}, created_by=self.team.lead_agent_id, command_id="plan")
+            "integration_validation_commands": commands or [], "validation_checks": checks or []}, created_by=self.team.lead_agent_id, command_id="plan")
         self.repo.submit_team_plan_revision(self.team.id, plan.revision, command_id="submit")
         self.manager.ensure_baseline_ready(self.team.id)
         self.repo.decide_team_plan_revision(self.team.id, plan.revision, decision="approve", decided_by="user", reason="test", command_id="approve")
@@ -192,6 +192,37 @@ class ManagedIntegrationTests(unittest.TestCase):
         self.assertTrue((Path(binding.path) / "d.txt").exists())
         self.assertEqual(self.repo.get_team_run(self.team.id).integration_revision, 2)
 
+    def test_final_checks_wait_for_all_python_library_and_cli_results(self):
+        import sys
+        self.start(("Library", "CLI"), {"CLI": ["Library"]}, checks=[{
+            "id": "library-cli-contract", "stage": "integration", "requires_tasks": ["1", "2"],
+            "steps": [{"argv": [sys.executable, "-c", "from pathlib import Path; assert Path('core.py').exists() and Path('cli.py').exists()"]}],
+        }], commands=['python -c "raise SystemExit(9)"'])
+        self.candidate("Library", {"core.py": "VALUE = 1\n"})
+        first = self.integrate()
+        self.assertEqual(first["status"], "published", first)
+        self.assertEqual(len(first["result"]["pending_checks"]), 2)
+        self.candidate("CLI", {"cli.py": "from core import VALUE\n"})
+        second = self.integrate()
+        self.assertEqual(second["status"], "published", second)
+        self.assertTrue(any("core.py" in v["command"] for v in second["validations"]))
+        delivery = self.integrate()
+        self.assertEqual(delivery["status"], "validation_failed", delivery)
+        self.assertFalse((self.source / "core.py").exists())
+        self.assertEqual(self.repo.get_team_run(self.team.id).integration_revision, 2)
+
+    def test_failed_combined_prerequisite_check_does_not_publish_new_version(self):
+        import sys
+        self.start(("A", "B"), checks=[{"id": "both", "stage": "integration", "requires_tasks": ["1", "2"],
+            "steps": [{"argv": [sys.executable, "-c", "raise SystemExit(3)"]}]}])
+        self.candidate("A", {"a.txt": "A\n"})
+        self.assertEqual(self.integrate()["status"], "published")
+        self.candidate("B", {"b.txt": "B\n"})
+        failed = self.integrate()
+        self.assertEqual(failed["status"], "validation_failed")
+        self.assertEqual(failed["result"]["diagnostic"]["category"], "check_failed")
+        self.assertEqual(self.repo.get_team_run(self.team.id).integration_revision, 1)
+
     def test_conflict_preserves_head_and_lead_can_request_replacement(self):
         self.start(("A", "D"))
         self.candidate("A", {"base.txt": "A\n"})
@@ -207,7 +238,7 @@ class ManagedIntegrationTests(unittest.TestCase):
         self.assertEqual(self.integrate()["status"], "published")
 
     def test_combined_validation_failure_does_not_publish(self):
-        self.start(commands=['python -c "raise SystemExit(1)"'])
+        self.start(checks=[{"id": "failure", "stage": "integration", "requires_tasks": [], "steps": ['python -c "raise SystemExit(1)"']}])
         self.candidate("A", {"a.txt": "A\n"})
         failed = self.integrate()
         self.assertEqual(failed["status"], "validation_failed", failed)
@@ -216,7 +247,7 @@ class ManagedIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.integrate())
 
     def test_validation_mutation_cannot_be_published(self):
-        self.start(commands=['python -c "from pathlib import Path; Path(\'a.txt\').write_text(\'changed\')"'])
+        self.start(checks=[{"id": "mutation", "stage": "integration", "requires_tasks": [], "steps": ['python -c "from pathlib import Path; Path(\'a.txt\').write_text(\'changed\')"']}])
         self.candidate("A", {"a.txt": "A\n"})
         failed = self.integrate()
         self.assertEqual(failed["status"], "validation_failed", failed)
@@ -401,7 +432,7 @@ class ManagedIntegrationTests(unittest.TestCase):
             supervisor.stop()
 
     def test_validation_timeout_retains_output_and_requires_explicit_recovery(self):
-        self.start(commands=['python -c "import time; print(123, flush=True); time.sleep(2)"'])
+        self.start(checks=[{"id": "timeout", "stage": "integration", "requires_tasks": [], "steps": ['python -c "import time; print(123, flush=True); time.sleep(2)"']}])
         self.candidate("A", {"a.txt": "A\n"})
         self.service.validation_timeout = 0.5
         result = self.integrate()

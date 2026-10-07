@@ -24,7 +24,9 @@ def integration_summary(record: JsonObject) -> JsonObject:
     value = dict(record)
     result = record.get("result", {})
     value["result"] = {"changed_files": [f["path"] for f in result.get("files", [])],
-                       "source_head": result.get("source_head")}
+                       "source_head": result.get("source_head"),
+                       "diagnostic": result.get("diagnostic"),
+                       "pending_checks": result.get("pending_checks", [])}
     return value
 
 
