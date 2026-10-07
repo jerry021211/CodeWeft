@@ -425,6 +425,12 @@ export type Approval = {
   input?: unknown;
   status: "pending" | "allowed" | "denied" | "expired";
   requested_at?: string;
+  resolved_at?: string | null;
+  expires_at?: string | null;
+  agent_id?: string | null;
+  attempt_id?: string | null;
+  team_run_id?: string | null;
+  tool_call_id?: string | null;
 };
 
 export type TodoStatus = "pending" | "in_progress" | "completed";

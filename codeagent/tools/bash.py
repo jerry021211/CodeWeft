@@ -77,6 +77,10 @@ class BashTool:
                             f"待执行的 {self.runtime_platform.shell_name} 命令"
                         ),
                     },
+                    "description": {
+                        "type": "string",
+                        "description": "用用户能理解的语言简述本次命令的目的和预期影响，供审批展示。不得将未核实的影响描述为安全保证。",
+                    },
                     "timeout": {
                         "type": "integer",
                         "description": f"超时秒数，默认 120，上限 {self.max_timeout_seconds:g}。",
@@ -112,7 +116,7 @@ class BashTool:
             raise ExecutionStopped("budget_exceeded:active_time")
         return remaining
 
-    def run(self, command: str, timeout: int = 120) -> str:
+    def run(self, command: str, timeout: int = 120, description: str = "") -> str:
         self._check_runtime()
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
             return parameter_error("timeout 必须是有限的正数秒数。", "bash:timeout:positive_finite")

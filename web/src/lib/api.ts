@@ -214,6 +214,10 @@ export const api = {
     return request<Run | { status: string }>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
   },
 
+  listApprovalHistory(conversationId: string, signal?: AbortSignal) {
+    return request<Approval[]>(`/conversations/${encodeURIComponent(conversationId)}/approvals?include_resolved=true`, { signal });
+  },
+
   listPendingApprovals(conversationId: string, signal?: AbortSignal) {
     return request<Approval[]>(`/conversations/${encodeURIComponent(conversationId)}/approvals`, { signal });
   },

@@ -880,9 +880,15 @@ def create_app(
         return repo.answer_user_question(run_id, question_id, body.answer)
 
     @app.get("/api/conversations/{conversation_id}/approvals", response_model=list[ApprovalResponse])
-    def pending_approvals(conversation_id: str) -> list[ApprovalResponse]:
+    def pending_approvals(conversation_id: str, include_resolved: bool = False) -> list[ApprovalResponse]:
         _require_conversation(repo, conversation_id)
-        return [_approval_response(item) for item in scheduler.list_pending_approvals(conversation_id)]
+        pending = scheduler.list_pending_approvals(conversation_id)
+        if not include_resolved:
+            return [_approval_response(item) for item in pending]
+        # Keep every live request visible, plus the most recent durable decisions.
+        recent = repo.list_approvals(conversation_id=conversation_id, recent_first=True)
+        records = {item.id: item for item in [*recent, *pending]}
+        return [_approval_response(item) for item in sorted(records.values(), key=lambda item: (item.created_at, item.id))]
 
     @app.post(
         "/api/runs/{run_id}/approvals/{approval_id}",
@@ -1803,6 +1809,11 @@ def _approval_response(record: ApprovalRecord) -> ApprovalResponse:
         decision=record.decision,
         requested_at=record.created_at,
         resolved_at=record.resolved_at,
+        expires_at=record.expires_at,
+        agent_id=record.metadata.get("agent_id"),
+        attempt_id=record.metadata.get("attempt_id"),
+        team_run_id=record.metadata.get("team_run_id"),
+        tool_call_id=record.tool_call_id,
     )
 
 

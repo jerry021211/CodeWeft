@@ -264,6 +264,11 @@ class ApprovalResponse(ApiModel):
     decision: str | None = None
     requested_at: str | None = None
     resolved_at: str | None = None
+    expires_at: str | None = None
+    agent_id: str | None = None
+    attempt_id: str | None = None
+    team_run_id: str | None = None
+    tool_call_id: str | None = None
 
 
 class RuntimeConfigResponse(ApiModel):

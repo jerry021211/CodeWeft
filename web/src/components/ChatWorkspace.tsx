@@ -12,7 +12,7 @@ import { conversationPlans } from "@/lib/conversationPlans";
 import { PlanMessage } from "@/components/PlanMessage";
 import { TeamConversation } from "@/components/TeamConversation";
 import { isTeamActive, teamStatusLabel, teamExecutionState } from "@/lib/teamPresentation";
-import { ApprovalBanner } from "@/components/ApprovalBanner";
+import { ApprovalTimeline } from "@/components/ApprovalBanner";
 import { EmptyPanel, IconButton, Spinner, StatusDot } from "@/components/ui";
 import { UserQuestions } from "@/components/UserQuestions";
 import { ComposerToolbar } from "@/components/ComposerToolbar";
@@ -49,8 +49,9 @@ type Props = {
   draft: string;
   sending?: boolean;
   cancelling?: boolean;
-  approval?: Approval;
-  approvalBusy?: boolean;
+  approvals?: Approval[];
+  approvalBusyIds?: string[];
+  approvalErrors?: Record<string, string>;
   runtimeModel?: string | null;
   teamLeadActive?: boolean;
   teamEnabled?: boolean;
@@ -70,7 +71,7 @@ type Props = {
   onDraft: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
-  onApprovalDecision: (decision: ApprovalDecision) => void;
+  onApprovalDecision: (approval: Approval, decision: ApprovalDecision) => void;
   onOpenLeft: () => void;
   onOpenRight: () => void;
   onOpenMcp: () => void;
@@ -110,7 +111,9 @@ export function ChatWorkspace(props: Props) {
       onResolveIntegration={team.team.id === props.team?.team.id ? props.onResolveIntegration : undefined}
       onResumeAttempt={team.team.id === props.team?.team.id ? props.onResumeAttempt : undefined} />)}
   </Fragment>;
-  const hasPlans = Object.keys(plansByRun).length > 0 || Object.keys(teamsByRun).length > 0;
+  const hasPlans = Object.keys(plansByRun).length > 0 || Object.keys(teamsByRun).length > 0 || Boolean(props.approvals?.length);
+  const pendingApprovals = props.approvals?.filter(a => a.status === "pending") ?? [];
+  const approvalKey = props.approvals?.map(a => `${a.id}:${a.status}`).join("|");
   const displayedTeam = props.team && (isTeamActive(props.team) || props.team.team.root_run_id === props.run?.runId) ? props.team : undefined;
   const teamPresentationKey = props.teams?.map(team => `${team.team.id}:${team.team.state}:${team.sessions.length}`).join("|");
   const awaitingPlan = props.planningSnapshot?.plans.some(plan => plan.id === props.planningSnapshot?.state.active_plan_id
@@ -121,7 +124,7 @@ export function ChatWorkspace(props: Props) {
   useEffect(() => {
     if (!following) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [props.messages, answer?.text, props.run?.actionOrder.length, following, planPresentationKey, teamPresentationKey]);
+  }, [props.messages, answer?.text, props.run?.actionOrder.length, following, planPresentationKey, teamPresentationKey, approvalKey]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -199,6 +202,7 @@ export function ChatWorkspace(props: Props) {
                   message={{ id: `${props.run?.runId}:stream`, conversation_id: "", role: "assistant", content: answer.text, created_at: props.run?.events.at(-1)?.occurred_at ?? "", status: answer.streaming ? "streaming" : "complete" }}
                 />
               )}
+              <ApprovalTimeline approvals={props.approvals ?? []} teams={props.teams} busyIds={props.approvalBusyIds} errors={props.approvalErrors} onDecision={props.onApprovalDecision} />
               {props.run?.error && <div className="rounded-xl border border-danger/25 bg-danger/5 px-4 py-3 text-xs text-danger">{props.run.error}</div>}
               {props.teamError && <div role="alert" className="rounded-xl border border-warning/25 bg-warning/5 px-4 py-3 text-xs text-warning">团队状态暂时无法更新：{props.teamError}</div>}
             </div>
@@ -213,13 +217,7 @@ export function ChatWorkspace(props: Props) {
         <div className="mx-auto max-w-4xl space-y-2">
           {props.planPanel}
           {props.run && <UserQuestions key={props.run.runId} runId={props.run.runId} active={active && props.run.status !== "cancelling"} />}
-          {props.approval && (
-            <ApprovalBanner
-              approval={props.approval}
-              busy={props.approvalBusy}
-              onDecision={props.onApprovalDecision}
-            />
-          )}
+          {pendingApprovals.length > 0 && <button type="button" onClick={() => document.getElementById(`approval-${pendingApprovals[0]?.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })} className="flex w-full items-center justify-between rounded-xl border border-warning/25 bg-surface px-4 py-2.5 text-xs text-ink-muted"><span role="status" aria-live="polite">有 {pendingApprovals.length} 项操作等待你的确认</span><span className="text-accent">查看授权请求 ↑</span></button>}
           <div className="rounded-[22px] border border-line-strong/70 bg-surface shadow-[0_2px_12px_rgb(0_0_0/0.025)] transition-colors focus-within:border-ink-faint/50">
           <ComposerTeamStatus team={props.team} busy={props.teamBusy} error={props.teamError} onPause={props.onPauseTeam} onResume={props.onResumeTeam} />
           {props.onAttachments && <AttachmentPicker ref={attachmentRef} hideTrigger value={props.attachments ?? []} onChange={props.onAttachments} onBusyChange={setAttachmentsReading} disabled={attachmentDisabled} />}

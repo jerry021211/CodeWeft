@@ -20,3 +20,12 @@ export function pendingApprovalOptions(conversationId?: string) {
 export function usePendingApprovals(conversationId?: string) {
   return useQuery(pendingApprovalOptions(conversationId));
 }
+
+export function conversationApprovalOptions(conversationId?: string) {
+  return { ...pendingApprovalOptions(conversationId),
+    queryFn: ({ signal }: { signal: AbortSignal }) => api.listApprovalHistory(conversationId!, signal) };
+}
+
+export function useConversationApprovals(conversationId?: string) {
+  return useQuery(conversationApprovalOptions(conversationId));
+}

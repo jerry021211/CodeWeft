@@ -16,7 +16,7 @@ import { archivedConversationsKey } from "@/components/ArchivedConversationsPane
 import { workspaceKey } from "@/lib/conversationGroups";
 import { useSidebarStore } from "@/store/sidebarStore";
 import { useRunEvents } from "@/hooks/useRunEvents";
-import { approvalsKey, usePendingApprovals } from "@/hooks/usePendingApprovals";
+import { approvalsKey, useConversationApprovals } from "@/hooks/usePendingApprovals";
 import { useConversationActivity } from "@/hooks/useConversationActivity";
 import { useRunStore } from "@/store/runStore";
 
@@ -75,9 +75,9 @@ export default function App() {
     filters: { mutationKey: ["cancel-run"], status: "pending" },
     select: (mutation) => mutation.state.variables as string,
   });
-  const decidingRuns = useMutationState({
+  const decidingApprovals = useMutationState({
     filters: { mutationKey: ["decide-approval"], status: "pending" },
-    select: (mutation) => (mutation.state.variables as { targetRunId: string }).targetRunId,
+    select: (mutation) => (mutation.state.variables as { approvalId: string }).approvalId,
   });
   const sending = Boolean(selectedId && sendingConversations.includes(selectedId));
   const [readOnlyChoices, setReadOnlyChoices] = useState<Record<string, boolean>>({});
@@ -242,8 +242,8 @@ export default function App() {
   const ensureRun = useRunStore((state) => state.ensureRun);
   const setRunStatus = useRunStore((state) => state.setRunStatus);
   const resolveApproval = useRunStore((state) => state.resolveApproval);
-  const approvalsQuery = usePendingApprovals(selectedId);
-  const pendingApproval = approvalsQuery.data?.find(item => item.status === "pending");
+  const approvalsQuery = useConversationApprovals(selectedId);
+  const [approvalErrors, setApprovalErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!taskListId) return;
@@ -392,12 +392,16 @@ export default function App() {
   const decideApproval = useMutation({
     mutationKey: ["decide-approval"],
     mutationFn: ({ targetRunId, approvalId, decision }: { conversationId: string; targetRunId: string; approvalId: string; decision: ApprovalDecision }) => api.decideApproval(targetRunId, approvalId, decision),
+    onMutate: variables => setApprovalErrors(current => ({ ...current, [variables.approvalId]: "" })),
     onSuccess: async (approval, variables) => {
       resolveApproval(variables.targetRunId, approval.id, approval.status);
       await queryClient.cancelQueries({ queryKey: approvalsKey(variables.conversationId) });
-      queryClient.setQueryData<Approval[]>(approvalsKey(variables.conversationId), current => current?.filter(item => item.id !== approval.id));
+      queryClient.setQueryData<Approval[]>(approvalsKey(variables.conversationId), current => current?.map(item => item.id === approval.id ? approval : item));
     },
-    onError: (error) => showError(error, setNotice),
+    onError: (error, variables) => {
+      setApprovalErrors(current => ({ ...current, [variables.approvalId]: error.message }));
+      showError(error, setNotice);
+    },
     onSettled: (_data, _error, variables) => queryClient.invalidateQueries({ queryKey: approvalsKey(variables.conversationId) }),
   });
 
@@ -562,7 +566,7 @@ export default function App() {
               error={planDecision.error ? errorMessage(planDecision.error) : undefined}
               onDecision={(plan, decision) => selectedId && planDecision.mutate({ conversationId: selectedId, plan, decision })}
               onExit={() => selectedId && exitPlan.mutate(selectedId)} onRevise={() => setDraft("请修改方案：")} />}
-            onOpenSettings={openModelSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approval={pendingApproval} approvalBusy={Boolean(pendingApproval && decidingRuns.includes(pendingApproval.run_id))} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(decision) => selectedId && pendingApproval && decideApproval.mutate({ conversationId: selectedId, targetRunId: pendingApproval.run_id, approvalId: pendingApproval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpWorkspaceChoice(selectedConversation?.workspace ?? runtimeQuery.data?.workspace); setMcpMessage(undefined); window.location.hash = "settings/mcp"; }} onToggleTheme={cycleTheme} />
+            onOpenSettings={openModelSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approvals={approvalsQuery.data ?? []} approvalBusyIds={decidingApprovals} approvalErrors={approvalErrors} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(approval, decision) => selectedId && decideApproval.mutate({ conversationId: selectedId, targetRunId: approval.run_id, approvalId: approval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpWorkspaceChoice(selectedConversation?.workspace ?? runtimeQuery.data?.workspace); setMcpMessage(undefined); window.location.hash = "settings/mcp"; }} onToggleTheme={cycleTheme} />
         </div>
 
         <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>

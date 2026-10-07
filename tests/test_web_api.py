@@ -172,6 +172,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(next(item for item in response.json() if item["id"] == worker.id)["run_id"], planning.id)
         self.client.post(f"/api/runs/{planning.id}/approvals/{worker.id}", json={"decision": "allow"})
         self.assertEqual([item["id"] for item in self.client.get(url).json()], [lead.id])
+        history = self.client.get(url + "?include_resolved=true").json()
+        self.assertEqual({item["id"]: item["status"] for item in history}, {old.id: "expired", worker.id: "allowed", lead.id: "pending"})
         self.assertEqual(self.client.get('/api/conversations/missing/approvals').status_code, 404)
 
     def test_activity_history_is_paginated_without_text_delta_replay(self):

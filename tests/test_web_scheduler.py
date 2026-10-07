@@ -609,6 +609,9 @@ class SchedulerTests(unittest.TestCase):
             approvals = scheduler.list_pending_approvals(self.conversation.id)
             time.sleep(0.005)
         self.assertEqual(len(approvals), 1)
+        self.assertEqual(approvals[0].metadata["agent_id"], "worker")
+        self.assertEqual(approvals[0].metadata["attempt_id"], "attempt")
+        self.assertEqual(approvals[0].metadata["team_run_id"], "team")
         # Even a live root job sharing the planning Run must not steal this ID.
         with patch.dict(scheduler._controls, {run.id: SimpleNamespace(broker=WaitingPermissionBroker())}):
             scheduler.resolve_approval(run.id, approvals[0].id, "allow")

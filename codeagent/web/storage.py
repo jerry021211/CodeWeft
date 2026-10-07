@@ -8358,6 +8358,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         conversation_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
+        recent_first: bool = False,
     ) -> list[ApprovalRecord]:
         conditions: list[str] = []
         parameters: list[Any] = []
@@ -8378,7 +8379,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             rows = self._connection.execute(
                 f"""
                 SELECT * FROM approvals {where}
-                ORDER BY created_at, id LIMIT ?
+                ORDER BY created_at {'DESC' if recent_first else 'ASC'}, id {'DESC' if recent_first else 'ASC'} LIMIT ?
                 """,
                 parameters,
             ).fetchall()

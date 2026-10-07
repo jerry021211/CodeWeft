@@ -298,7 +298,9 @@ class RunScheduler:
                 tool_input=public_input,
                 reason=request.reason,
                 expires_at=_approval_expiry(request.timeout),
-                metadata={"summary": _approval_summary(request.tool_name, public_input)},
+                tool_call_id=request.tool_use_id,
+                metadata={"summary": _approval_summary(request.tool_name, public_input),
+                          "agent_id": request.agent_id or emitter.context.agent_id},
             )
             approval_emitter = emitter.with_agent(agent_id=request.agent_id,
                 parent_agent_id=emitter.context.agent_id if request.agent_id != emitter.context.agent_id else None) if request.agent_id else emitter
@@ -566,7 +568,10 @@ class RunScheduler:
                     tool_input=public_input,
                     reason=request.reason,
                     expires_at=_approval_expiry(request.timeout),
-                    metadata={"summary": _approval_summary(request.tool_name, public_input)},
+                    tool_call_id=request.tool_use_id,
+                    metadata={"summary": _approval_summary(request.tool_name, public_input),
+                              "agent_id": request.agent_id or emitter.context.agent_id,
+                              "team_run_id": team_id, "attempt_id": attempt_id},
                 )
                 self._team_approval_brokers[persisted.id] = broker
             emitter.emit(
