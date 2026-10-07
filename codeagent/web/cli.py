@@ -1,4 +1,4 @@
-"""Command-line launcher for the local CodeAgent workbench."""
+"""Command-line launcher for the local CodeWeft workbench."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the local CodeAgent web UI.")
+    parser = argparse.ArgumentParser(description="Run the local CodeWeft web UI.")
     parser.add_argument("--host", default="127.0.0.1", choices=("127.0.0.1", "localhost"))
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--workspace", type=Path, default=Path.cwd())

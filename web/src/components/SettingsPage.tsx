@@ -40,7 +40,7 @@ export function SettingsPage({ section, onClose, theme, onThemeChange, onSaved, 
         <div className="mt-5 hidden px-2 text-lg font-semibold tracking-tight md:block">设置</div>
       </div>
       <nav aria-label="设置分类" className="grid grid-cols-2 gap-1 px-3 pb-3 sm:flex sm:overflow-x-auto md:flex-col md:px-4">{sections.map(item => <a key={item.id} href={`#settings/${item.id}`} aria-current={section === item.id ? "page" : undefined} className={cx("flex shrink-0 items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition", section === item.id ? "bg-surface-strong font-medium text-ink" : "text-ink-muted hover:bg-surface-strong/60 hover:text-ink")}><item.icon className="size-4" />{item.label}</a>)}</nav>
-      <p className="mt-auto hidden px-7 py-6 text-xs text-ink-faint md:block">CodeAgent · 本地工作台</p>
+      <p className="mt-auto hidden px-7 py-6 text-xs text-ink-faint md:block">CodeWeft · 本地工作台</p>
     </aside>
     <main className="min-h-0 min-w-0 flex-1 overflow-y-auto" aria-label="设置内容">
       <div className="mx-auto max-w-4xl px-5 py-7 sm:px-8 md:py-12 lg:px-12">

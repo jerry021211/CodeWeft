@@ -145,7 +145,7 @@ export function ChatWorkspace(props: Props) {
       <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-surface/85 px-3 backdrop-blur-xl sm:px-5">
         <IconButton label="打开会话列表" onClick={props.onOpenLeft} className="lg:hidden"><Menu className="size-4" /></IconButton>
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-ink">{props.title || "CodeAgent"}</h1>
+          <h1 className="truncate text-sm font-semibold text-ink">{props.title || "CodeWeft"}</h1>
           <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-ink-muted">
             {displayedTeam ? <>
               <StatusDot status={displayedTeam.team.state === "failed" ? "error" : displayedTeam.team.state === "completed" ? "success" : displayedTeam.team.state === "running" && !teamProgress.waitingRecovery ? "running" : "warning"}
@@ -228,7 +228,7 @@ export function ChatWorkspace(props: Props) {
             onKeyDown={onKeyDown}
             rows={1}
             disabled={busy}
-            placeholder={props.team?.team.state === "pausing" ? "团队正在暂停，等待当前操作退出…" : teamPaused ? "团队已暂停，点击“继续执行”后可发送指令…" : props.cancelling || props.run?.status === "cancelling" ? "正在停止当前运行…" : active ? "Agent 正在工作…" : teamProgress.waitingRecovery ? "团队等待恢复，请先查看恢复事项；也可向 Lead 补充说明…" : props.team?.team.state === "running" ? "团队正在执行，可向 Lead 补充指令…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeAgent 你想做什么…"}
+            placeholder={props.team?.team.state === "pausing" ? "团队正在暂停，等待当前操作退出…" : teamPaused ? "团队已暂停，点击“继续执行”后可发送指令…" : props.cancelling || props.run?.status === "cancelling" ? "正在停止当前运行…" : active ? "Agent 正在工作…" : teamProgress.waitingRecovery ? "团队等待恢复，请先查看恢复事项；也可向 Lead 补充说明…" : props.team?.team.state === "running" ? "团队正在执行，可向 Lead 补充指令…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeWeft 你想做什么…"}
             aria-label="发送消息"
             className="scrollbar-thin min-h-[76px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />

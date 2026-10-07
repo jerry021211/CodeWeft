@@ -1,4 +1,4 @@
-"""FastAPI transport for the local CodeAgent coding cockpit.
+"""FastAPI transport for the local CodeWeft coding cockpit.
 
 This module contains HTTP/SSE concerns only.  The scheduler owns execution and
 the repository owns persistence, so either can be replaced by tests or future
@@ -229,7 +229,7 @@ def create_app(
                         repo.close()
 
     app = FastAPI(
-        title="CodeAgent Coding Cockpit",
+        title="CodeWeft Coding Workbench",
         version="0.1.0",
         docs_url=None,
         redoc_url=None,
@@ -315,7 +315,7 @@ def create_app(
         host = (request.url.hostname or "").casefold()
         if host not in _LOOPBACK_HOSTS:
             response: Response = JSONResponse(
-                {"detail": "CodeAgent Web only accepts loopback hosts."},
+                {"detail": "CodeWeft Web only accepts loopback hosts."},
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
         elif not _origin_is_allowed(request.headers.get("origin")):

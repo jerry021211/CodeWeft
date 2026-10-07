@@ -34,11 +34,11 @@ test("an empty archive stops without extra requests", async t => {
 
 test("an older backend cannot expose active chats as archived", async t => {
   t.mock.method(globalThis, "fetch", async () => Response.json([{ id: "active", archived_at: null }]));
-  await assert.rejects(api.listArchivedConversations(), /重启 CodeAgent/);
+  await assert.rejects(api.listArchivedConversations(), /重启 CodeWeft/);
 });
 
 test("an older backend ignoring pagination cannot cause an infinite request loop", async t => {
   const fetch = t.mock.method(globalThis, "fetch", async () => Response.json(page));
-  await assert.rejects(api.listArchivedConversations(), /重启 CodeAgent/);
+  await assert.rejects(api.listArchivedConversations(), /重启 CodeWeft/);
   assert.equal(fetch.mock.callCount(), 2);
 });

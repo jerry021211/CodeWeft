@@ -42,7 +42,7 @@ from codeagent.web.storage import SQLiteRepository
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the codeagent multi-provider agent.")
+    parser = argparse.ArgumentParser(description="Run the CodeWeft multi-provider coding agent.")
     parser.add_argument("--attach", action="append", default=[], metavar="PATH", help="Attach an image, PDF, UTF-8 text, WAV or MP3; repeat for multiple files.")
     parser.add_argument(
         "query",
@@ -262,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
             print_run_result(result, stream=stream)
             return 1 if is_execution_failure(result.stop_reason) else 0
 
-        print("codeagent interactive mode. Type /read-only on or /read-only off to change permissions; q, quit, or exit to stop.")
+        print("CodeWeft interactive mode. Type /read-only on or /read-only off to change permissions; q, quit, or exit to stop.")
         while True:
             try:
                 user_input = input("[read-only] > " if agent.read_only else "> ").strip()

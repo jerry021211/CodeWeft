@@ -139,7 +139,7 @@ export const api = {
     for (let offset = 0; ; offset += 100) {
       const page = unwrapList(await request<ApiList<Conversation>>(`/conversations?archived_only=true&limit=100&offset=${offset}`, { signal }));
       if (page.some(item => !item.archived_at) || (page.length > 0 && page.every(item => seen.has(item.id)))) {
-        throw new Error("归档接口尚未更新，请重启 CodeAgent 后端后重试。");
+        throw new Error("归档接口尚未更新，请重启 CodeWeft 后端后重试。");
       }
       for (const item of page) seen.add(item.id);
       conversations.push(...page);

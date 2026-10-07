@@ -459,7 +459,7 @@ export default function App() {
     mutationFn: (server: SaveMcpServer) => api.saveMcpServer(server),
     onSuccess: (config) => {
       queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
-      setMcpMessage(config.restart_required ? "配置已保存。请重启 CodeAgent 后使用。" : "配置已保存，后续任务会加载新工具；当前任务继续使用原连接。");
+      setMcpMessage(config.restart_required ? "配置已保存。请重启 CodeWeft 后使用。" : "配置已保存，后续任务会加载新工具；当前任务继续使用原连接。");
     },
   });
 
@@ -467,7 +467,7 @@ export default function App() {
     mutationFn: ({ workspace, name }: { workspace: string; name: string }) => api.deleteMcpServer(workspace, name),
     onSuccess: (config) => {
       queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
-      setMcpMessage(config.restart_required ? "配置已删除。请重启 CodeAgent。" : "配置已删除，后续任务使用新配置；当前任务继续使用原连接。");
+      setMcpMessage(config.restart_required ? "配置已删除。请重启 CodeWeft。" : "配置已删除，后续任务使用新配置；当前任务继续使用原连接。");
     },
   });
 

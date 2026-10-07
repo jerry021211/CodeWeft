@@ -153,7 +153,7 @@ export function ModelSettingsPage({ onClose, onSaved, embedded = false }: { onCl
             </fieldset>
           </section>
         </div>}
-        <p className="mt-5 text-xs leading-6 text-ink-faint">配置保存在本机 CodeAgent 数据目录，优先于环境变量；密钥不会回显到页面。获取模型列表仅读取列表；测试连接会实际调用所选模型，不会保存或修改配置。</p>
+        <p className="mt-5 text-xs leading-6 text-ink-faint">配置保存在本机 CodeWeft 数据目录，优先于环境变量；密钥不会回显到页面。获取模型列表仅读取列表；测试连接会实际调用所选模型，不会保存或修改配置。</p>
       </div>
     </div>
     <footer className="shrink-0 border-t border-line bg-surface"><div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-8">

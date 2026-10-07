@@ -48,7 +48,7 @@ export function ConversationSidebar(props: Props) {
             <Bot className="size-4" />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold tracking-tight">CodeAgent</div>
+            <div className="truncate text-sm font-semibold tracking-tight">CodeWeft</div>
             <div className="mt-0.5 text-[10px] text-sidebar-muted/70">本地工作台</div>
           </div>
         </div>
