@@ -44,6 +44,7 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
         HealthResponse,
         McpConfigResponse,
         McpServerResponse,
+        McpServerActionRequest,
         ManualIntegrationRequest,
         IntegrationResolutionRequest,
         MessageResponse,
@@ -76,6 +77,8 @@ from codeagent.web.models import (
     RunRecord,
 )
 from codeagent.mcp import delete_mcp_server, load_mcp_document, save_mcp_server
+from codeagent.mcp.config import load_mcp_servers
+from codeagent.mcp.trust import McpTrustStore, server_fingerprint
 from codeagent.memory import MemoryAccessController
 from codeagent.web.storage import (
     ACTIVE_RUN_STATUSES,
@@ -167,6 +170,8 @@ def create_app(
         ) from exc
     assert repo is not None
     assert scheduler is not None
+    mcp_trust = McpTrustStore(data_paths.root / 'state' / 'mcp-trust.db')
+    mcp_config_lock = threading.RLock()
 
     static_root = _static_root(static_dir)
     session_token = secrets.token_urlsafe(32)
@@ -443,13 +448,19 @@ def create_app(
             entries=[entry.to_dict() for entry in listing.entries],
         )
 
+    def mcp_view(selected, config_path, *, restart_required=False):
+        read_states = getattr(scheduler, 'mcp_states', None)
+        states = read_states(str(selected)) if callable(read_states) else {}
+        return _mcp_config_response(selected, config_path, restart_required=restart_required,
+                                    trust=mcp_trust, states=states)
+
     @app.get("/api/mcp/servers", response_model=McpConfigResponse)
     def list_mcp_servers(
         workspace: str = Query(max_length=4096),
     ) -> McpConfigResponse:
         selected = workspace_catalog.resolve(workspace)
         config_path = _mcp_config_path(runtime_env, selected)
-        return _mcp_config_response(selected, config_path)
+        return mcp_view(selected, config_path)
 
     @app.post(
         "/api/mcp/servers",
@@ -478,9 +489,19 @@ def create_app(
                 "url": body.url,
                 "headers": body.headers,
             }
-        save_mcp_server(config_path, body.name, server)
-        reloaded = _reload_mcp_runtime(scheduler, selected)
-        return _mcp_config_response(
+        server.update(startup_timeout=body.startup_timeout, call_timeout=body.call_timeout)
+        with mcp_config_lock:
+            if body.fingerprint:
+                current_mcp_server(selected, body.name, body.fingerprint)
+            existing = load_mcp_document(config_path).get('mcpServers', {}).get(body.name, {})
+            existing = existing if isinstance(existing, dict) else {}
+            for key in ('env', 'headers'):
+                if key in server and server[key] is None:
+                    server[key] = existing.get(key, {})
+            mcp_trust.revoke(selected, body.name)
+            save_mcp_server(config_path, body.name, server)
+            reloaded = _reload_mcp_runtime(scheduler, selected)
+        return mcp_view(
             selected,
             config_path,
             restart_required=not reloaded,
@@ -496,14 +517,52 @@ def create_app(
     ) -> McpConfigResponse:
         selected = workspace_catalog.resolve(workspace)
         config_path = _mcp_config_path(runtime_env, selected)
-        if not delete_mcp_server(config_path, server_name):
-            raise RecordNotFoundError(f"MCP server not found: {server_name}")
-        reloaded = _reload_mcp_runtime(scheduler, selected)
-        return _mcp_config_response(
+        with mcp_config_lock:
+            if not delete_mcp_server(config_path, server_name):
+                raise RecordNotFoundError(f"MCP server not found: {server_name}")
+            mcp_trust.revoke(selected, server_name)
+            reloaded = _reload_mcp_runtime(scheduler, selected)
+        return mcp_view(
             selected,
             config_path,
             restart_required=not reloaded,
         )
+
+    def current_mcp_server(selected, name, fingerprint):
+        config_path = _mcp_config_path(runtime_env, selected)
+        server = next((item for item in load_mcp_servers(config_path) if item.name == name), None)
+        if server is None:
+            raise RecordNotFoundError(f'MCP server not found: {name}')
+        if server.config_error:
+            raise ValueError(server.config_error)
+        if server_fingerprint(server) != fingerprint:
+            raise HTTPException(status_code=409, detail='MCP 配置已变化，请刷新并重新确认。')
+        return config_path, server
+
+    @app.post('/api/mcp/servers/{server_name}/trust', response_model=McpConfigResponse)
+    def trust_mcp_server(server_name: str, body: McpServerActionRequest):
+        selected = workspace_catalog.resolve(body.workspace)
+        with mcp_config_lock:
+            config_path, server = current_mcp_server(selected, server_name, body.fingerprint)
+            if body.approved:
+                mcp_trust.approve(selected, server)
+            else:
+                mcp_trust.revoke(selected, server_name)
+            reloaded = _reload_mcp_runtime(scheduler, selected)
+        return mcp_view(selected, config_path, restart_required=not reloaded)
+
+    @app.post('/api/mcp/servers/{server_name}/connect', response_model=McpConfigResponse)
+    def connect_mcp_server(server_name: str, body: McpServerActionRequest):
+        selected = workspace_catalog.resolve(body.workspace)
+        with mcp_config_lock:
+            config_path, server = current_mcp_server(selected, server_name, body.fingerprint)
+            if not mcp_trust.is_trusted(selected, server):
+                raise HTTPException(status_code=403, detail='请先确认并信任此服务配置。')
+        connect = getattr(scheduler, 'connect_mcp', None)
+        if not callable(connect):
+            raise HTTPException(status_code=503, detail='当前运行时不支持连接 MCP 服务。')
+        connect(str(selected), server_name)
+        return mcp_view(selected, config_path)
 
     @app.get(
         "/api/conversations/{conversation_id}",
@@ -1886,22 +1945,27 @@ def _mcp_config_response(
     config_path: Path,
     *,
     restart_required: bool = False,
+    trust: McpTrustStore | None = None,
+    states: dict | None = None,
 ) -> McpConfigResponse:
-    payload = load_mcp_document(config_path)
     servers: list[McpServerResponse] = []
-    for name, raw_value in payload.get("mcpServers", {}).items():
-        raw = dict(raw_value)
-        transport = "http" if raw.get("url") else "stdio"
+    for server in load_mcp_servers(config_path):
+        trusted = bool(trust and trust.is_trusted(workspace, server))
+        fingerprint = server_fingerprint(server)
+        runtime = (states or {}).get(server.name, {})
+        if runtime.get('fingerprint') != fingerprint:
+            runtime = {}
+        server_status = ('error' if server.config_error else
+                         'awaiting_trust' if not trusted else runtime.get('status', 'not_connected'))
         servers.append(
             McpServerResponse(
-                name=name,
-                transport=transport,
-                command=str(raw.get("command", "")),
-                args=[str(item) for item in raw.get("args", [])],
-                cwd=str(raw["cwd"]) if raw.get("cwd") else None,
-                url=str(raw.get("url", "")),
-                env_keys=sorted(str(key) for key in raw.get("env", {})),
-                header_keys=sorted(str(key) for key in raw.get("headers", {})),
+                name=server.name, transport='stdio' if server.transport == 'stdio' else 'http',
+                command=server.command, args=list(server.args), cwd=str(server.cwd) if server.cwd else None,
+                url=server.url, env_keys=sorted(server.env), header_keys=sorted(server.headers),
+                trusted=trusted, fingerprint=fingerprint, status=server_status,
+                tool_count=runtime.get('tool_count', 0) if trusted else 0,
+                error=server.config_error or runtime.get('error'),
+                startup_timeout=server.startup_timeout, call_timeout=server.call_timeout,
             )
         )
     return McpConfigResponse(

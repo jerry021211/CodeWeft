@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,10 @@ class McpServerConfig:
     cwd: Path | None = None
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    startup_timeout: float = 15.0
+    call_timeout: float = 60.0
+    config_error: str = ""
+    resolved: bool = False
 
 
 def load_mcp_servers(path: str | Path) -> list[McpServerConfig]:
@@ -30,27 +35,45 @@ def load_mcp_servers(path: str | Path) -> list[McpServerConfig]:
     payload = load_mcp_document(config_path)
     servers: list[McpServerConfig] = []
     for name, raw in payload.get("mcpServers", {}).items():
-        data: dict[str, Any] = dict(raw)
-        transport = str(data.get("type") or ("http" if data.get("url") else "stdio"))
-        cwd = Path(data["cwd"]) if data.get("cwd") else None
-        if cwd is not None and not cwd.is_absolute():
-            cwd = config_path.parent / cwd
-        servers.append(
-            McpServerConfig(
-                name=name,
-                transport=transport,
-                command=str(data.get("command", "")),
-                args=tuple(str(item) for item in data.get("args", [])),
-                env={str(key): str(value) for key, value in data.get("env", {}).items()},
-                cwd=cwd,
-                url=str(data.get("url", "")),
-                headers={
-                    str(key): str(value)
-                    for key, value in data.get("headers", {}).items()
-                },
-            )
-        )
+        try:
+            servers.append(parse_mcp_server(name, raw, config_path))
+        except (ValueError, TypeError, AttributeError):
+            servers.append(McpServerConfig(name=name, transport="stdio", config_error="Invalid MCP server configuration"))
     return servers
+
+
+def parse_mcp_server(name: str, raw: Any, config_path: Path) -> McpServerConfig:
+    if not isinstance(raw, dict):
+        raise ValueError("MCP server must be an object")
+    data = raw
+    transport = str(data.get("type") or ("http" if data.get("url") else "stdio"))
+    if transport not in {"stdio", "http", "streamable-http"}:
+        raise ValueError("Unsupported MCP transport")
+    if not isinstance(data.get("args", []), list):
+        raise ValueError("MCP args must be an array")
+    if transport == 'stdio' and not data.get('command'):
+        raise ValueError("MCP command is required")
+    if transport != 'stdio' and not os.path.expandvars(str(data.get('url', ''))).startswith(('https://', 'http://')):
+        raise ValueError("MCP HTTP URL is required")
+    startup_timeout = float(data.get('startup_timeout', 15))
+    call_timeout = float(data.get('call_timeout', 60))
+    if not (0 < startup_timeout <= 300 and 0 < call_timeout <= 3600):
+        raise ValueError("Invalid MCP timeout")
+    cwd = Path(data["cwd"]) if data.get("cwd") else None
+    if cwd is not None and not cwd.is_absolute():
+        cwd = config_path.parent / cwd
+    return McpServerConfig(
+        name=name,
+        transport=transport,
+        command=str(data.get("command", "")),
+        args=tuple(str(item) for item in data.get("args", [])),
+        env={str(key): str(value) for key, value in data.get("env", {}).items()},
+        cwd=cwd,
+        url=str(data.get("url", "")),
+        headers={str(key): str(value) for key, value in data.get("headers", {}).items()},
+        startup_timeout=startup_timeout,
+        call_timeout=call_timeout,
+    )
 
 
 def load_mcp_document(path: str | Path) -> dict[str, Any]:

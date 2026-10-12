@@ -289,10 +289,19 @@ class SaveMcpServerRequest(ApiModel):
     transport: Literal["stdio", "http"]
     command: str = Field(default="", max_length=4096)
     args: list[str] = Field(default_factory=list)
-    env: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] | None = None
     cwd: str | None = Field(default=None, max_length=4096)
     url: str = Field(default="", max_length=8192)
-    headers: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] | None = None
+    fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    startup_timeout: float = Field(default=15, gt=0, le=300)
+    call_timeout: float = Field(default=60, gt=0, le=3600)
+
+
+class McpServerActionRequest(ApiModel):
+    workspace: str = Field(min_length=1, max_length=4096)
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approved: bool = False
 
 
 class McpServerResponse(ApiModel):
@@ -304,6 +313,13 @@ class McpServerResponse(ApiModel):
     url: str = ""
     env_keys: list[str] = Field(default_factory=list)
     header_keys: list[str] = Field(default_factory=list)
+    trusted: bool = False
+    fingerprint: str = ""
+    status: str = "awaiting_trust"
+    tool_count: int = 0
+    error: str | None = None
+    startup_timeout: float = 15
+    call_timeout: float = 60
 
 
 class McpConfigResponse(ApiModel):

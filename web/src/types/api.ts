@@ -374,6 +374,13 @@ export type McpServer = {
   url: string;
   env_keys: string[];
   header_keys: string[];
+  trusted: boolean;
+  fingerprint: string;
+  status: "awaiting_trust" | "not_connected" | "connecting" | "connected" | "disconnected" | "error";
+  tool_count: number;
+  error?: string | null;
+  startup_timeout: number;
+  call_timeout: number;
 };
 
 export type McpConfig = {
@@ -384,6 +391,7 @@ export type McpConfig = {
 };
 
 export type SaveMcpServer = {
+  fingerprint?: string;
   workspace: string;
   name: string;
   transport: McpTransport;
@@ -393,6 +401,8 @@ export type SaveMcpServer = {
   cwd?: string;
   url?: string;
   headers?: Record<string, string>;
+  startup_timeout?: number;
+  call_timeout?: number;
 };
 
 export type WorkspaceEntry = {

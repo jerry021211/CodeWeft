@@ -235,6 +235,7 @@ export default function App() {
     queryKey: ["mcp-servers", mcpWorkspace],
     queryFn: () => api.getMcpConfig(mcpWorkspace!),
     enabled: mcpOpen && Boolean(mcpWorkspace),
+    refetchInterval: mcpOpen ? 5000 : false,
   });
 
   const runId = selectedId ? selectedConversation?.active_run_id ?? runIds[selectedId] ?? selectedConversation?.latest_run_id ?? undefined : undefined;
@@ -473,7 +474,7 @@ export default function App() {
     mutationFn: (server: SaveMcpServer) => api.saveMcpServer(server),
     onSuccess: (config) => {
       queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
-      setMcpMessage(config.restart_required ? "配置已保存。请重启 CodeWeft 后使用。" : "配置已保存，后续任务会加载新工具；当前任务继续使用原连接。");
+      setMcpMessage("配置已保存。请核对服务信息并信任此配置，再连接服务。");
     },
   });
 
@@ -481,7 +482,19 @@ export default function App() {
     mutationFn: ({ workspace, name }: { workspace: string; name: string }) => api.deleteMcpServer(workspace, name),
     onSuccess: (config) => {
       queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
-      setMcpMessage(config.restart_required ? "配置已删除。请重启 CodeWeft。" : "配置已删除，后续任务使用新配置；当前任务继续使用原连接。");
+      setMcpMessage("服务配置已删除，后续调用已停用；已发送的远端操作可能仍在执行。");
+    },
+  });
+
+  const mcpAction = useMutation({
+    mutationFn: ({ name, fingerprint, action, approved }: { name: string; fingerprint: string; action: "trust" | "connect"; approved?: boolean }) =>
+      api.mcpServerAction(mcpWorkspace!, name, fingerprint, action, approved),
+    onSuccess: (config, variables) => {
+      queryClient.setQueryData<McpConfig>(["mcp-servers", config.workspace], config);
+      const server = config.servers.find(item => item.name === variables.name);
+      setMcpMessage(variables.action === "trust"
+        ? variables.approved ? "已信任此配置。可以连接服务，或在下一次任务开始时自动连接。" : "已撤销信任，后续工具调用已停用。"
+        : server?.status === "connected" ? `已连接 ${variables.name}，发现 ${server.tool_count} 个工具。` : "服务未能连接，请查看下方状态提示。");
     },
   });
 
@@ -548,13 +561,16 @@ export default function App() {
         }}
         onDelete={conversation => deleteConversation.mutateAsync(conversation)}
         mcpPanel={<div className="space-y-5">
-          <label className="block text-sm font-medium">项目<select aria-label="MCP 配置项目" value={mcpWorkspace ?? ""} disabled={saveMcpServer.isPending || deleteMcpServer.isPending} onChange={event => { setMcpWorkspaceChoice(event.target.value); setMcpMessage(undefined); saveMcpServer.reset(); deleteMcpServer.reset(); }} className="mt-2 block h-10 w-full rounded-xl border border-line bg-surface px-3 text-xs font-normal">{mcpWorkspaces.map(path => <option key={path} value={path}>{path}</option>)}</select></label>
+          <label className="flex flex-col gap-2 rounded-xl border border-line bg-surface px-4 py-3 sm:flex-row sm:items-center"><span className="shrink-0 text-xs font-medium text-ink-muted">当前项目</span><select aria-label="MCP 配置项目" value={mcpWorkspace ?? ""} disabled={saveMcpServer.isPending || deleteMcpServer.isPending || mcpAction.isPending} onChange={event => { setMcpWorkspaceChoice(event.target.value); setMcpMessage(undefined); saveMcpServer.reset(); deleteMcpServer.reset(); mcpAction.reset(); }} className="min-w-0 flex-1 rounded-lg bg-surface px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-accent/30">{mcpWorkspaces.map(path => <option key={path} value={path}>{path}</option>)}</select></label>
           {!mcpWorkspace && <p className="text-sm text-ink-muted">请先新建项目，再配置 MCP 插件。</p>}
           <McpConfigModal key={mcpWorkspace} embedded open workspace={mcpWorkspace} config={mcpQuery.data}
             loading={mcpQuery.isLoading} saving={saveMcpServer.isPending}
             deleting={deleteMcpServer.isPending ? deleteMcpServer.variables?.name : undefined}
-            error={mcpQuery.error ? errorMessage(mcpQuery.error) : saveMcpServer.error ? errorMessage(saveMcpServer.error) : deleteMcpServer.error ? errorMessage(deleteMcpServer.error) : undefined}
-            message={mcpMessage} onSave={server => { setMcpMessage(undefined); saveMcpServer.mutate(server); }}
+            error={mcpQuery.error ? errorMessage(mcpQuery.error) : saveMcpServer.error ? errorMessage(saveMcpServer.error) : deleteMcpServer.error ? errorMessage(deleteMcpServer.error) : mcpAction.error ? errorMessage(mcpAction.error) : undefined}
+            message={mcpMessage} onSave={async server => { setMcpMessage(undefined); await saveMcpServer.mutateAsync(server); }}
+            actionName={mcpAction.isPending ? mcpAction.variables?.name : undefined}
+            refreshing={mcpQuery.isFetching} onRefresh={() => void mcpQuery.refetch()}
+            onAction={(name, fingerprint, action, approved) => { setMcpMessage(undefined); mcpAction.mutate({ name, fingerprint, action, approved }); }}
             onDelete={name => mcpWorkspace && deleteMcpServer.mutate({ workspace: mcpWorkspace, name })}
             onClose={() => { window.location.hash = ""; }} />
         </div>} /> : <>

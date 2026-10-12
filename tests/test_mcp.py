@@ -114,7 +114,10 @@ server.run()
                 ),
                 encoding="utf-8",
             )
-            router = McpRouter(config_path)
+            from codeagent.mcp.trust import McpTrustStore
+            trust = McpTrustStore(root / 'runtime' / 'trust.db')
+            trust.approve(root, load_mcp_servers(config_path)[0])
+            router = McpRouter(config_path, trust_checker=lambda server: trust.is_trusted(root, server))
             registry = ToolRegistry()
 
             try:

@@ -242,6 +242,12 @@ export const api = {
     return request<McpConfig>(`/mcp/servers?workspace=${encodeURIComponent(workspace)}`);
   },
 
+  mcpServerAction(workspace: string, name: string, fingerprint: string, action: "trust" | "connect", approved = false) {
+    return request<McpConfig>(`/mcp/servers/${encodeURIComponent(name)}/${action}`, {
+      method: "POST", body: JSON.stringify({ workspace, fingerprint, approved }),
+    });
+  },
+
   saveMcpServer(server: SaveMcpServer) {
     return request<McpConfig>("/mcp/servers", {
       method: "POST",

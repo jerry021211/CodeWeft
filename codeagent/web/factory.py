@@ -9,6 +9,7 @@ from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from weakref import WeakSet
 
 from codeagent import (
     Agent,
@@ -28,6 +29,7 @@ from codeagent import (
 from codeagent.context import RuntimeState
 from codeagent.events import EventEmitter, UsageTracker
 from codeagent.mcp import McpRouter
+from codeagent.mcp.trust import McpTrustStore
 from codeagent.messages import reconcile_tool_history
 from codeagent.memory import MemoryAccessController, MemoryWriteBlocked
 from codeagent.permissions import PermissionPolicy, WaitingPermissionBroker
@@ -79,7 +81,7 @@ class WebAgentFactory:
         )
         self._mcp_routers: dict[tuple[Path, Path, bool], McpRouter] = {}
         self._mcp_lock = threading.RLock()
-        self._retired_mcp_routers: list[McpRouter] = []
+        self._retired_mcp_routers: WeakSet[McpRouter] = WeakSet()
 
     def create(
         self,
@@ -242,7 +244,7 @@ class WebAgentFactory:
             registry.register(LoadContextHistoryTool(context_config.transcript_dir))
             self._mcp_router(
                 force_workspace_cwd=team_session is not None
-            ).register_tools(registry)
+            ).register_tools(registry, cancellation_check=cancellation.raise_if_cancelled)
             if self.env.team_runtime_enabled and team_planner:
                 registry.register(
                     LeadTeamPlanTool(
@@ -600,17 +602,19 @@ class WebAgentFactory:
     def close(self) -> None:
         # Called only after root and Team workers have exited.
         with self._mcp_lock:
-            for router in [*self._mcp_routers.values(), *self._retired_mcp_routers]:
-                router.close()
+            routers = [*self._mcp_routers.values(), *self._retired_mcp_routers]
             self._mcp_routers.clear()
             self._retired_mcp_routers.clear()
+        for router in routers:
+            router.close()
 
     def reload_mcp(self, workspace: str | Path) -> None:
         config_path = self._mcp_config_path(Path(workspace).resolve())
         with self._mcp_lock:
             for key in [item for item in self._mcp_routers if item[0] == config_path]:
-                # Existing Agents keep their tools/connections until shutdown.
-                self._retired_mcp_routers.append(self._mcp_routers.pop(key))
+                router = self._mcp_routers.pop(key)
+                self._retired_mcp_routers.add(router)
+                router.retire()
 
     def _mcp_router(self, *, force_workspace_cwd: bool = False) -> McpRouter:
         config_path = self._mcp_config_path(self.workspace)
@@ -618,13 +622,25 @@ class WebAgentFactory:
         with self._mcp_lock:
             router = self._mcp_routers.get(key)
             if router is None:
+                trust = McpTrustStore(self.data_paths.root / 'state' / 'mcp-trust.db')
                 router = McpRouter(
                     config_path,
-                    workspace_root=self.workspace if force_workspace_cwd else None,
+                    workspace_root=self.workspace,
                     force_workspace_cwd=force_workspace_cwd,
+                    trust_checker=lambda server: trust.is_trusted(self.project_workspace, server),
                 )
                 self._mcp_routers[key] = router
             return router
+
+    def mcp_states(self, workspace: str | Path) -> dict:
+        workspace = Path(workspace).resolve()
+        key = (self._mcp_config_path(workspace), workspace, False)
+        with self._mcp_lock:
+            router = self._mcp_routers.get(key)
+        return router.states() if router else {}
+
+    def connect_mcp(self, workspace: str | Path, name: str) -> None:
+        self.for_workspace(workspace)._mcp_router().connect_server(name)
 
     def _mcp_config_path(self, workspace: Path) -> Path:
         configured = self.env.mcp_config_path

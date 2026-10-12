@@ -6,7 +6,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from codeagent import EnvironmentConfig, MemoryStore
 from codeagent.mcp import McpRouter
@@ -61,7 +61,7 @@ class ConcurrentMcpTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "closed"):
                     router.start()
 
-    def test_factory_cache_is_atomic_workspace_bound_and_reload_keeps_old_connections(self):
+    def test_factory_cache_is_atomic_workspace_bound_and_reload_retires_old_connections(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             env = EnvironmentConfig(model_id="test", mcp_config_path=root / "shared.json")
@@ -69,8 +69,9 @@ class ConcurrentMcpTests(unittest.TestCase):
             first = factory.for_workspace(root)
             second = factory.for_workspace(root)
             with patch("codeagent.web.factory.McpRouter") as constructor:
-                constructor.side_effect = lambda *_args, **_kwargs: SimpleNamespace(close=lambda: closed.append(1))
-                closed = []
+                constructor.side_effect = lambda *_args, **_kwargs: Mock(
+                    close=lambda: closed.append(1), retire=lambda: retired.append(1))
+                closed, retired = [], []
                 barrier = threading.Barrier(3)
 
                 def lookup(owner):
@@ -87,9 +88,11 @@ class ConcurrentMcpTests(unittest.TestCase):
                 (root / "b").mkdir()
                 team_a = factory.for_team_workspace(root / "a", project_workspace=root)
                 team_b = factory.for_team_workspace(root / "b", project_workspace=root)
-                self.assertIsNot(team_a._mcp_router(force_workspace_cwd=True), team_b._mcp_router(force_workspace_cwd=True))
+                team_routers = [owner._mcp_router(force_workspace_cwd=True) for owner in (team_a, team_b)]
+                self.assertIsNot(*team_routers)
                 factory.reload_mcp(root)
                 self.assertFalse(closed)
+                self.assertEqual(len(retired), 3)
                 self.assertIsNot(first._mcp_router(), routers[0])
                 factory.close()
                 factory.close()

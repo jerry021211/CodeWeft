@@ -364,6 +364,12 @@ class RunScheduler:
         reload_factory(workspace)
         return True
 
+    def mcp_states(self, workspace: str) -> dict:
+        return self.agent_factory.mcp_states(workspace)
+
+    def connect_mcp(self, workspace: str, name: str) -> None:
+        self.agent_factory.connect_mcp(workspace, name)
+
     def decide_plan(self, plan_id, content_hash, decision):
         """UI-only authority; model tools cannot call this transition."""
         with self._lock:

@@ -28,7 +28,7 @@ CASES = [
     case("E02", "exact", "定位 retry_delay_seconds：服务已经给出 retry_after 时，哪里优先采用这个等待时长？",
          ref("recovery/backoff.py", "retry_delay_seconds", "if retry_after is not None:", "return max(0.0, retry_after)")),
     case("E03", "exact", "定位 _public_tool_name：外部工具的公开名称在哪里加入服务前缀、替换不允许的字符并限制长度？",
-         ref("mcp/router.py", "_public_tool_name", "safe = re.sub", "return safe[:64]")),
+         ref("mcp/router.py", "_public_tool_name", "safe = re.sub", "return safe[:51]", "hashlib.sha256")),
     case("E04", "exact", "定位 RuntimeDataPaths.workspace_id：同名但位于不同路径的项目在哪里得到不同的数据目录标识？",
          ref("runtime/data_paths.py", "RuntimeDataPaths.workspace_id", "os.path.normcase", "hashlib.sha256")),
     case("N01", "natural", "模型提交计划时同时标记了两件正在做的事。请定位拒绝这种计划的输入检查，并给出判断依据。",

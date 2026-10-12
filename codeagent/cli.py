@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -26,6 +27,7 @@ from codeagent import (
     resolve_planning_backend,
 )
 from codeagent.mcp import McpRouter
+from codeagent.mcp.trust import McpTrustStore, request_cli_trust
 from codeagent.memory import (
     MemoryAccessController,
     MemoryAccessPolicy,
@@ -224,9 +226,16 @@ def main(argv: list[str] | None = None) -> int:
         if env.mcp_config_path.is_absolute()
         else workspace / env.mcp_config_path
     )
-    mcp_router = McpRouter(mcp_path)
-    mcp_router.register_tools(tools)
     permission_broker = CliPermissionBroker()
+    mcp_trust = McpTrustStore(data_paths.root / 'state' / 'mcp-trust.db')
+    mcp_router = McpRouter(mcp_path, workspace_root=workspace,
+                          trust_checker=lambda server: mcp_trust.is_trusted(workspace, server))
+    request_cli_trust(mcp_router.servers, mcp_trust, workspace, permission_broker,
+                      interactive=bool(sys.stdin and sys.stdin.isatty()))
+    mcp_router.register_tools(tools)
+    for server_name, state in mcp_router.states().items():
+        if state['status'] in {'error', 'awaiting_trust'}:
+            print(f"MCP {server_name}: {state.get('error') or 'awaiting trust'}")
 
     agent = Agent(
         client=client,
