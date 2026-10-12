@@ -324,7 +324,11 @@ class WebAgentFactory:
 
         agent_config = self.env.to_agent_config(planning_backend=PlanningBackend.TASKS)
         if team_session is not None or team_planner:
+            if agent_config.cvm.contract != "off":
+                event_emitter.emit("cvm.diagnostic", {"reason": "team_contract_not_implemented",
+                                                      "requested_mode": agent_config.cvm.contract, "effective_mode": "off"})
             agent_config = replace(agent_config, loop_guard=None,
+                                   cvm=replace(agent_config.cvm, contract="off", evidence="off"),
                                    parallel=replace(agent_config.parallel, enabled=False))
         agent = Agent(
             client=client,
@@ -349,11 +353,30 @@ class WebAgentFactory:
             prompt_mode=root_mode if team_session is None else None,
             read_only=read_only,
             plan_mode=plan_mode,
+            cvm_task_refs=(task_list.id,),
         )
         if checkpoint is not None and team_session is None and not team_planner:
             guard_state = getattr(checkpoint, "metadata", {}).get("execution_guard")
             if guard_state is not None:
                 agent.restore_execution_state(guard_state)
+        if team_session is None and not team_planner:
+            saved_cvm = getattr(checkpoint, "metadata", {}).get("cvm") if checkpoint is not None else None
+            if saved_cvm is not None or agent.config.cvm.contract != "off":
+                agent.restore_cvm_state(saved_cvm)
+            if agent.config.cvm.contract != "off":
+                run = self.task_service.get_run(execution.run_id)
+                plan_id = run.metadata.get("approved_plan_id") if run is not None else None
+                if plan_id:
+                    from codeagent.cvm.contract import ApprovedPlan
+                    plan = self.task_service.get_planning_revision(plan_id)
+                    if (plan['conversation_id'] != execution.conversation_id
+                            or plan['status'] not in {'approved', 'starting', 'started', 'blocked'}
+                            or plan['read_only'] or plan_mode or read_only
+                            or execution.run_id not in {'run_' + plan_id, plan.get('execution_run_id')}):
+                        raise ValueError("CVM plan binding requires the matching approved execution")
+                    agent.bind_approved_plan(ApprovedPlan(plan['id'], plan['revision'], plan['content_hash'],
+                                                         plan['markdown'], json.dumps(plan['payload'], ensure_ascii=False)),
+                                             task_refs=(task_list.id,))
         if team_planner and team_session is None:
             agent.tools = TeamPlannerToolExecutionGate(
                 self.task_service,

@@ -5,6 +5,7 @@ from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.providers import OpenAIModelClient
 from codeagent.speech import SpeechConfig
 from codeagent.config import EnvironmentConfig
+from codeagent.cvm import CvmConfig
 from codeagent.context import ContextConfig, ContextManager, RuntimeState
 from codeagent.events import (
     CallbackEventSink,
@@ -47,6 +48,7 @@ __all__ = [
     "AnthropicModelClient",
     "ContextConfig",
     "ContextManager",
+    "CvmConfig",
     "EnvironmentConfig",
     "EventEmitter",
     "EventSink",

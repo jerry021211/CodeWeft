@@ -85,6 +85,14 @@ class ToolRegistry:
             return owner.parameter_error(args)
         return validate_tool_arguments(registered.definition, args)
 
+    def verification_context(self, name: str, workspace: Path) -> tuple[str, bool]:
+        """Host metadata only; a model-provided tool name cannot attest a process."""
+        from codeagent.tools.bash import BashTool
+        registered = self._tools.get(name)
+        owner = getattr(registered.handler, '__self__', None) if registered else None
+        return (str(getattr(owner, 'cwd', workspace)),
+                isinstance(owner, BashTool) and self._execution_wrapper is None)
+
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.definition.to_schema() for tool in self._tools.values()]
 

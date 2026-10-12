@@ -228,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         client=client,
         tools=tools,
         config=env.to_agent_config(planning_backend=planning_backend),
+        cvm_task_refs=(task_list_id,) if task_list_id else (),
         prompt_mode=PromptMode.NORMAL,
         read_only=args.read_only,
         hooks=create_default_hooks(

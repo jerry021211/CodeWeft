@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from codeagent.agent import AgentConfig
+from codeagent.cvm import CvmConfig
 from codeagent.anthropic_client import AnthropicModelClient
 from codeagent.providers import OpenAIModelClient
 from codeagent.models import ModelClient
@@ -100,6 +101,7 @@ class EnvironmentConfig:
     reasoning_levels: tuple[str, ...] = ()
     chat_token_parameter: str = "max_completion_tokens"
     speech_config: SpeechConfig = field(default_factory=SpeechConfig)
+    cvm_config: CvmConfig = field(default_factory=CvmConfig)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, 'max_iterations', MAX_EXECUTION_ROUNDS)
@@ -137,6 +139,7 @@ class EnvironmentConfig:
         )
         config = cls(
             model_id=model_id,
+            cvm_config=CvmConfig.from_env(os.environ),
             model_protocol=chat["protocol"] if chat else os.getenv("MODEL_PROTOCOL", "anthropic"),
             input_modalities=None if chat else tuple(part.strip() for part in os.environ["MODEL_INPUT_MODALITIES"].split(",")) if os.getenv("MODEL_INPUT_MODALITIES") else None,
             reasoning_levels=tuple(part.strip() for part in os.getenv("MODEL_REASONING_LEVELS", "").split(",") if part.strip()),
@@ -293,6 +296,7 @@ class EnvironmentConfig:
             planning_backend=planning_backend or self.planning_mode,
             loop_guard=self.loop_guard_config,
             parallel=self.parallel_config,
+            cvm=self.cvm_config,
         )
 
     def create_anthropic_client(

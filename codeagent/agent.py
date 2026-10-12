@@ -21,6 +21,9 @@ from uuid import uuid4
 
 from codeagent.models import ModelClient
 from codeagent.context import ContextManager, HistoryObserver
+from codeagent.cvm import CvmConfig
+from codeagent.cvm.contract import ApprovedPlan, ContractUpdate
+from codeagent.cvm.state import CvmRuntime
 from codeagent.context.budget import BoundModelClient
 from codeagent.context.observation import emit_request_observation, fingerprint, observe_request
 from codeagent.prompts.models import PromptTraceItem
@@ -72,6 +75,7 @@ class AgentConfig:
     planning_backend: PlanningBackend = PlanningBackend.TODO
     loop_guard: LoopGuardConfig | None = field(default_factory=LoopGuardConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
+    cvm: CvmConfig = field(default_factory=CvmConfig)
 
     def __post_init__(self) -> None:
         self.max_iterations = MAX_EXECUTION_ROUNDS
@@ -133,6 +137,10 @@ class Agent:
     _subagent_runtime: SubagentRuntime | None = field(default=None, init=False, repr=False)
     _independent_child_hooks: bool = field(default=False, init=False, repr=False)
     _request_reasons: list[str] = field(default_factory=list, init=False, repr=False)
+    cvm_input_source: str = "user"
+    cvm_task_refs: tuple[str, ...] = ()
+    _cvm: CvmRuntime = field(init=False, repr=False)
+    _cvm_update: ContractUpdate | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.subagent_max_iterations = MAX_EXECUTION_ROUNDS
@@ -165,6 +173,8 @@ class Agent:
             self.client.usage_tracker = self.usage_tracker
         if self.prompt_runtime is None:
             self.prompt_runtime = PromptRuntime(workspace=Path.cwd())
+        self._cvm = CvmRuntime(self.config.cvm, self.prompt_runtime.workspace,
+                               source_kind=self.cvm_input_source, task_refs=self.cvm_task_refs)
         if self.recovery_runtime is None:
             self.recovery_runtime = RecoveryRuntime()
         if self.allow_subagents and SUBAGENT_TOOL_NAME not in self.tools:
@@ -247,9 +257,13 @@ class Agent:
         if hasattr(self.client, "activity"):
             self.client.activity = activity
 
-    def run(self, prompt: str | list[dict[str, Any]] | None = None, *, execution_id: str | None = None) -> AgentResult:
+    def run(self, prompt: str | list[dict[str, Any]] | None = None, *, execution_id: str | None = None,
+            task_update: ContractUpdate | None = None) -> AgentResult:
         """Compatibility wrapper that runs a normal Agent to completion."""
 
+        if task_update is not None and prompt is None:
+            raise ValueError("A task update requires its original user message")
+        self._cvm_update = task_update
         result = None
         usage_before = self.usage_tracker.snapshot()
         try:
@@ -257,6 +271,8 @@ class Agent:
                 result = self._guarded_run(prompt, allow_yield=self.plan_mode, execution_id=execution_id)
                 return result
         finally:
+            self._cvm_update = None
+            self._cvm.refresh_evidence()
             if self._subagent_runtime is not None:
                 runtime, self._subagent_runtime = self._subagent_runtime, None
                 runtime.close()
@@ -276,6 +292,24 @@ class Agent:
         snapshot = self._loop_guard.snapshot() if self._loop_guard is not None else {}
         return {**snapshot, 'round_budget': asdict(self._round_budget)}
 
+    def export_cvm_state(self) -> dict[str, Any] | None:
+        return self._cvm.export()
+
+    def register_verification(self, definition) -> str:
+        """Register a trusted host check for this task; never a model tool."""
+        if not self._cvm.recording or self._cvm.current is None:
+            raise ValueError('A current task and evidence=shadow are required')
+        return self._cvm.evidence.register(replace(definition, task_id=self._cvm.current.task_id))
+
+    def restore_cvm_state(self, payload: dict[str, Any] | None) -> None:
+        self._cvm.restore(payload, messages=self.messages)
+        for reason in self._cvm.diagnostics:
+            self.event_emitter.emit("cvm.diagnostic", {"reason": reason})
+
+    def bind_approved_plan(self, plan: ApprovedPlan, *, task_refs=()) -> None:
+        """Trusted host approval API; never exposed as a model tool."""
+        self._cvm.approve(plan, run_id=self.event_emitter.context.run_id or "", task_refs=task_refs)
+
     def restore_execution_state(self, payload: dict[str, Any]) -> None:
         if self._loop_guard is not None and 'state' in payload:
             self._loop_guard.restore(payload)
@@ -291,6 +325,8 @@ class Agent:
         scope = execution_id or ((self._round_budget.scope_id or (guard.state.scope_id if guard else '') or uuid4().hex)
                                  if prompt is None else self.event_emitter.context.run_id or uuid4().hex)
         self._round_budget.begin(scope)
+        # CvmConfig is immutable; freeze the selected object for this Run.
+        self._cvm.config = self.config.cvm
         if guard is not None:
             guard.begin(scope)
         usage_before = self.usage_tracker.snapshot()
@@ -347,8 +383,15 @@ class Agent:
             self.context.begin_turn(len(self.messages))
             self.hooks.trigger("UserPromptSubmit", prompt) #打印日志
             self.context.record_user_prompt(prompt)
+            self._cvm.receive(prompt, run_id=self._round_budget.scope_id,
+                              reference=f"user:{self._round_budget.scope_id}:{len(self.messages)}",
+                              update=self._cvm_update)
             self._sync_permission_reminder(self.messages)
             self.add_user_message(prompt_content)
+
+        cvm_goal = self._cvm.user_goal()
+        if cvm_goal is not None:
+            self.context.state.user_goal = cvm_goal
 
         with trace_run(
             "agent.run",
@@ -574,6 +617,9 @@ class Agent:
             kwargs["system"] = prompt_assembly.system_prompt
         validate_tool_history(kwargs["messages"])
         canonical = kwargs["messages"]
+        cvm_reminder = self._cvm.reminder()
+        if self._cvm.active:
+            self._sync_runtime_reminder("cvm_contract", cvm_reminder, canonical)
         self._sync_permission_reminder(canonical)
         round_reminder = self._round_budget.reminder()
         self._sync_runtime_reminder('round_budget', round_reminder, canonical)
@@ -597,6 +643,9 @@ class Agent:
         # A compaction in preflight may have folded a previously sent reminder.
         # Append it at the safe tail and recheck the complete request budget.
         reinjected = self._sync_permission_reminder(canonical, effective=kwargs["messages"])
+        if self._cvm.active:
+            reinjected = self._sync_runtime_reminder("cvm_contract", cvm_reminder, canonical,
+                                                     effective=kwargs["messages"]) or reinjected
         reinjected = self._sync_runtime_reminder('round_budget', round_reminder, canonical,
                                                 effective=kwargs['messages']) or reinjected
         if self._loop_guard is not None:
@@ -708,7 +757,7 @@ class Agent:
         if kind == "date" and previous.get("system_value_hash") == value_hash:
             return False
         validate_tool_history(canonical)
-        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期", 'round_budget': '收尾提醒', 'plan_mode': '规划模式'}
+        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期", 'round_budget': '收尾提醒', 'plan_mode': '规划模式', 'cvm_contract': '任务契约'}
         text = value or "此前的运行时执行纠偏已解除；继续遵循当前用户目标和权限。"
         if kind == 'round_budget' and not value:
             text = '本次是新的逻辑执行，轮数重新计数；上一执行的收尾提醒不再适用。'
@@ -752,6 +801,7 @@ class Agent:
         finally:
             # No cancellation checks here: cleanup must finish before checkpointing.
             cleanup_errors: list[BaseException] = []
+            self._commit_cvm_tools(tool_uses, results, executions)
             try:
                 outputs = self.context.finalize_tool_results(tool_uses, [item["content"] for item in results])
                 if len(outputs) != len(results):
@@ -852,7 +902,7 @@ class Agent:
                 execution["status"] = "unknown"
                 result["content"] = "执行结果未知：调用过程中被中断，未收到完整结果。操作可能已产生副作用，请先核实实际状态，不要自动重复执行。"
                 try:
-                    output = self._execute_tool_with_retry(tool)
+                    output = self._execute_tool_with_retry(tool, evidence_packets=execution.setdefault('cvm_packets', []))
                 except BaseException as exc:
                     captured = getattr(exc, 'tool_output', None)
                     if captured is not None:
@@ -914,7 +964,7 @@ class Agent:
         batch_cancel = CancellationToken(parent=self.cancellation)
         executor = ThreadPoolExecutor(max_workers=self.config.parallel.max_tools,
                                       thread_name_prefix="codeagent-tool") if kind == "tools" else None
-        def execute_reader(tool, started):
+        def execute_reader(tool, started, evidence_packets):
             budget = self._loop_guard.budget if self._loop_guard else None
             with budget.running() if budget else nullcontext():
                 def check():
@@ -925,7 +975,7 @@ class Agent:
                     started.set()
                     self.event_emitter.emit("tool.started", {"tool_use_id": tool.id, "name": tool.name,
                         "input": _public_tool_input(tool.name, tool.input)})
-                    return self._execute_tool_with_retry(tool, bind_runtime=False)
+                    return self._execute_tool_with_retry(tool, bind_runtime=False, evidence_packets=evidence_packets)
         try:
             for index in indices:
                 tool, result, execution = calls[index], results[index], executions[index]
@@ -973,7 +1023,7 @@ class Agent:
                         futures[record.future] = index
                 else:
                     started = Event()
-                    future = submit(executor, execute_reader, tool, started)
+                    future = submit(executor, execute_reader, tool, started, execution.setdefault('cvm_packets', []))
                     futures[future] = index
                     started_signals[future] = started
         except BaseException as exc:
@@ -1060,7 +1110,8 @@ class Agent:
         runtime.delivered([item["subagent_id"] for item in notifications])
         return True
 
-    def _execute_tool_with_retry(self, tool: ToolUse, *, bind_runtime: bool = True) -> ToolOutput:
+    def _execute_tool_with_retry(self, tool: ToolUse, *, bind_runtime: bool = True,
+                                 evidence_packets=None) -> ToolOutput:
         """Only an explicit safe transient result can request a bounded retry."""
         guard = self._loop_guard
         if guard is not None and bind_runtime:
@@ -1068,7 +1119,24 @@ class Agent:
         retries = guard.config.tool_max_retries if guard is not None else 0
         for attempt in range(retries + 1):
             self._check_execution()
-            output = normalize_tool_output(self.tools.execute(tool.name, tool.input))
+            prepared = None
+            if self._cvm.recording and evidence_packets is not None:
+                try:
+                    cwd, trusted = self.tools.verification_context(tool.name, self.prompt_runtime.workspace)
+                    prepared = self._cvm.evidence.prepare(tool, cwd=cwd, trusted_process=trusted,
+                                  task_id=self._cvm.current.task_id if self._cvm.current else '',
+                                  task_revision=self._cvm.current.revision if self._cvm.current else None)
+                except Exception:
+                    evidence_packets.append({'error': 'evidence_prepare_failed'})
+            try:
+                output = normalize_tool_output(self.tools.execute(tool.name, tool.input))
+            except BaseException as exc:
+                if prepared is not None:
+                    self._capture_cvm_packet(evidence_packets, tool, getattr(exc, 'tool_output', None),
+                                             prepared, attempt + 1, cancelled=True)
+                raise
+            if prepared is not None:
+                self._capture_cvm_packet(evidence_packets, tool, output, prepared, attempt + 1)
             if not (output.outcome == "transient" and output.retryable and output.retry_safe
                     and attempt < retries):
                 return output
@@ -1083,6 +1151,40 @@ class Agent:
             self._check_execution()
             guard.budget.reserve("tool")
         raise AssertionError("unreachable")
+
+    def _capture_cvm_packet(self, packets, tool, output, prepared, attempt, *, cancelled=False,
+                            executed=True, missing_status='unknown'):
+        try:
+            packets.append(self._cvm.evidence.packet(tool, output, prepared,
+                           run_id=self._round_budget.scope_id,
+                           agent_id=self.event_emitter.context.agent_id or 'root', attempt=attempt,
+                           executed=executed, cancelled=cancelled, missing_status=missing_status))
+        except Exception:
+            packets.append({'error': 'evidence_capture_failed'})
+
+    def _commit_cvm_tools(self, tools, results, executions):
+        """Parent-only, request/attempt order, before any context output projection."""
+        if not self._cvm.recording:
+            return
+        for tool, result, execution in zip(tools, results, executions):
+            try:
+                packets = execution.get('cvm_packets', [])
+                if not packets:
+                    # Pre-hook denial, unstarted calls and subagent reports have no process attestation.
+                    prepared = self._cvm.evidence.prepare(tool, cwd=self.prompt_runtime.workspace,
+                                  trusted_process=False, task_id=self._cvm.current.task_id if self._cvm.current else '',
+                                  task_revision=self._cvm.current.revision if self._cvm.current else None)
+                    output = result['content'] if isinstance(result['content'], ToolOutput) else None
+                    self._capture_cvm_packet(packets, tool, output, prepared, 0,
+                                             executed=execution['status'] in {'success', 'error'},
+                                             missing_status=execution['status'])
+                for packet in packets:
+                    if 'error' in packet:
+                        self._cvm.evidence.fail(packet['error'])
+                    else:
+                        self._cvm.evidence.commit(packet)
+            except Exception:
+                self._cvm.evidence.fail('evidence_commit_failed')
 
     def _emit_tool_outcome(self, tool: ToolUse, result: dict[str, Any], execution: dict[str, Any]) -> None:
         status = execution["status"]
@@ -1215,6 +1317,7 @@ class Agent:
                 max_tokens=self.config.max_tokens,
                 loop_guard=self.config.loop_guard,
                 parallel=self.config.parallel,
+                cvm=self.config.cvm,
             ),
             hooks=hooks,
             context=context,
@@ -1229,6 +1332,7 @@ class Agent:
             usage_tracker=tracker,
             cancellation=token,
             allow_subagents=False,
+            cvm_input_source="delegation",
             skill_catalog=self.skill_catalog,
             memory_catalog=self.memory_catalog,
         )

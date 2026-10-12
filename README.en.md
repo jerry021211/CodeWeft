@@ -157,6 +157,7 @@ The web server listens only on localhost and is intended for local, single-user 
 Ordinary conversations can run concurrently, but conversations operating on the same directory still share its files. Teams are disabled by default and require approval of a team plan when enabled. New Teams support candidate validation, internal integration, and local delivery; they **do not automatically push to GitHub**. See [Team integration and delivery](docs/team-managed-integration.md) for workspace and recovery behavior.
 
 Each logical execution of an ordinary agent is limited to 200 rounds, with a wrap-up reminder starting at round 185. Unfinished ordinary runs are marked as interrupted after a restart; operations are not replayed automatically. See [Execution budgets](docs/loop-guard.md) for round limits, cancellation, loop detection, and other budgets.
+| Task contracts and verification evidence (off by default) | [CVM stage 2: configuration, boundaries, and validation](docs/cvm-stage2-acceptance-2026-10-11.md) |
 
 ## Documentation
 

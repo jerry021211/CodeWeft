@@ -1050,7 +1050,10 @@ class RunScheduler:
                     current = self.repository.get_run(job.run_id) or current
                     current = self.repository.update_run_status(
                         job.run_id, current.status,
-                        metadata={**current.metadata, "tool_checkpoint_required": True},
+                        metadata={**current.metadata, "tool_checkpoint_required": True,
+                                  **({"cvm_config": agent.config.cvm.snapshot()}
+                                     if getattr(getattr(agent, "config", None), "cvm", None) is not None
+                                     and agent.config.cvm.contract != "off" else {})},
                     )
             prompt = job.prompt
             if job.attachments:
@@ -1167,6 +1170,11 @@ class RunScheduler:
         export_state = getattr(agent, "export_execution_state", None)
         if not job.use_team and callable(export_state):
             checkpoint_metadata["execution_guard"] = export_state()
+        export_cvm = getattr(agent, "export_cvm_state", None)
+        if not job.use_team and callable(export_cvm):
+            cvm = export_cvm()
+            if cvm is not None:
+                checkpoint_metadata["cvm"] = cvm
         self.repository.finish_run_with_checkpoint(
             job.run_id,
             status=status,
