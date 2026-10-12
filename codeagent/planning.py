@@ -27,7 +27,7 @@ def resolve_planning_backend(
 ) -> PlanningBackend:
     backend = PlanningBackend.parse(value)
     if backend is PlanningBackend.AUTO:
-        return PlanningBackend.TASKS if interactive else PlanningBackend.TODO
+        return PlanningBackend.TODO
     return backend
 
 

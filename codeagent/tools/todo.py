@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from codeagent.events import EventEmitter
 from codeagent.tools.base import ToolDefinition
 
 VALID_TODO_STATUSES = {"pending", "in_progress", "completed"}
@@ -63,11 +64,16 @@ class TodoWriteTool:
 
     store: TodoStore = field(default_factory=TodoStore)
     on_change: TodoLogger | None = None
+    owner_id: str | None = None
+    event_metadata: dict[str, str] = field(default_factory=dict)
+    event_emitter: EventEmitter | None = field(default=None, init=False, repr=False)
     definition: ToolDefinition = field(
         default=ToolDefinition(
             name="todo_write",
             description=(
-                "创建或更新阶段计划，仅在工作需要跟踪有意义阶段时使用。随实际进展更新 pending、in_progress、completed。此工具只记录计划，不读取文件、不执行命令、不修改工作区。"
+                "完整替换当前 Agent 的个人步骤清单。仅多阶段工作使用，每项描述一个可验证的阶段结果，"
+                "按执行顺序排列；开始前标为 in_progress，实际完成后立即标为 completed，最多一项进行中。"
+                "每次提交完整清单，包括仍需保留的完成项。此工具不执行工作，也不领取或完成团队共享任务。"
             ),
             input_schema={
                 "type": "object",
@@ -103,12 +109,24 @@ class TodoWriteTool:
         init=False,
     )
 
+    def bind_agent(self, client: Any, model: str, emitter: EventEmitter) -> None:
+        """Bind events to this Agent, including independently created subagents."""
+        self.event_emitter = emitter
+
     def run(self, todos: Any) -> str:
         normalized, error = normalize_todos(todos)
         if error:
             return error
 
         previous = _copy_todos(self.store.todos)
+        if self.event_emitter is not None:
+            # Durable Web sinks commit the snapshot and event together. A failed
+            # journal write must leave the model's in-memory list unchanged.
+            self.event_emitter.emit("todo.updated", {
+                **self.event_metadata,
+                "owner_id": self.owner_id or self.event_emitter.context.agent_id,
+                "todos": normalized,
+            })
         self.store.replace(normalized)
         if self.on_change is not None:  #on_change其实是一个print函数，cli中注册的
             event = render_todo_event(previous, normalized)

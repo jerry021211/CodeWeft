@@ -34,6 +34,7 @@ type Props = {
   planError?: string;
   onPlanDecision?: (plan: PlanDocument, decision: "approve" | "reject" | "restore") => void;
   planPanel?: import("react").ReactNode;
+  todoPanel?: import("react").ReactNode;
   planMode?: boolean;
   planLocked?: boolean;
   onPlanModeChange?: (enabled: boolean) => void;
@@ -216,6 +217,7 @@ export function ChatWorkspace(props: Props) {
         )}
         <div className="mx-auto max-w-4xl space-y-2">
           {props.planPanel}
+          {props.todoPanel}
           {props.run && <UserQuestions key={props.run.runId} runId={props.run.runId} active={active && props.run.status !== "cancelling"} />}
           {pendingApprovals.length > 0 && <button type="button" onClick={() => document.getElementById(`approval-${pendingApprovals[0]?.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })} className="flex w-full items-center justify-between rounded-xl border border-warning/25 bg-surface px-4 py-2.5 text-xs text-ink-muted"><span role="status" aria-live="polite">有 {pendingApprovals.length} 项操作等待你的确认</span><span className="text-accent">查看授权请求 ↑</span></button>}
           <div className="rounded-[22px] border border-line-strong/70 bg-surface shadow-[0_2px_12px_rgb(0_0_0/0.025)] transition-colors focus-within:border-ink-faint/50">

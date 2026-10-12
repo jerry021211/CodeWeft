@@ -887,8 +887,9 @@ class ContextManager:
         return summary
 
     def _task_state(self) -> str:
-        if self.task_state_provider is not None:
-            return self.task_state_provider()
+        parts = []
         if self.todo_store is not None:
-            return self.todo_store.format()
-        return "(none)"
+            parts.append(self.todo_store.format())
+        if self.task_state_provider is not None:
+            parts.append("共享或历史任务：\n" + self.task_state_provider())
+        return "\n\n".join(parts) or "(none)"

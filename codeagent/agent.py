@@ -157,9 +157,9 @@ class Agent:
         from codeagent.hooks.code_intelligence import CodeIntelligenceFeedback
         self.hooks.register("PostToolUse", CodeIntelligenceFeedback(lambda: self.tools), first=True)
         self.hooks.register("PreToolUse", self._read_only_guard, first=True)
-        task_tools = {"TaskCreate", "TaskGet", "TaskList", "TaskUpdate"}
+        task_tools = {"TaskCreate", "TaskUpdate"}
         if "todo_write" in self.tools and any(name in self.tools for name in task_tools):
-            raise ValueError("TodoWrite and Task tools cannot be registered together")
+            raise ValueError("TodoWrite and Task mutation tools cannot be registered together")
         client_emitter = getattr(self.client, "event_emitter", None)
         if self.event_emitter is None:
             self.event_emitter = client_emitter or EventEmitter()

@@ -6,6 +6,7 @@ import { cx, isRunActive } from "@/lib/utils";
 import type { Attachment, Approval, ApprovalDecision, Conversation, McpConfig, Message, SaveMcpServer, TaskResource } from "@/types/api";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
+import { PersonalTodoPanel } from "@/components/PersonalTodoPanel";
 import { PlanPreview } from "@/components/PlanPreview";
 import type { PlanDocument } from "@/types/api";
 import { InspectorPanel } from "@/components/InspectorPanel";
@@ -238,6 +239,17 @@ export default function App() {
 
   const runId = selectedId ? selectedConversation?.active_run_id ?? runIds[selectedId] ?? selectedConversation?.latest_run_id ?? undefined : undefined;
   const liveRun = useRunEvents(runId);
+  const personalTodosQuery = useQuery({
+    queryKey: ["personal-todos", selectedId],
+    queryFn: () => api.listPersonalTodos(selectedId!),
+    enabled: Boolean(selectedId),
+  });
+  const rootTodos = personalTodosQuery.data?.find(plan => plan.owner_id === "agent_root")?.todos ?? [];
+  useEffect(() => {
+    if (selectedId && liveRun?.todoSeq) {
+      void queryClient.invalidateQueries({ queryKey: ["personal-todos", selectedId] });
+    }
+  }, [queryClient, selectedId, liveRun?.runId, liveRun?.todoSeq]);
   const activityQuery = useConversationActivity(selectedId ?? undefined, messagesQuery.data ?? [], liveRun);
   const ensureRun = useRunStore((state) => state.ensureRun);
   const setRunStatus = useRunStore((state) => state.setRunStatus);
@@ -262,6 +274,8 @@ export default function App() {
     if (!team?.team.id || !selectedId) return;
     const source = new EventSource(api.teamEventStreamUrl(team.team.id), { withCredentials: true });
     const refresh = () => void queryClient.invalidateQueries({ queryKey: teamsKey(selectedId) });
+    const refreshTodos = () => void queryClient.invalidateQueries({ queryKey: ["personal-todos", selectedId] });
+    source.addEventListener("todo.updated", refreshTodos);
     const eventTypes = [
       "team.plan.created", "team.plan.submitted", "team.plan.approved", "team.plan.rejected",
       "team.attempt.assigned", "team.attempt.cancel_requested",
@@ -562,6 +576,7 @@ export default function App() {
             onPlanDecision={(plan, decision) => selectedId && planDecision.mutate({ conversationId: selectedId, plan, decision }, {
               onSuccess: () => { if (decision === "reject") setDraft("请修改方案："); },
             })}
+            todoPanel={!useTeam && !planMode && <PersonalTodoPanel key={selectedId} todos={rootTodos} />}
             planPanel={<PlanPreview key={selectedId} snapshot={plansQuery.data} busy={sending || planDecision.isPending || exitPlan.isPending || Boolean(liveRun && isRunActive(liveRun.status))}
               error={planDecision.error ? errorMessage(planDecision.error) : undefined}
               onDecision={(plan, decision) => selectedId && planDecision.mutate({ conversationId: selectedId, plan, decision })}
@@ -569,13 +584,13 @@ export default function App() {
             onOpenSettings={openModelSettings} key={selectedId} attachments={attachments} onAttachments={setAttachments} teamEnabled={teamEnabled} useTeam={useTeam} onTeamChange={selectTeam} reasoningEffort={reasoningEffort} reasoningOptions={reasoningOptions} reasoningDefault={runtimeQuery.data?.reasoning?.default_level} onReasoningChange={selectReasoning} historyRuns={activityQuery.data} historyLoading={activityQuery.isFetching} historyError={activityQuery.isError} readOnly={readOnly} onReadOnlyChange={selectReadOnly} webSearch={webSearch} webSearchAvailable={webSearchAvailable} onWebSearchChange={selectWebSearch} title={selectedConversation?.title} messages={messagesQuery.data ?? []} loading={Boolean(selectedId && messagesQuery.isLoading)} run={liveRun} draft={draft} sending={sending} cancelling={Boolean(runId && cancellingRuns.includes(runId))} approvals={approvalsQuery.data ?? []} approvalBusyIds={decidingApprovals} approvalErrors={approvalErrors} runtimeModel={runtimeQuery.data?.model} teamLeadActive={teamLeadActive} workspace={selectedConversation?.workspace ?? runtimeQuery.data?.workspace} theme={theme} onDraft={setDraft} onSend={send} onCancel={() => runId && cancelRun.mutate(runId)} onApprovalDecision={(approval, decision) => selectedId && decideApproval.mutate({ conversationId: selectedId, targetRunId: approval.run_id, approvalId: approval.id, decision })} onOpenLeft={() => setLeftOpen(true)} onOpenRight={() => setRightOpen(true)} onOpenMcp={() => { setMcpWorkspaceChoice(selectedConversation?.workspace ?? runtimeQuery.data?.workspace); setMcpMessage(undefined); window.location.hash = "settings/mcp"; }} onToggleTheme={cycleTheme} />
         </div>
 
-        <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>
+        <div className="hidden min-h-0 xl:block"><InspectorPanel run={liveRun} runtime={activeRuntime} personalPlans={personalTodosQuery.data} personalPlansLoading={personalTodosQuery.isLoading} personalPlansError={personalTodosQuery.isError} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} {...teamPanelProps} /></div>
       </div>
 
       <Drawer open={leftOpen} side="left" onClose={() => setLeftOpen(false)}>
         <ConversationSidebar onOpenSettings={openSettings} mobile conversations={filteredConversations} selectedId={selectedId} search={search} loading={conversationsQuery.isLoading} creating={createConversation.isPending} creatingWorkspace={createConversation.variables} onSearch={setSearch} onSelect={(id) => { setSelectedId(id); setLeftOpen(false); }} onCreateProject={() => { setLeftOpen(false); setWorkspacePickerOpen(true); }} onCreateConversation={(workspace) => createConversation.mutate(workspace)} onArchive={(conversation) => archiveConversation.mutate(conversation)} onDelete={confirmDeleteConversation} deletingId={deleteConversation.isPending ? deleteConversation.variables.id : undefined} onClose={() => setLeftOpen(false)} />
       </Drawer>
-      <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onClose={() => setRightOpen(false)} {...teamPanelProps} /></Drawer>
+      <Drawer open={rightOpen} side="right" onClose={() => setRightOpen(false)} width="min(90vw, 360px)"><InspectorPanel mobile run={liveRun} runtime={activeRuntime} personalPlans={personalTodosQuery.data} personalPlansLoading={personalTodosQuery.isLoading} personalPlansError={personalTodosQuery.isError} tasks={tasksQuery.data} tasksLoading={tasksQuery.isLoading} taskBusy={createTask.isPending || Boolean(liveRun && isRunActive(liveRun.status))} taskList={taskListQuery.data} onContinueTask={continueTask} onCreateTask={(input) => createTask.mutate(input)} onClose={() => setRightOpen(false)} {...teamPanelProps} /></Drawer>
 
       <WorkspacePicker
         open={workspacePickerOpen}

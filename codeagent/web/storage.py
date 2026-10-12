@@ -334,6 +334,18 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         );
         CREATE INDEX IF NOT EXISTS events_replay_idx ON events(run_id, seq);
 
+        CREATE TABLE IF NOT EXISTS personal_todos (
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            owner_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            parent_agent_id TEXT,
+            run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            todos_json TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, owner_id)
+        );
+
         CREATE TABLE IF NOT EXISTS user_questions (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -8209,7 +8221,46 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             "UPDATE runs SET next_event_seq = ?, updated_at = ? WHERE id = ?",
             (seq, persisted.occurred_at, persisted.run_id),
         )
+        if persisted.type == "todo.updated":
+            from codeagent.tools.todo import normalize_todos
+
+            todos, error = normalize_todos(persisted.payload.get("todos"))
+            if error:
+                raise ValueError(error)
+            owner_id = persisted.payload.get("owner_id") or persisted.agent_id
+            if not isinstance(owner_id, str):
+                raise ValueError("Personal todo owner_id must be a string")
+            connection.execute(
+                """INSERT INTO personal_todos(
+                    conversation_id, owner_id, agent_id, parent_agent_id, run_id,
+                    todos_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id, owner_id) DO UPDATE SET
+                    agent_id=excluded.agent_id, parent_agent_id=excluded.parent_agent_id,
+                    run_id=excluded.run_id, todos_json=excluded.todos_json,
+                    revision=personal_todos.revision + 1, updated_at=excluded.updated_at""",
+                (conversation_id, owner_id, persisted.agent_id, persisted.parent_agent_id,
+                 persisted.run_id, _json_dumps(todos), persisted.occurred_at),
+            )
         return persisted
+
+    def list_personal_todos(self, conversation_id: str) -> list[JsonObject]:
+        """Return durable personal lists, isolated by root or AgentSession owner."""
+        with self._lock:
+            self._ensure_open()
+            rows = self._connection.execute(
+                "SELECT * FROM personal_todos WHERE conversation_id = ? ORDER BY updated_at, owner_id",
+                (conversation_id,),
+            ).fetchall()
+        return [
+            {**{key: row[key] for key in row.keys() if key != "todos_json"},
+             "todos": _json_loads(row["todos_json"], [])}
+            for row in rows
+        ]
+
+    def get_personal_todos(self, conversation_id: str, owner_id: str) -> JsonObject | None:
+        return next((item for item in self.list_personal_todos(conversation_id)
+                     if item["owner_id"] == owner_id), None)
 
     def get_event(self, event_id: str) -> RunEvent | None:
         with self._lock:

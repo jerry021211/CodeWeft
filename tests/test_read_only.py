@@ -318,7 +318,8 @@ class ReadOnlyAgentTests(unittest.TestCase):
                         agent.run("inspect only")
                         maintenance.assert_not_called()
                     checkpoint = SimpleNamespace(
-                        messages=agent.messages, context=serialize_runtime_state(agent.context.state)
+                        messages=agent.messages, context=serialize_runtime_state(agent.context.state),
+                        todos=agent.context.todo_store.todos if agent.context.todo_store else [], metadata={},
                     )
                     normal = factory.create(
                         event_emitter=emitter, cancellation=CancellationToken(),

@@ -79,6 +79,7 @@ class WebApiTests(unittest.TestCase):
         )
         self.scheduler = FakeScheduler(self.repository)
         self.env = SimpleNamespace(
+            data_dir=self.workspace / 'runtime-data',
             model_id="test-model",
             max_tokens=4096,
             max_iterations=12,
@@ -113,6 +114,23 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(next(c for c in conversations if c["id"] == conversation.id)["run_status"], "cancelling")
         self.repository.update_run_status(run.id, "cancelled")
         self.assertEqual(self.client.get(f"/api/runs/{run.id}").json()["status"], "cancelled")
+
+    def test_personal_todo_snapshots_include_clears_and_are_conversation_scoped(self):
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        other = self.repository.create_conversation(workspace=self.workspace)
+        run = self.repository.create_run(conversation.id)
+        url = f"/api/conversations/{conversation.id}/todos"
+        self.assertEqual(self.client.get(url).json(), [])
+        for todos in ([{"content": "Verify", "status": "in_progress"}], []):
+            self.repository.append_event(RunEvent(type="todo.updated",
+                conversation_id=conversation.id, run_id=run.id, agent_id="agent_root",
+                payload={"owner_id": "agent_root", "todos": todos}))
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()[0]["todos"], todos)
+        self.assertEqual(response.json()[0]["revision"], 2)
+        self.assertEqual(self.client.get(f"/api/conversations/{other.id}/todos").json(), [])
+        self.assertEqual(self.client.get("/api/conversations/missing/todos").status_code, 404)
 
     def test_user_question_answer_contract(self) -> None:
         conversation = self.repository.create_conversation(workspace=self.workspace)

@@ -213,7 +213,7 @@ class TaskSystemTests(unittest.TestCase):
     def test_planning_backend_defaults_and_agent_mutual_exclusion(self) -> None:
         self.assertEqual(
             resolve_planning_backend("auto", interactive=True),
-            PlanningBackend.TASKS,
+            PlanningBackend.TODO,
         )
         self.assertEqual(
             resolve_planning_backend("auto", interactive=False),

@@ -18,11 +18,12 @@ import {
   X,
 } from "lucide-react";
 import type { RuntimeConfig, TeamSnapshot } from "@/types/api";
-import type { TaskList, TaskResource } from "@/types/api";
+import type { PersonalTodoPlan, TaskList, TaskResource } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatDuration, formatNumber, formatTime, isRunActive, prettyJson, statusLabel } from "@/lib/utils";
 import { EmptyPanel, IconButton, StatusDot } from "@/components/ui";
 import { TaskPlan } from "@/components/TaskPlan";
+import { PersonalTodoPanel } from "@/components/PersonalTodoPanel";
 import { TeamPanel } from "@/components/TeamPanel";
 import { TokenUsagePanel, teamUsageForRun } from "@/components/TokenUsagePanel";
 import { ContextMetricsPanel, RunMetricsPanel } from "@/components/RunMetricsPanel";
@@ -33,6 +34,9 @@ type Props = {
   mobile?: boolean;
   onClose?: () => void;
   tasks?: TaskResource[];
+  personalPlans?: PersonalTodoPlan[];
+  personalPlansLoading?: boolean;
+  personalPlansError?: boolean;
   tasksLoading?: boolean;
   taskBusy?: boolean;
   taskList?: TaskList;
@@ -52,8 +56,11 @@ type Props = {
   onCleanupWorktree?: (worktreeId: string) => void;
 };
 
-export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onResolveIntegration, onCleanupWorktree }: Props) {
+export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], personalPlans = [], personalPlansLoading, personalPlansError, tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onResolveIntegration, onCleanupWorktree }: Props) {
   const [tab, setTab] = useState<"run" | "tasks" | "team" | "debug">("run");
+  const plans = personalPlans.filter(plan => plan.todos.length > 0 && (
+    plan.owner_id === "agent_root" || plan.run_id === run?.runId || plan.run_id === team?.team.root_run_id
+  ));
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-line bg-surface">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-line px-4">
@@ -66,7 +73,16 @@ export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], task
         {mobile && onClose && <IconButton label="关闭运行面板" onClick={onClose}><X className="size-4" /></IconButton>}
       </header>
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {tab === "run" ? <RunInspector run={run} runtime={runtime} team={team} /> : tab === "tasks" ? <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} /> : tab === "team" ? <TeamPanel enabled={teamEnabled} team={team} loading={teamLoading} busy={teamBusy} error={teamError} onTeamPlan={onTeamPlan ?? (() => undefined)} onCandidateApproval={onCandidateApproval ?? (() => undefined)} onResumeAttempt={onResumeAttempt ?? (() => undefined)} onCancel={onCancelTeam ?? (() => undefined)} onVerifyIntegration={onVerifyIntegration ?? (() => undefined)} onResolveIntegration={onResolveIntegration} onCleanupWorktree={onCleanupWorktree ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
+        {tab === "run" ? <RunInspector run={run} runtime={runtime} team={team} /> : tab === "tasks" ? <>
+          <div className="space-y-3 px-4 py-5">
+            {personalPlansLoading && <p className="text-xs text-ink-muted">正在加载任务进度…</p>}
+            {personalPlansError && <p role="alert" className="text-xs text-danger">任务进度加载失败，请刷新重试。</p>}
+            {plans.map(plan => <PersonalTodoPanel key={plan.owner_id} todos={plan.todos}
+              title={plan.owner_id === "agent_root" ? "当前任务进度" : `${team?.agents.find(agent => agent.id === plan.agent_id)?.name ?? run?.agents[plan.agent_id]?.label ?? "子 Agent"} · 个人步骤`} />)}
+            {!personalPlansLoading && !personalPlansError && !plans.length && !tasks.length && <p className="py-6 text-center text-xs text-ink-faint">多阶段工作开始后，这里会显示任务进度。</p>}
+          </div>
+          {(tasks.length > 0 || team) && <TaskPlan tasks={tasks} loading={tasksLoading} busy={taskBusy} taskList={taskList} onContinue={onContinueTask ?? (() => undefined)} onCreate={onCreateTask ?? (() => undefined)} />}
+        </> : tab === "team" ? <TeamPanel enabled={teamEnabled} team={team} loading={teamLoading} busy={teamBusy} error={teamError} onTeamPlan={onTeamPlan ?? (() => undefined)} onCandidateApproval={onCandidateApproval ?? (() => undefined)} onResumeAttempt={onResumeAttempt ?? (() => undefined)} onCancel={onCancelTeam ?? (() => undefined)} onVerifyIntegration={onVerifyIntegration ?? (() => undefined)} onResolveIntegration={onResolveIntegration} onCleanupWorktree={onCleanupWorktree ?? (() => undefined)} /> : <DebugInspector run={run} runtime={runtime} />}
       </div>
     </aside>
   );

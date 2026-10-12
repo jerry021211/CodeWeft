@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--planning-mode",
         choices=("auto", "tasks", "todo"),
-        help="Planning backend. Interactive mode defaults to tasks; one-shot defaults to todo.",
+        help="Planning backend. Both interactive and one-shot mode default to personal todo lists.",
     )
     parser.add_argument(
         "--task-list",
@@ -104,10 +104,14 @@ def main(argv: list[str] | None = None) -> int:
     if attachments and not query:
         query = "请分析这些附件。"
     requested_backend = args.planning_mode or env.planning_mode
+    if args.task_list and PlanningBackend.parse(requested_backend) is PlanningBackend.AUTO:
+        requested_backend = PlanningBackend.TASKS
     planning_backend = resolve_planning_backend(
         requested_backend,
         interactive=not bool(query),
     )
+    if args.task_list and planning_backend is not PlanningBackend.TASKS:
+        parser.error("--task-list requires --planning-mode tasks")
     skill_loader = create_skill_loader(env, workspace)
     skill_catalog = skill_loader.catalog_prompt() if skill_loader is not None else ""
     recovery_runtime = RecoveryRuntime(

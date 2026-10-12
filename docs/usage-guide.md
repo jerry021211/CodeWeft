@@ -291,13 +291,13 @@ Web 接口：`GET /api/runs/{run_id}/questions` 查看问题，
 
 ## 规划能力：todo_write
 
-规划后端由 `CODEAGENT_PLANNING_MODE=auto|tasks|todo` 控制。`auto` 下 Web 和
-交互式 CLI 使用持久化 Task System，单次 CLI、SDK 默认注册表和普通子 Agent
-继续使用 TodoWrite；同一个 Agent 不会同时获得两套规划工具。
+CLI 的规划后端由 `CODEAGENT_PLANNING_MODE=auto|tasks|todo` 控制。`auto` 下交互式与单次 CLI 都使用个人 `todo_write`；显式选择 `tasks` 或在 auto 下传入 `--task-list` 可继续使用持久化 Task System。CLI、SDK 默认 TodoStore 在当前进程内维护状态。
 
-默认工具池包含 `todo_write`。它只维护当前进程内的一份 TODO
-计划，不读文件、不运行命令、不写工作区。它的作用是让模型在多步骤任务前
-先拆清楚步骤，并在执行过程中持续更新状态。
+Web 新普通会话使用个人 `todo_write`，每次成功写入会把完整清单与 `todo.updated` 事件原子保存到 SQLite。刷新页面、后续轮次和进程重启后可恢复已保存清单；恢复清单不代表自动重跑中断任务。`GET /api/conversations/{id}/todos` 返回各 Agent 独立的清单，输入框上方展示主会话进度，任务面板还可查看成员步骤。
+
+已有独立 Tasks 的历史会话保留原任务工具与依赖校验，避免隐藏旧依赖后无法继续执行。参与过 Team 的列表继续作为共享任务展示，普通会话使用自己的 todo。Team 规划阶段使用 Tasks 与 TeamPlanSubmit；执行阶段 Lead/成员保留任务查询和角色工具，并可使用以 AgentSession 为归属的个人 todo。个人步骤全部完成不会领取、完成或验收共享任务，仍需提交团队结果。todo 可以与 TaskGet/TaskList 共存，不能与 TaskCreate/TaskUpdate 同时注册。
+
+个人清单不读文件、不运行命令、不写项目文件。每项只有 `content`、`status`，按数组顺序展示，每次写入完整替换。每个 Agent 的清单独立；Team 成员的个人清单不携带负责人和依赖图。
 
 TODO 项只有三个状态：
 
@@ -306,9 +306,7 @@ TODO 项只有三个状态：
 - `completed`：已经完成
 
 当默认工具池里存在 `todo_write` 时，`Agent` 会自动在 system prompt 后追加
-规划规则：多步骤任务、代码修改任务、或需要多次工具调用的任务，应先调用
-`todo_write`，再使用 `read_file`、`bash`、`write_file`、`edit_file` 等执行类
-工具。
+规划规则：有多个需要持续跟踪的阶段时使用 `todo_write`，每项描述可验证的阶段结果；不按工具调用次数机械拆分，不为小修改强制建清单。实际完成后即时更新，最终回复前核对状态。
 
 默认 hooks 还会注册 reminder：如果模型连续 3 轮没有更新 TODO，就会在下一次
 模型调用前注入一条 `<reminder>...</reminder>` 消息，提醒它更新计划或确认
@@ -336,7 +334,7 @@ CLI 会在 `todo_write` 更新计划时打印用户可见的任务表：
 
 ## Task System：当前会话直接执行
 
-交互式会话注册 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。Task 持久化在
+显式启用 Tasks 的 CLI 与已有独立 Tasks 的 Web 会话注册 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。Task 持久化在
 CodeWeft 外部数据目录的 `state/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
 任务业务对象保持九字段：`id`、`subject`、`description`、`activeForm`、`owner`、
 `status`、`blocks`、`blockedBy`、`metadata`；TaskList、revision 和时间戳位于
@@ -348,7 +346,7 @@ metadata。`TaskGet` 返回完整九字段，`TaskList` 不携带描述、进度
 
 Task 默认在当前 Conversation 中直接执行。开始 Ready 任务时用 `TaskUpdate` 设置
 `in_progress`，完成代码和验证后设置 `completed`，不会为每个任务创建独立对话。
-Web 右侧“任务”页可查看 Ready、Blocked、进行中和已完成任务，也可以创建任务，
+Web 历史 Tasks 会话的右侧“任务”页可查看 Ready、Blocked、进行中和已完成任务，也可以创建任务，
 或把指定任务作为普通 Run 继续交给当前会话。
 
 ## 子 Agent：subagent

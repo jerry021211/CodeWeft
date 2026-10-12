@@ -32,6 +32,7 @@ TABLE_SCOPES = {
     "conversations": ("conversation", "id"),
     "planning_sessions": ("conversation", "conversation_id"),
     "planning_revisions": ("conversation", "conversation_id"),
+    "personal_todos": ("conversation", "conversation_id"),
     "runs": ("run", "id"),
     "user_questions": ("run", "run_id"),
     "messages": ("conversation", "conversation_id"),

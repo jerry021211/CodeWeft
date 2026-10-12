@@ -547,6 +547,11 @@ def create_app(
         _require_conversation(repo, conversation_id)
         return [_message_response(item) for item in repo.list_messages(conversation_id)]
 
+    @app.get("/api/conversations/{conversation_id}/todos")
+    def list_personal_todos(conversation_id: str) -> list[dict[str, Any]]:
+        _require_conversation(repo, conversation_id)
+        return repo.list_personal_todos(conversation_id)
+
     @app.get("/api/runs/{run_id}/activity")
     def run_activity(
         run_id: str,
@@ -976,7 +981,7 @@ def create_app(
             workspace=str(workspace_path),
             max_tokens=_optional_int(_config_value(runtime_env, "max_tokens")),
             max_iterations=MAX_EXECUTION_ROUNDS,
-            planning_backend="tasks",
+            planning_backend="todo",
             reasoning_effort=getattr(runtime_env, "reasoning_effort", "default"),
             reasoning=environment_capabilities(runtime_env),
             features={

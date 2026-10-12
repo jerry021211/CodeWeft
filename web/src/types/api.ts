@@ -441,6 +441,17 @@ export type TodoItem = {
   status: TodoStatus;
 };
 
+export type PersonalTodoPlan = {
+  conversation_id: string;
+  owner_id: string;
+  agent_id: string;
+  parent_agent_id?: string | null;
+  run_id: string;
+  todos: Array<Pick<TodoItem, "content" | "status">>;
+  revision: number;
+  updated_at: string;
+};
+
 export type PromptFragment = {
   name: string;
   source?: string;

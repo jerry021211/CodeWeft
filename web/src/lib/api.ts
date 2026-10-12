@@ -1,5 +1,6 @@
 import type {
   PlanDocument,
+  PersonalTodoPlan,
   PlanningSnapshot,
   ModelSettings,
   ModelSettingsInput,
@@ -184,6 +185,10 @@ export const api = {
 
   getTaskList(taskListId: string) {
     return request<TaskList>(`/task-lists/${encodeURIComponent(taskListId)}`);
+  },
+
+  async listPersonalTodos(conversationId: string) {
+    return request<PersonalTodoPlan[]>(`/conversations/${encodeURIComponent(conversationId)}/todos`);
   },
 
   async listTasks(taskListId: string) {

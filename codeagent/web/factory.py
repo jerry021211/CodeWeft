@@ -33,7 +33,7 @@ from codeagent.memory import MemoryAccessController, MemoryWriteBlocked
 from codeagent.permissions import PermissionPolicy, WaitingPermissionBroker
 from codeagent.runtime import CancellationToken, RuntimeDataPaths
 from codeagent.runtime.activity import ExecutionActivity
-from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool, ToolRegistry, WorkspaceGuard
+from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool, TodoWriteTool, ToolRegistry, WorkspaceGuard
 from codeagent.web.questions import WebUserQuestions
 from codeagent.tools.search_code import SearchCodeTool
 from codeagent.teams import (
@@ -146,6 +146,23 @@ class WebAgentFactory:
         task_list = self.task_service.ensure_conversation_task_list(
             execution.conversation_id
         )
+        # Keep existing standalone task lists operable, including their dependency
+        # checks. New personal sessions and Team members use separate checklists.
+        legacy_tasks = (
+            team_session is None and not team_planner
+            and bool(self.task_service.list_task_resources(task_list.id))
+            and not any(item.task_list_id == task_list.id for item in self.task_service.list_team_runs())
+        )
+        personal_plan = not team_planner and not legacy_tasks
+        planning_backend = PlanningBackend.TODO if personal_plan else PlanningBackend.TASKS
+        todo_store = TodoStore() if personal_plan else None
+        todo_owner = team_session.id if team_session is not None else execution.agent_id
+        if todo_store is not None:
+            saved_todos = self.task_service.get_personal_todos(execution.conversation_id, todo_owner)
+            if saved_todos is not None:
+                todo_store.replace(saved_todos["todos"])
+            elif checkpoint is not None and team_session is None:
+                todo_store.replace([dict(item) for item in getattr(checkpoint, "todos", ())])
 
         def task_state() -> str:
             resources = self.task_service.list_task_resources(task_list.id)
@@ -171,8 +188,8 @@ class WebAgentFactory:
         context = ContextManager(
             config=context_config,
             state=state,
-            todo_store=None,
-            task_state_provider=task_state,
+            todo_store=todo_store,
+            task_state_provider=task_state if team_session is not None or not personal_plan else None,
         )
         skill_loader = self._skill_loader()
         memory_store = self._memory_store(
@@ -209,13 +226,18 @@ class WebAgentFactory:
                 memory_max_items=self.env.memory_config.max_loaded_items,
                 workspace_guard=self.workspace_guard,
                 changed_files=changed_files,
-                planning_backend=PlanningBackend.TASKS,
+                planning_backend=PlanningBackend.TASKS if team_session is not None else planning_backend,
+                todo_store=todo_store,
                 task_service=self.task_service,
                 task_list_id=task_list.id,
                 conversation_id=execution.conversation_id,
                 run_id=execution.run_id,
                 agent_id=execution.agent_id,
             )
+            if personal_plan:
+                registry = registry.copy_without({"TaskCreate", "TaskUpdate", "todo_write"})
+                registry.register(TodoWriteTool(store=todo_store, owner_id=todo_owner,
+                    event_metadata={"team_run_id": team_session.team_run_id} if team_session is not None else {}))
             registry.register(LoadToolOutputTool(context_config.tool_output_dir))
             registry.register(LoadContextHistoryTool(context_config.transcript_dir))
             self._mcp_router(
@@ -262,9 +284,10 @@ class WebAgentFactory:
             permission_policy=policy,
             workspace=self.workspace,
             log=lambda _message: None,
-            planning_backend=PlanningBackend.TASKS,
+            planning_backend=PlanningBackend.TASKS if plan_mode or read_only else planning_backend,
+            todo_store=todo_store,
             task_state_provider=(
-                task_state if team_session is None and not team_planner else None
+                task_state if legacy_tasks and not plan_mode and not read_only else None
             ),
         )
         if reasoning_effort is None and team_session is not None:
@@ -322,7 +345,7 @@ class WebAgentFactory:
                 ContextManager(config=subagent_context_config, todo_store=sub_todos),
             )
 
-        agent_config = self.env.to_agent_config(planning_backend=PlanningBackend.TASKS)
+        agent_config = self.env.to_agent_config(planning_backend=planning_backend)
         if team_session is not None or team_planner:
             if agent_config.cvm.contract != "off":
                 event_emitter.emit("cvm.diagnostic", {"reason": "team_contract_not_implemented",

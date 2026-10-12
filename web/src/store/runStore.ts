@@ -28,6 +28,8 @@ export type RunViewState = {
   actions: Record<string, RunAction>;
   actionOrder: string[];
   todos: TodoItem[];
+  todosByOwner: Record<string, TodoItem[]>;
+  todoSeq: number;
   agents: Record<string, AgentNode>;
   recovery: RecoveryRecord[];
   approvals: Record<string, Approval>;
@@ -62,6 +64,8 @@ function blankRun(runId: string, status: RunStatus = "queued", queuePosition?: n
     actions: {},
     actionOrder: [],
     todos: [],
+    todosByOwner: {},
+    todoSeq: 0,
     agents: {},
     recovery: [],
     approvals: {},
@@ -240,7 +244,12 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
 
   if (type.includes("todo")) {
     const todos = normalizeTodos(payload.todos ?? payload.items ?? payload.plan);
-    if (todos.length || Array.isArray(payload.todos) || Array.isArray(payload.items)) next.todos = todos;
+    if (todos.length || Array.isArray(payload.todos) || Array.isArray(payload.items)) {
+      const owner = stringFrom(payload, "owner_id") ?? event.agent_id;
+      next.todosByOwner = { ...state.todosByOwner, [owner]: todos };
+      next.todoSeq = event.seq;
+      if (!event.parent_agent_id && owner === event.agent_id) next.todos = todos;
+    }
   }
 
   if (type.includes("prompt") && (payload.hash || payload.fragments)) {

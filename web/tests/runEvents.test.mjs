@@ -24,6 +24,26 @@ const { useRunStore, createRunEventBuffer } = createRequire(import.meta.url)(bun
 after(() => { unlinkSync(bundle); rmdirSync(directory); });
 beforeEach(() => useRunStore.setState({ runs: {} }));
 
+test("personal lists stay ordered and isolated across root, child and Team session replay", () => {
+  const todos = [{ content: "First", status: "completed" }, { content: "Second", status: "in_progress" }];
+  const events = [
+    event(1, "todo.updated", { owner_id: "root", todos }),
+    { ...event(2, "todo.updated", { todos: [{ content: "Child", status: "pending" }] }), agent_id: "child", parent_agent_id: "root" },
+    event(3, "todo.updated", { owner_id: "team-session", todos: [{ content: "Lead", status: "pending" }] }),
+    { ...event(4, "todo.updated", { todos: [] }), agent_id: "child", parent_agent_id: "root" },
+  ];
+  useRunStore.getState().mergeEvents([...events].reverse());
+  useRunStore.getState().mergeEvents(events);
+  const run = useRunStore.getState().runs["run-a"];
+  assert.deepEqual(run.todos.map(todo => todo.content), ["First", "Second"]);
+  assert.deepEqual(run.todosByOwner.child, []);
+  assert.equal(run.todosByOwner["team-session"][0].content, "Lead");
+  assert.equal(run.todoSeq, 4);
+  useRunStore.getState().mergeEvent(event(5, "todo.updated", { owner_id: "root", todos: [] }));
+  assert.deepEqual(useRunStore.getState().runs["run-a"].todos, []);
+  assert.equal(useRunStore.getState().runs["run-a"].todosByOwner["team-session"].length, 1);
+});
+
 test("cancellation event overrides legacy running payload until terminal confirmation", () => {
   useRunStore.getState().mergeEvents([
     event(1, "run.started", { status: "running" }),

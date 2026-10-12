@@ -279,7 +279,7 @@ class RuntimeConfigResponse(ApiModel):
     max_iterations: int | None = None
     reasoning_effort: str = "default"
     reasoning: dict[str, Any] = Field(default_factory=dict)
-    planning_backend: Literal["tasks", "todo"] = "tasks"
+    planning_backend: Literal["tasks", "todo"] = "todo"
     features: dict[str, bool] = Field(default_factory=dict)
 
 
