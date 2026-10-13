@@ -111,6 +111,27 @@ class PromptRuntime:
                 required=True,
             )
 
+        # Keep verification with implementers, not only the main controller.
+        # Tool presence selects relevant guidance; it never grants permission.
+        implementer = mode in {PromptMode.NORMAL, PromptMode.SUBAGENT, PromptMode.TEAMMATE_WORK}
+        if implementer and tools & {"write_file", "edit_file", "bash"}:
+            self._add_template(
+                fragments, "base.verification", "verification", section="static", required=True,
+            )
+
+        # Stable order independent of registry order; no instructions for absent tools.
+        for tool_name in ("repo_map", "search_code", "grep", "read_file"):
+            if tool_name in tools:
+                self._add_template(
+                    fragments, f"tools.{tool_name}", f"tool_{tool_name}",
+                    section="static", required=True,
+                )
+
+        if single_agent and "delegate_task" in tools:
+            self._add_template(
+                fragments, "tools.delegation", "delegation", section="static", required=True,
+            )
+
         project_instructions = self._project_instructions()
         if project_instructions:
             self._add(
@@ -119,7 +140,7 @@ class PromptRuntime:
                 project_instructions,
                 section="static",
                 source=".prompts/project.md",
-                required=single_agent,
+                required=True,
             )
         if tool_schema_changed:
             self._add_template(

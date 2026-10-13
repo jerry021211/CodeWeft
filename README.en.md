@@ -137,7 +137,8 @@ flowchart LR
 | [`codeagent/providers.py`](codeagent/providers.py) / [`anthropic_client.py`](codeagent/anthropic_client.py) | Model protocol adapters and streaming calls |
 | [`codeagent/tools/`](codeagent/tools) / [`code_search/`](codeagent/code_search) | Files, commands, retrieval, and tool registration |
 | [`codeagent/context/`](codeagent/context) | Request budgets, summaries, archives, and read references |
-| [`codeagent/runtime/`](codeagent/runtime) / [`teams/`](codeagent/teams) / [`worktrees/`](codeagent/worktrees) | Execution scheduling, collaboration, and Git workspace isolation |
+| [`codeagent/multiagent/`](codeagent/multiagent) / [`runtime/`](codeagent/runtime) / [`worktrees/`](codeagent/worktrees) | Native collaboration scheduling, shared validation, and Git workspaces |
+| [`codeagent/legacy/teams/`](codeagent/legacy/teams) | Compatibility for historical Team records and execution |
 | [`codeagent/web/`](codeagent/web) / [`web/src/`](web/src) | FastAPI, SQLite, SSE, and the React interface |
 
 See the [Usage guide](docs/usage-guide.md) for a fuller module overview and SDK examples.

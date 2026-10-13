@@ -45,18 +45,20 @@ codeagent/
   skills/           # skill catalog 与按需加载
   memory/           # Markdown 长期记忆与模型选择
   tasks/            # 持久化 Task 领域模型
-  runtime/          # 取消、活动监测、运行数据目录与 Team Supervisor
-  teams/            # 团队规划、消息、Session、候选交付与执行权限
-  worktrees/        # Git worktree 隔离、候选快照与现场校验
+  multiagent/       # 原生委派、依赖计划执行、检查点、恢复与交付
+  runtime/          # 取消、活动监测、运行数据目录与共享验证执行器
+  legacy/teams/     # 旧 Team 的 Session、候选交付、调度与历史恢复兼容
+  worktrees/        # 共享 Git 快照、路径范围与文件交付校验
   mcp/              # 外部 MCP Server 配置、连接与工具适配
   recovery/         # 分类、退避、fallback 与续写恢复
   events/           # 结构化运行事件与 Token 计量
   web/              # SQLite、FIFO 调度器与 FastAPI/SSE transport
 ```
 
-说明：Web 运行时、MCP、Team 和 Worktree 均已有实际实现。显式启用 Team 后，
-`runtime/background.py` 中的 `TeamSupervisor` 负责调度团队执行，`teams/` 负责团队协作，
-`worktrees/` 为代码任务提供独立工作区。
+说明：当前原生多 Agent 使用 `delegate_task`、`delegate_batch`、`execute_plan`，
+由 `multiagent/coordinator.py` 调度原 Task。旧 Team 的 `TeamSupervisor` 在
+`legacy/teams/supervisor.py`，保留旧会话的运行与恢复。新协作不依赖旧 Candidate 流程。
+模块归属和兼容范围见 [多 Agent 目录整理](multiagent-layout.md)。
 
 ## Web 工作台
 
@@ -200,6 +202,31 @@ CLI 默认启用基础 hooks：
 - `PostToolUse`：大输出提醒
 - `Stop`：工具调用次数统计
 
+Hook 管理器区分两种调用方式：`observe(event, handler)` 注册观察者，由
+`notify()` 逐个通知，返回值不改变流程；`register(event, handler)` 注册控制处理器，
+由 `decide()` 按顺序执行，首个非 `None` 结果停止后续判断。旧 `trigger()` 保留为
+`decide()` 的兼容入口，不会隐式通知观察者。观察者发生普通异常时，其余观察者仍会
+执行，随后异常向调用方报告；允许降级的组件负责记录自己的异常，不能静默丢失证据。
+
+Agent 在原有生命周期事件处先通知观察者，再运行原有控制链；只读/规划模式跳过
+`BeforeModelCall` 控制链的既有规则保持不变。`PostToolUse` 仍表示原有的工具完成边界，
+不覆盖每次重试或所有未执行的调用，完整事实记录应使用执行采集和批次结束边界。
+
+CVM 阶段 1、2 的接入集中在 `codeagent/cvm/integration.py`：
+
+| 观察事件 | 职责 |
+| --- | --- |
+| `UserInputAccepted` | 接收真实输入及其来源，更新任务记录 |
+| `RunInputReady` | 将当前目标投影到上下文；无新输入的恢复也会执行 |
+| `CollectRuntimeReminders` | 提交现有任务提醒，由 Agent 统一追加及压缩后补回 |
+| `ToolBatchFinished` | 在父线程按请求、尝试顺序入账，早于结果的上下文投影 |
+| `RunFinished` | 普通 `run()` 结束或异常退出时核对证据有效性 |
+
+`CvmToolRecorder` 在每次实际工具尝试的前后采集独立事实包，保留重试和取消结果；
+并行工作线程不直接通知 Hook 或修改父账本。每个 Agent 安装自己的 CVM 观察者，复制
+Hook 时排除绑定父 Agent 的观察者。配置、检查点格式和提示内容保持阶段 1、2 的行为，
+没有增加自动补验证或完成拦截；Team 的 CVM 仍保持关闭。
+
 普通 Agent（含只读权限）和普通子 Agent 默认启用防循环与任务预算，Team 不在本次范围内。
 保护状态独立于上下文压缩；Web checkpoint 保存状态，循环或预算停止会标记为失败，
 CLI 单次执行返回非零退出码。规则、可调阈值、恢复语义和输入识别限制见
@@ -294,6 +321,8 @@ Web 接口：`GET /api/runs/{run_id}/questions` 查看问题，
 CLI 的规划后端由 `CODEAGENT_PLANNING_MODE=auto|tasks|todo` 控制。`auto` 下交互式与单次 CLI 都使用个人 `todo_write`；显式选择 `tasks` 或在 auto 下传入 `--task-list` 可继续使用持久化 Task System。CLI、SDK 默认 TodoStore 在当前进程内维护状态。
 
 Web 新普通会话使用个人 `todo_write`，每次成功写入会把完整清单与 `todo.updated` 事件原子保存到 SQLite。刷新页面、后续轮次和进程重启后可恢复已保存清单；恢复清单不代表自动重跑中断任务。`GET /api/conversations/{id}/todos` 返回各 Agent 独立的清单，输入框上方展示主会话进度，任务面板还可查看成员步骤。
+
+停止或中断执行后保留清单，界面停止转圈并显示运行已停止；未完成步骤不会自动标成完成。再次执行时，第一次模型请求即提供最新清单，要求对照用户新消息核实已有结果、更新计划后继续；改换目标时调整或清空旧清单。新一轮尚未更新旧清单时显示“等待核对上次计划”。仅询问进度不应自行恢复旧任务。
 
 已有独立 Tasks 的历史会话保留原任务工具与依赖校验，避免隐藏旧依赖后无法继续执行。参与过 Team 的列表继续作为共享任务展示，普通会话使用自己的 todo。Team 规划阶段使用 Tasks 与 TeamPlanSubmit；执行阶段 Lead/成员保留任务查询和角色工具，并可使用以 AgentSession 为归属的个人 todo。个人步骤全部完成不会领取、完成或验收共享任务，仍需提交团队结果。todo 可以与 TaskGet/TaskList 共存，不能与 TaskCreate/TaskUpdate 同时注册。
 
@@ -769,6 +798,8 @@ TEAM_WRITE_ENABLED=true
 Team 模型响应与调用期限分别由 `TEAM_MODEL_RESPONSE_TIMEOUT` 和 `TEAM_MODEL_CALL_TIMEOUT` 控制。模型超时后保留任务、工作区和安全上下文，未知写操作不自动重放；恢复仍需检查已有执行现场。
 
 ## 运行测试
+
+可选的 CVM 验证状态与一次性提醒见 [验证监督：开启与调试](cvm-verification-guide.md)。该功能默认关闭，沿用现有 Hook、事件与 checkpoint，不增加自动测试或强制续轮。
 
 单次运行：
 

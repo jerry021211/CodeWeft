@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from codeagent import AgentConfig, CvmConfig, EnvironmentConfig
 from codeagent.planning import PlanningBackend
-from cvm_fixtures import GOLDEN, ScriptedClient, assess, digest, pack_traces, run_case, scenarios
+from cvm_fixtures import GOLDEN, ScriptedClient, assess, digest, pack_traces, run_case, run_legacy_case, scenarios
 from run_cvm_baseline import run_checked
 
 
@@ -139,10 +139,10 @@ class CvmOffBaselineTests(unittest.TestCase):
     def assert_off_case(self, identifier):
         case = next(case for case in scenarios() if case["id"] == identifier)
         expected = next(trace for trace in self.legacy["traces"] if trace["id"] == identifier)
-        # Defaults and explicit off both match an independently captured pre-change artifact.
+        # With the historical prompt fixed, default and explicit off preserve the runtime trace.
         for config in (None, CvmConfig()):
             with self.subTest(explicit_off=config is not None):
-                trace = run_case(case, cvm=config)
+                trace = run_legacy_case(case, cvm=config)
                 packed = pack_traces([trace])
                 self.assertEqual(packed["traces"][0], expected)
                 for key, value in packed["request_blobs"].items():
@@ -150,6 +150,12 @@ class CvmOffBaselineTests(unittest.TestCase):
                 observation = assess(case, trace)
                 self.assertTrue(observation["baseline_observed"])
                 self.assertEqual(observation["known_gap_observed"], identifier != "normal_investigation")
+
+    def test_current_prompts_preserve_default_and_explicit_off_equivalence(self):
+        for case in scenarios():
+            with self.subTest(case=case["id"]):
+                self.assertEqual(pack_traces([run_case(case)]),
+                                 pack_traces([run_case(case, cvm=CvmConfig())]))
 
     def test_off_followup_goal_overwrite_is_recorded(self):
         self.assert_off_case("followup_goal")

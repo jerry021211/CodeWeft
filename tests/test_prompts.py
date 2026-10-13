@@ -127,6 +127,83 @@ class PromptRuntimeTests(unittest.TestCase):
         self.assertIn("## 结果", result.system_prompt)
         self.assertNotIn("subagent 工具用于", result.system_prompt)
 
+    def test_navigation_guidance_tracks_tools_for_every_role(self) -> None:
+        runtime = PromptRuntime(workspace=Path.cwd())
+        navigation = ("repo_map", "search_code", "grep", "read_file")
+        for mode in PromptMode:
+            for name in navigation:
+                with self.subTest(mode=mode, tool=name):
+                    result = runtime.assemble(mode=mode, tool_schemas=[{"name": name}])
+                    fragments = {item.id for item in result.trace if item.included}
+                    self.assertEqual(
+                        fragments & {f"tools.{tool}" for tool in navigation}, {f"tools.{name}"},
+                    )
+                    self.assertIn(load_template(f"tool_{name}"), result.system_prompt)
+
+    def test_writer_verification_is_shared_without_controller_workflow(self) -> None:
+        runtime = PromptRuntime(workspace=Path.cwd())
+        for mode in PromptMode:
+            for names in (["read_file"], ["read_file", "write_file"], ["bash"]):
+                with self.subTest(mode=mode, tools=names):
+                    result = runtime.assemble(mode=mode, tool_schemas=[{"name": n} for n in names])
+                    fragments = {item.id for item in result.trace if item.included}
+                    expected = mode in {
+                        PromptMode.NORMAL, PromptMode.SUBAGENT, PromptMode.TEAMMATE_WORK,
+                    } and bool(set(names) & {"write_file", "bash"})
+                    self.assertEqual("base.verification" in fragments, expected)
+                    self.assertEqual(load_template("verification") in result.system_prompt, expected)
+                    if mode is not PromptMode.NORMAL:
+                        self.assertNotIn("base.execution", fragments)
+                        self.assertNotIn("tools.delegation", fragments)
+
+    def test_collaboration_guidance_is_main_only_and_capability_gated(self) -> None:
+        runtime = PromptRuntime(workspace=Path.cwd())
+        for mode in PromptMode:
+            for available in (False, True):
+                with self.subTest(mode=mode, available=available):
+                    result = runtime.assemble(
+                        mode=mode, tool_schemas=[{"name": "delegate_task"}] if available else [],
+                    )
+                    self.assertEqual(
+                        load_template("delegation") in result.system_prompt,
+                        available and mode is PromptMode.NORMAL,
+                    )
+
+    def test_writer_rules_survive_reference_pressure_with_stable_prefix(self) -> None:
+        tools = [{"name": name} for name in ("read_file", "edit_file", "grep", "load_memory")]
+        baseline = PromptRuntime(workspace=Path.cwd()).assemble(
+            mode=PromptMode.SUBAGENT, tool_schemas=tools,
+        )
+        dynamic_size = next(item.chars for item in baseline.trace if item.id == "runtime.reminder")
+        runtime = PromptRuntime(workspace=Path.cwd(), config=PromptConfig(dynamic_budget_chars=dynamic_size))
+        first = runtime.assemble(
+            mode=PromptMode.SUBAGENT, tool_schemas=tools, selected_memory_context="reference " * 1000,
+        )
+        second = runtime.assemble(
+            mode=PromptMode.SUBAGENT, tool_schemas=list(reversed(tools)),
+            selected_memory_context="other reference " * 1000,
+        )
+        self.assertEqual(first.system_prompt, second.system_prompt)
+        self.assertEqual(first.prompt_hash, second.prompt_hash)
+        for name in ("core", "verification", "tool_read_file", "tool_grep"):
+            self.assertIn(load_template(name), first.system_prompt)
+        self.assertFalse(next(item for item in first.trace if item.id == "memory.selected").included)
+
+    def test_project_constraints_cannot_be_dropped_for_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".prompts").mkdir()
+            instructions = "Project write scope and validation contract. " * 100
+            (root / ".prompts/project.md").write_text(instructions, encoding="utf-8")
+            for mode in (PromptMode.SUBAGENT, PromptMode.TEAMMATE_WORK, PromptMode.TEAMMATE_ANALYSIS):
+                with self.subTest(mode=mode):
+                    normal = PromptRuntime(workspace=root).assemble(mode=mode, tool_schemas=[])
+                    self.assertIn(instructions.strip(), normal.system_prompt)
+                    static_size = sum(item.chars + 2 for item in normal.trace if item.section == "static") - 2
+                    limited = PromptRuntime(workspace=root, config=PromptConfig(static_budget_chars=static_size - 1))
+                    with self.assertRaisesRegex(ValueError, "必要片段"):
+                        limited.assemble(mode=mode, tool_schemas=[])
+
     def test_team_roles_receive_distinct_runtime_prompts(self) -> None:
         runtime = PromptRuntime(workspace=Path.cwd())
 

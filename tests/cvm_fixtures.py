@@ -6,7 +6,7 @@ desired outcomes are labels for later stages, never production CVM decisions.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date
 import hashlib
 import json
@@ -118,7 +118,28 @@ def normalize(value, root):
     return value
 
 
-def run_case(case, *, cvm=None):
+class FrozenBaselinePromptRuntime(PromptRuntime):
+    """Use the historical prompt as a fixed input for runtime compatibility checks.
+
+    Current prompt behavior is covered separately; the immutable golden trace
+    must not be rewritten whenever engineering guidance changes.
+    """
+    def assemble(self, **kwargs):
+        result = super().assemble(**kwargs)
+        return replace(result, system_prompt=self.frozen_system,
+                       prompt_hash=hashlib.sha256(self.frozen_system.encode("utf-8")).hexdigest())
+
+
+def run_legacy_case(case, *, cvm=None):
+    legacy = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    trace = next(item for item in legacy["traces"] if item["id"] == case["id"])
+    system_keys = {request["system"] for request in trace["requests"]}
+    if len(system_keys) != 1:
+        raise AssertionError("Historical fixture requires one stable system prompt")
+    return run_case(case, cvm=cvm, frozen_system=legacy["request_blobs"][system_keys.pop()])
+
+
+def run_case(case, *, cvm=None, frozen_system=None):
     with TemporaryDirectory(prefix="cvm-baseline-") as directory:
         root = Path(directory).resolve()
         source = root / "implementation.py"
@@ -180,9 +201,11 @@ def run_case(case, *, cvm=None):
         agent = Agent(client=client, tools=registry, config=config, allow_subagents=False, context=context,
                       hooks=create_default_hooks(workspace=root, log=lambda _: None,
                                                  planning_backend="tasks", task_state_provider=lambda: "[]"),
-                      prompt_runtime=PromptRuntime(workspace=root, runtime_platform=RuntimePlatform(
+                      prompt_runtime=(FrozenBaselinePromptRuntime if frozen_system is not None else PromptRuntime)(workspace=root, runtime_platform=RuntimePlatform(
                           "Windows", "PowerShell", "pwsh", (), "Offline fixture; commands are simulated.")),
                       event_emitter=EventEmitter(CallbackEventSink(events.append)))
+        if frozen_system is not None:
+            agent.prompt_runtime.frozen_system = frozen_system
         turns = []
         archive_ids = count(1)
         # Freeze prompt date and archive IDs, not time budgets or Agent execution.

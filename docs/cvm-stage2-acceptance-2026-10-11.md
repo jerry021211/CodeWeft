@@ -1,5 +1,17 @@
 # CVM 阶段 2 实施与验收记录
 
+> 2026-10-12 接入重构：下文保留阶段 2 的原始验收记录。当前每次尝试的采集已封装为 `CvmToolRecorder`，入账和结束核对通过观察 Hook 接入，集中在 `codeagent/cvm/integration.py`。仍不依赖 `PostToolUse` 控制链采集原始事实，配置与存储格式不变。接口说明见 [使用指南](usage-guide.md)。
+
+本次重构新增 14 项测试，覆盖观察者返回值和异常不跳过后续观察者、控制链兼容、父子 Agent 隔离、并行父线程入账、原始结果不受后置观察者修改、取消原因保留和资源收尾。综合回归收集 325 项，324 项通过，1 项 POSIX 专用测试在 Windows 跳过；六个离线场景的 off 请求与冻结基线一致，真实工具探针通过。测试期间源文件保持一致。沙箱内首次运行的两项 Windows 进程清理测试失败，沙箱外完整复测通过；没有修改进程清理代码或放宽断言。
+
+复测命令（项目根目录）：
+
+```powershell
+python tests/run_cvm_stage2.py --pattern test_hook_manager.py --pattern test_cvm_hooks.py --pattern 'test_loop_guard*.py' --pattern test_permissions_hooks.py --pattern test_read_only.py --pattern test_round_budget.py --pattern test_agent.py --pattern test_cli.py --output eval-results/cvm-hook-refactor/acceptance.json
+```
+
+报告：重构验收 JSON（本地生成文件：`eval-results/cvm-hook-refactor/acceptance.json`），测试日志（本地生成文件：`eval-results/cvm-hook-refactor-tests.log`）。测试使用本地脚本模型和临时工作区，没有执行真实模型效果评测。
+
 阶段 2 增加工具事实账本和版本化验证记录：保留每次实际尝试的退出码、进程状态、输出完整性、测试汇总，以及检查前后的声明文件集合哈希。一轮结束时重新核对文件，发现后续编辑、新增或删除后将旧验证标为 stale。
 
 本阶段只观察。没有自动补跑命令、额外模型调用、完成门禁或前端验收卡片；模型仍可能在测试失败后口头说成功，账本会独立保留失败事实。阶段 3 尚未实施。默认配置仍全部 off，evidence 当前只开放 off/shadow。
@@ -145,3 +157,7 @@ python tests/run_cvm_stage2.py --pattern 'test_loop_guard*.py' --pattern test_ro
 验证中两个原有 Windows 清理测试在沙箱内失败，独立运行可复现；允许正常 taskkill 后通过，未修改 BashTool 或放宽其测试。另修正 `test_read_only.py` 的旧检查点夹具：补齐当前 Todo 恢复所需的 todos 和 metadata，与真实检查点结构一致，没有删减只读断言。工作区原有 Todo、前端和文档改动均保留。
 
 结果文件：验收 JSON（本地生成文件 `eval-results/cvm-stage2/stage2-acceptance.json`，不随仓库发布）、测试日志（本地生成文件 `eval-results/cvm-stage2/stage2-tests.log`，不随仓库发布）。本阶段没有调用真实模型服务，没有运行全库或前端构建，不将离线边界验证等同于真实模型效果评测。
+
+## 发布前复核（2026-10-14）
+
+本次验收执行 208 项测试（1 项条件跳过）及 6 个离线场景，通过。历史兼容性比较固定使用不可变基线中的系统提示词，检查运行循环和工具行为；不会改写历史基线来吸收新提示词。另有独立用例使用当前提示词核对默认配置与显式关闭 CVM 的完整请求及执行结果一致。`off_matches_legacy=True` 仅适用于固定历史提示词的兼容性检查，不表示当前工程提示词与旧版相同。

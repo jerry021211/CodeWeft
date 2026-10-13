@@ -137,7 +137,8 @@ flowchart LR
 | [`codeagent/providers.py`](codeagent/providers.py) / [`anthropic_client.py`](codeagent/anthropic_client.py) | 模型协议适配与流式调用 |
 | [`codeagent/tools/`](codeagent/tools) / [`code_search/`](codeagent/code_search) | 文件、命令、搜索与工具注册 |
 | [`codeagent/context/`](codeagent/context) | 请求预算、摘要、归档与读取引用 |
-| [`codeagent/runtime/`](codeagent/runtime) / [`teams/`](codeagent/teams) / [`worktrees/`](codeagent/worktrees) | 执行调度、协作与 Git 工作区隔离 |
+| [`codeagent/multiagent/`](codeagent/multiagent) / [`runtime/`](codeagent/runtime) / [`worktrees/`](codeagent/worktrees) | 原生协作调度、共享验证与 Git 工作目录 |
+| [`codeagent/legacy/teams/`](codeagent/legacy/teams) | 旧 Team 历史记录与执行兼容；[结构说明](docs/multiagent-layout.md) |
 | [`codeagent/web/`](codeagent/web) / [`web/src/`](web/src) | FastAPI、SQLite、SSE 与 React 界面 |
 
 更完整的模块说明和 SDK 示例见 [使用指南](docs/usage-guide.md)。

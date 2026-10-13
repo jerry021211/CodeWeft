@@ -67,7 +67,9 @@ def check(workspace, suite):
                       fn("B2|0") == {"id": "B2", "amount": "0"}]
         elif suite == "totals":
             fn = ns["total_amount"]
-            checks = [abs(fn([{"amount": "10.20"}, {"amount": 3.3}]) - 13.5) < 1e-8, fn([]) == 0]
+            total, empty = fn([{"amount": "10.20"}, {"amount": 3.3}]), fn([])
+            numeric = lambda value: isinstance(value, (int, float, decimal.Decimal)) and not isinstance(value, bool)
+            checks = [numeric(total) and abs(float(total) - 13.5) < 1e-8, numeric(empty) and empty == 0]
         else:
             fn = ns["export"]
             encoded = fn([{"id": "A1", "amount": "10.2"}, {"id": "中", "amount": 0}])

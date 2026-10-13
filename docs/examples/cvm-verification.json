@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "command": "python -m unittest discover -s tests -p test_cvm_supervision.py",
+      "cwd": ".",
+      "inputs": ["codeagent", "tests"]
+    }
+  ]
+}

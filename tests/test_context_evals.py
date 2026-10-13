@@ -170,7 +170,7 @@ class ContextEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             # Leave room for tool schemas while retaining enough pressure to summarize.
             root = run_suite(output=Path(temp), cases=["S03"], variants=["D"], scale="stress",
-                             context_window_tokens=41000, summary_context_window_tokens=1_000_000)
+                             context_window_tokens=43000, summary_context_window_tokens=1_000_000)
             row = read_json(root / "result.json")["results"][0]
             self.assertTrue(row["task_success"], row["failure_reasons"])
             self.assertGreater(row["metrics"]["summary_api_requests"], 0)

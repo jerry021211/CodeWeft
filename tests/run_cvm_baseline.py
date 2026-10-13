@@ -76,7 +76,7 @@ def main(argv=None, *, stage=0):
         return 1
 
     from codeagent.cvm import CvmConfig
-    from cvm_fixtures import GOLDEN, assess, baseline_config, digest, pack_traces, run_case, scenarios, source_manifest
+    from cvm_fixtures import GOLDEN, assess, baseline_config, digest, pack_traces, run_legacy_case as run_case, scenarios, source_manifest
     cases = scenarios()
     config = CvmConfig()
     traces = [run_case(case, cvm=config) for case in cases]
@@ -104,6 +104,7 @@ def main(argv=None, *, stage=0):
         "tests": {"patterns": patterns, "run": result.testsRun, "skipped": len(result.skipped)},
         "config": baseline_config(), "cvm": config.snapshot(),
         "scenario_set_sha256": digest(cases), "scenarios": cases,
+        "prompt_policy": "frozen historical system prompt; current prompt parity tested separately",
         "off_matches_legacy": compatible, "observations": observations, **packed,
         **({'stage2_probe': stage2_probe} if stage2_probe is not None else {}),
     }
