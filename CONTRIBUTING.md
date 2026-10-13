@@ -93,4 +93,4 @@ git diff --stat
 
 Issue 请提供版本或提交号、操作系统、最小复现步骤、预期与实际行为，以及脱敏后的错误信息。模型问题可补充协议和模型名称，勿附 API 密钥或完整私人会话。
 
-Pull Request 说明解决的问题、修改后的行为和实际执行的验证；存在未验证部分时直接写明。保持改动聚焦，避免混入无关格式调整、运行产物或本地配置。新功能和较大改动可以先在 [Issues](https://github.com/jerry021211/Coding-Agent/issues) 讨论范围。
+Pull Request 说明解决的问题、修改后的行为和实际执行的验证；存在未验证部分时直接写明。保持改动聚焦，避免混入无关格式调整、运行产物或本地配置。新功能和较大改动可以先在 [Issues](https://github.com/jerry021211/CodeWeft/issues) 讨论范围。

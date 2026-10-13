@@ -45,8 +45,8 @@ Start with the **web workbench**. You need **Python 3.11+, Git, Node.js 22.12+, 
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/jerry021211/Coding-Agent.git
-cd Coding-Agent
+git clone https://github.com/jerry021211/CodeWeft.git
+cd CodeWeft
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[web]"
 npm.cmd --prefix web ci
@@ -58,8 +58,8 @@ npm.cmd --prefix web run build
 <summary>macOS / Linux</summary>
 
 ```bash
-git clone https://github.com/jerry021211/Coding-Agent.git
-cd Coding-Agent
+git clone https://github.com/jerry021211/CodeWeft.git
+cd CodeWeft
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[web]"
 npm --prefix web ci
@@ -150,7 +150,7 @@ The [full documentation index](docs/README.md) also covers optional experiments 
 
 ## Development and validation
 
-Reproducible bug reports and improvement suggestions are welcome through [Issues](https://github.com/jerry021211/Coding-Agent/issues). See [Contributing](CONTRIBUTING.md) for development setup, tests, and submission guidance, and the [Web development guide](web/README.md) for frontend work.
+Reproducible bug reports and improvement suggestions are welcome through [Issues](https://github.com/jerry021211/CodeWeft/issues). See [Contributing](CONTRIBUTING.md) for development setup, tests, and submission guidance, and the [Web development guide](web/README.md) for frontend work.
 
 ## Acknowledgments
 

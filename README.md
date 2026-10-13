@@ -45,8 +45,8 @@
 Windows PowerShell：
 
 ```powershell
-git clone https://github.com/jerry021211/Coding-Agent.git
-cd Coding-Agent
+git clone https://github.com/jerry021211/CodeWeft.git
+cd CodeWeft
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[web]"
 npm.cmd --prefix web ci
@@ -58,8 +58,8 @@ npm.cmd --prefix web run build
 <summary>macOS / Linux</summary>
 
 ```bash
-git clone https://github.com/jerry021211/Coding-Agent.git
-cd Coding-Agent
+git clone https://github.com/jerry021211/CodeWeft.git
+cd CodeWeft
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[web]"
 npm --prefix web ci
@@ -148,7 +148,7 @@ Web 面向本地单用户，仅监听本机地址。数据默认保存在仓库�
 
 ## 开发与验证
 
-欢迎通过 [Issues](https://github.com/jerry021211/Coding-Agent/issues) 提交可复现的问题或改进建议。开发环境、测试命令与提交要求见[贡献指南](CONTRIBUTING.md)，前端开发见 [Web 开发说明](web/README.md)。
+欢迎通过 [Issues](https://github.com/jerry021211/CodeWeft/issues) 提交可复现的问题或改进建议。开发环境、测试命令与提交要求见[贡献指南](CONTRIBUTING.md)，前端开发见 [Web 开发说明](web/README.md)。
 
 ## 致谢
 
