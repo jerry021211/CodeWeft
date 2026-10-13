@@ -150,12 +150,6 @@ Web 面向本地单用户，仅监听本机地址。数据默认保存在仓库�
 
 欢迎通过 [Issues](https://github.com/jerry021211/CodeWeft/issues) 提交可复现的问题或改进建议。开发环境、测试命令与提交要求见[贡献指南](CONTRIBUTING.md)，前端开发见 [Web 开发说明](web/README.md)。
 
-## 致谢
-
-项目设计参考了 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 对 Agent loop、工具、权限与记忆的分层组织，并在此基础上实现本地 Web 工作台、上下文管理、代码检索与协作。
-
-Weft 是织物的纬线；CodeWeft 取意于将模型、工具与 Agent 协作连接到本地项目的开发流程。
-
 ## 开源协议
 
 本项目采用 [MIT License](LICENSE)。

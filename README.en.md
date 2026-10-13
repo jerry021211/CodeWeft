@@ -152,12 +152,6 @@ The [full documentation index](docs/README.md) also covers optional experiments 
 
 Reproducible bug reports and improvement suggestions are welcome through [Issues](https://github.com/jerry021211/CodeWeft/issues). See [Contributing](CONTRIBUTING.md) for development setup, tests, and submission guidance, and the [Web development guide](web/README.md) for frontend work.
 
-## Acknowledgments
-
-The project draws on [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) and its separation of the agent loop, tools, permissions, and memory. CodeWeft builds on these ideas with a local web workbench, context management, code retrieval, and collaboration.
-
-The weft runs across the threads of a fabric. CodeWeft takes its name from connecting models, tools, and collaborating agents into a local development workflow.
-
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
