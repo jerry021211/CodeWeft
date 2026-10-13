@@ -1,5 +1,7 @@
 # 原生多 Agent：工具拆分与统一 Task
 
+> 本文保留原生协作的实现与迁移记录。当前用法、可用会话范围和恢复边界见 [多 Agent 协作](collaboration.md)；更多资料见 [文档导航](README.md)。
+
 本轮在原生协作内核上完成工具拆分，任务定义与状态统一回原 Task 系统。原来的 `collaborate(action=...)` 不再注册；普通 Agent 不要求用户选择 Team 模式。
 
 ## 三条执行路径
@@ -65,7 +67,7 @@
 
 历史 TeamRun/Candidate 兼容代码已集中到 `codeagent/legacy/teams/`，仍由旧 API、历史会话恢复和 repository 调用。新路径不生成这些记录，也不再从旧 Candidate / IntegrationService 借用验证和回写函数。共享验证归 `runtime/validation.py`，Git 快照和文件校验归 `worktrees/`；新原生重复任务系统已撤掉。旧普通会话继续按检查点保留原工具集合；新对话和此前原生协作会话使用拆分工具。
 
-目录和依赖边界见 [原生协作模块说明](../codeagent/multiagent/README.md) 和 [旧 Team 兼容边界](../codeagent/legacy/teams/README.md)。删除了原目录中的旧实现和未使用的 `BackgroundTaskRunner` 别名；没有保留第二份转发模块。旧 Team 仍在使用的执行能力保留，数据库、现场和 HTTP 协议不迁移。
+目录和依赖边界见 [原生协作模块说明](../codeagent/multiagent/README.md) 和 [旧 Team 兼容边界](multiagent-layout.md#保留边界)。删除了原目录中的旧实现和未使用的 `BackgroundTaskRunner` 别名；没有保留第二份转发模块。旧 Team 仍在使用的执行能力保留，数据库、现场和 HTTP 协议不迁移。
 
 新工具集与旧 collaborate 的请求前缀必然不同，升级首次调用可能影响缓存命中。之后 schema 不随 Task 创建、成员数量或阶段切换；普通 Agent 既有工具与缓存路径保留。测试覆盖任务创建、委派前后系统前缀及工具 schema 稳定性。
 

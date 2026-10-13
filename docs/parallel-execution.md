@@ -1,6 +1,8 @@
 # 普通 Agent 并行执行
 
-工具批次与单层只读子 Agent 支持并行，CLI、普通 Web 和 SDK 共用执行核心。Team 不使用这套子任务运行时。
+本文说明共享执行核心中的安全工具并行，以及 CLI、SDK 和保留旧工具集合的 Web 会话使用的 `subagent` 机制。新建 Web 普通会话使用 [原生多 Agent 协作](collaboration.md) 的委派工具；旧 Team 不使用本页的子任务运行时。[文档导航](README.md)
+
+普通 `subagent` 默认继承权限并前台串行执行；显式只读子任务才支持并行或后台运行。整个会话的只读保护会禁止委派，与单个子任务的 `access="read_only"` 不是同一个设置。
 
 ## 使用
 

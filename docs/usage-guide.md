@@ -1,6 +1,6 @@
 # CodeWeft 使用指南
 
-[返回项目首页](../README.md)
+[返回项目首页](../README.md) · [文档导航](README.md)
 
 本文集中说明配置、工具、SDK 和运行行为。首次使用请先阅读 [快速开始](../README.md#快速开始)。除非另有说明，命令均在仓库根目录执行。
 
@@ -8,7 +8,9 @@
 
 - [当前结构](#当前结构)
 - [Web 工作台](#web-工作台)
+- [原生协作与先出方案](#原生协作与先出方案)
 - [环境配置](#环境配置)
+- [Python SDK](#python-sdk)
 - [可选联网搜索](#可选联网搜索)
 - [只读权限](#只读权限)
 - [用户提问：ask_user](#用户提问ask_user)
@@ -22,7 +24,7 @@
 - [长期记忆：Memory](#长期记忆memory)
 - [上下文压缩与工具结果](#上下文压缩与工具结果)
 - [接入外部 MCP 工具](#接入外部-mcp-工具)
-- [Agent Team](#agent-team)
+- [Agent Team（历史兼容）](#agent-team)
 - [运行测试](#运行测试)
 
 ## 当前结构
@@ -62,24 +64,22 @@ codeagent/
 
 ## Web 工作台
 
-侧栏底部的 **模型设置** 页面可配置对话模型协议、服务地址与密钥，并独立配置语音识别和向量模型。
+侧栏底部的 **设置 → 模型与能力** 可配置对话模型协议、服务地址与密钥，并独立配置语音识别和向量模型。
 支持获取模型列表、保存后立即生效和重启恢复；首次启动 Web 也可以在页面完成模型配置。
 详细用法见 [模型服务配置](model-services.md#在网页中配置)。
 
-项目现在包含一个本机单用户 Coding Cockpit：左侧管理会话，中间显示对话、
+本机工作台面向单用户使用：左侧按项目管理会话，中间显示对话、
 流式回复和 Agent 动作，右侧展示 Token、持久化任务、子 Agent、恢复记录、文件改动与
 脱敏后的调试事件。消息、Run、审批、模型调用用量、事件流和 checkpoint 持久化在
 CodeWeft 外部数据目录的 `state/state.db`。新建对话时可以从页面选择任意已有的本机项目
 目录；每个对话永久绑定自己的工作区，后续执行使用该目录专属的 Agent 和工具状态。
 
-安装并构建：
+安装并构建（Python 3.11+、Git，推荐 Node.js 22.12+；先按首页创建并激活虚拟环境）：
 
 ```powershell
 python -m pip install -e ".[web]"
-Set-Location web
-npm.cmd install
-npm.cmd run build
-Set-Location ..
+npm.cmd --prefix web ci
+npm.cmd --prefix web run build
 ```
 
 启动（只监听本机）：
@@ -88,12 +88,13 @@ Set-Location ..
 codeagent-web --workspace . --port 8765
 ```
 
-然后访问 `http://127.0.0.1:8765`。开发前端时，可另开终端运行
-`npm.cmd run dev`；Vite 会把 `/api` 代理到 8765 端口。
+然后访问 [http://127.0.0.1:8765](http://127.0.0.1:8765)，保存对话模型配置后，点击 **新建项目** 选择已有的本机目录。
+点击输入框下方的 **Agent** 按钮打开执行方式菜单，选择 **Agent** 或 **只读**，也可在菜单内开启 **先出方案**。
+macOS / Linux 将 `npm.cmd` 换成 `npm`。前端开发流程见 [Web 开发指南](../web/README.md)。
 
 Web 运行时有以下边界：
 
-- `--workspace` 是数据存储位置和新对话的默认目录，不再是唯一可打开的项目。
+- `--workspace` 是初始工作区，不是唯一可打开的项目，也不是运行时数据目录；数据位置由 `CODEAGENT_DATA_DIR` 或系统默认目录决定。
 - 所有文件和搜索工具限制在当前对话绑定的工作区内，并防止符号链接逃逸。
 - 根任务使用 FIFO 队列，默认最多 4 个会话并行；同一会话只能有一个排队或运行中的
   任务。`CODEAGENT_WEB_MAX_CONCURRENT_RUNS` 可设置正整数并发上限，设为 `1` 恢复
@@ -108,6 +109,27 @@ Web 运行时有以下边界：
   子 Agent 等 `call_kind` 汇总；界面同时展示缓存读取量和缓存命中率，provider
   不返回 usage 时明确标记为不可用。
 - 调试面板不会展示完整 system prompt 或隐藏推理内容，事件 payload 会截断和脱敏。
+
+## 原生协作与先出方案
+
+新建 Web 会话默认使用 **Agent**：你描述目标，由主 Agent 选择直接完成或按需委派成员，不需要开启旧 Team。
+成员任务与右侧任务面板共用 Task 编号和依赖；对话中可查看成员执行链路、报告以及实际记录的验证结果。
+
+| 执行入口 | 用途 | 项目文件 |
+| --- | --- | --- |
+| `delegate_task` | 一个边界明确的已有 Task | 成员在当前项目目录执行 |
+| `delegate_batch` | 1–5 个已有 Task，按依赖和冲突安排并行 | 成员共享当前项目目录 |
+| `execute_plan` | 1–32 个 Task 的持久依赖计划 | 有写任务时在受管理的协作目录执行，验证后回写；纯只读计划仍在当前项目 |
+
+单任务和批量任务的文件修改不会因失败自动回滚；计划路径保留检查点、验证与交付记录，遇到冲突或未知结果时保留现场。
+具体选择、验证与恢复方法见 [原生协作指南](collaboration.md)。历史普通会话会沿用检查点中的旧工具集合；需要当前委派入口时新建会话。
+
+希望先审阅实施步骤时，在 **执行方式 → 先出方案** 中开启规划。Agent 调查项目并提交可预览的方案，
+你可以要求修改、放弃，或 **批准并执行**。这与个人 `todo_write` 步骤清单、CLI 的 `--planning-mode` 配置是不同机制。
+**只读** 限制工具副作用，批准方案不会解除只读权限；完整流程见 [先出方案](plan-mode.md)。
+
+CLI 和基础 Python SDK 继续使用普通 Agent 的 `subagent`、Todo/Tasks 后端，不自动提供上述 Web 原生委派和方案审批流程。
+旧 Team 的继续执行与恢复见本文末尾的 [历史兼容说明](#agent-team)。
 
 ## 环境配置
 
@@ -139,7 +161,7 @@ Team 成员继承启动任务的选择。摘要、记忆和搜索改写等辅助
 官方协议依据：[思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)、
 [模型元数据](https://api-docs.deepseek.com/api/list-models/)。
 
-普通 Agent 现在支持同一 Run 内的读取工具与只读子 Agent 并行。默认每个 Run 最多
+CLI、基础 SDK 和保留旧工具集合的 Web 会话支持同一 Run 内的读取工具与只读子 Agent 并行。默认每个 Run 最多
 4 个并行读取、3 个子 Agent；另有进程级请求限额。写入、shell、MCP、`search_code`
 和未声明并发合同的自定义工具仍串行。关闭 `CODEAGENT_PARALLEL_ENABLED` 可回退。
 
@@ -152,47 +174,75 @@ Team 成员继承启动任务的选择。摘要、记忆和搜索改写等辅助
 旧的 `subagent(description)` 保持前台串行行为。独立调查可使用
 `subagent(description, access="read_only")`，同轮多个调用可以同时执行；再传
 `run_in_background=true` 可让主 Agent 继续独立读取。`subagent_result` 查询或有限等待，
-`subagent_cancel` 停止单项；Web 的 Agent 面板也提供结果和停止入口。
+`subagent_cancel` 停止单项；历史 Web 会话仍可查看对应的子 Agent 活动。
 
-子 Agent 只有明确允许的读取和私有归档工具，不再委派。后台结果在安全边界通知主 Agent，
+`access="read_only"` 的子 Agent 只有明确允许的读取和私有归档工具，不再委派。后台结果在安全边界通知主 Agent，
 写入前和最终回答前收齐当前 Run 的后台任务。取消一个 child 不影响兄弟；进程重启后未完成
 任务标记为 interrupted，不自动重放。多个会话或外部编辑器仍可能修改共享目录，这不是文件快照隔离。
 配置和实现边界见 [普通 Agent 并行说明](parallel-execution.md)。
 
-复制 `.env.example` 为 `.env`，按你的模型服务填写：
+使用 CLI 或 SDK 时，可参考仓库的 `.env.example`，在**实际启动目录或其父目录**创建 `.env`，也可以在启动进程前导出环境变量。按你的模型服务填写：
 
 ```bash
-MODEL_ID=claude-3-5-sonnet-latest
-API_KEY=your_api_key_here
-BASE_URL=
-MAX_TOKENS=32000
-STREAMING=false
+MODEL_PROTOCOL=openai_chat
+MODEL_ID=your-model-id
+API_KEY=your-api-key
+BASE_URL=https://your-provider.example/v1
+STREAMING=true
 CODEAGENT_PLANNING_MODE=auto
 ```
+
+配置加载从当前工作目录向父目录查找，使用找到的第一个 `.env`；已导出的环境变量不会被该文件覆盖。
+切换到其他项目再运行 `codeagent` 或 SDK 时，不会因为可编辑安装而自动读取 CodeWeft 安装仓库中的 `.env`。
+Web、CLI 和 SDK 指向同一个 `CODEAGENT_DATA_DIR`（未设置时使用同一系统默认目录）时，可以共用 Web 已保存的模型设置；这些设置优先于对应环境变量。
 
 主 Agent 和子 Agent 的每次逻辑执行固定最多 200 轮，第 185 轮调用模型前提醒收尾。暂停和恢复沿用已用轮数，不调用第 201 轮；第 200 轮已产生的工具调用仍完成结果保存。旧 `MAX_ITERATIONS` 配置不再覆盖该固定值。模型调用次数和工具调用次数仅统计，不设执行次数上限，旧 `CODEAGENT_RUN_MAX_MODEL_CALLS`、`CODEAGENT_RUN_MAX_TOOL_CALLS` 不再生效；活动时间预算、可选总 Token 预算、单次操作超时和循环检测继续生效。
 
 一轮按主执行循环计数；摘要请求和同轮供应商重试计入模型调用统计，不额外增加轮数。收尾提醒作为运行时消息进入模型上下文，压缩后若提醒不在发送内容中会重新附加，再做完整请求预算校验。
 
-代码里可通过 `EnvironmentConfig.from_env()` 构建运行配置：
+## Python SDK
+
+在 CodeWeft 仓库根目录安装核心包 `python -m pip install -e .`，再切换到目标项目目录运行下面的脚本。
+若使用 `.env`，将它放在运行脚本时的当前目录或其父目录；安装仓库中的 `.env` 不会自动随项目切换生效，也可事先导出环境变量。
+`EnvironmentConfig.from_env()` 按上文规则读取配置；指向同一运行时数据目录时可共用 Web 已保存的模型设置，且它们优先于对应环境变量。
+此示例构造只读 Agent，调查当前目录并返回 `AgentResult`，会产生真实模型调用。
 
 ```python
+from pathlib import Path
+
 from codeagent import (
     Agent,
     EnvironmentConfig,
+    PlanningBackend,
     TodoStore,
     create_default_hooks,
     create_default_registry,
 )
+from codeagent.tools.workspace import WorkspaceGuard
 
+workspace = Path.cwd()
 env = EnvironmentConfig.from_env()
-agent_config = env.to_agent_config()
-client = env.create_model_client(stream=True, on_text=print)
 todo_store = TodoStore()
-tools = create_default_registry(todo_store=todo_store)
-hooks = create_default_hooks(todo_store=todo_store)
-agent = Agent(client=client, tools=tools, config=agent_config, hooks=hooks)
+agent = Agent(
+    client=env.create_model_client(stream=False),
+    tools=create_default_registry(
+        workspace_guard=WorkspaceGuard(workspace),
+        todo_store=todo_store,
+    ),
+    config=env.to_agent_config(planning_backend=PlanningBackend.TODO),
+    hooks=create_default_hooks(workspace=workspace, todo_store=todo_store),
+    read_only=True,
+)
+result = agent.run("梳理当前项目的入口、主要模块和测试方式，给出关键文件路径。")
+print(result.final_text)
+print(f"停止原因：{result.stop_reason}；执行轮数：{result.iterations}")
 ```
+
+`result.messages` 保存本次 Agent 的消息历史，`result.usage` 提供用量汇总。`stop_reason` 是执行停止原因，不能单独证明代码或测试通过。
+实例还可继续调用 `agent.run(...)`；普通 Agent 空闲时可用 `agent.set_read_only(False)` 允许按权限策略执行修改。
+这个基础示例不创建 Web 会话、持久化协作任务或审批界面；检索、Skills、记忆、MCP 等能力需像 CLI 工厂一样按需装配。
+
+### Hooks 与运行扩展
 
 CLI 默认启用基础 hooks：
 
@@ -266,7 +316,7 @@ CODEAGENT_WEB_SEARCH_TIMEOUT=20
 
 只读保护是独立的工具权限，不改变助手角色或任务：
 
-- **Web**：输入框下勾选“只读保护”。权限随每次请求保存，重新打开会话时恢复最近一次选择；
+- **Web**：在输入框下的“执行方式”菜单选择“只读”。权限随每次请求保存，重新打开会话时恢复最近一次选择；
   运行或排队期间不能修改当前请求的权限。
 - **CLI**：`python -m codeagent --read-only "解释这个项目的架构"`；交互会话使用
   `/read-only on`、`/read-only off`，只读时提示符显示 `[read-only] >`。
@@ -320,11 +370,16 @@ Web 接口：`GET /api/runs/{run_id}/questions` 查看问题，
 
 CLI 的规划后端由 `CODEAGENT_PLANNING_MODE=auto|tasks|todo` 控制。`auto` 下交互式与单次 CLI 都使用个人 `todo_write`；显式选择 `tasks` 或在 auto 下传入 `--task-list` 可继续使用持久化 Task System。CLI、SDK 默认 TodoStore 在当前进程内维护状态。
 
+这里的“规划后端”只决定步骤和任务如何记录，不会启用 Web 的“先出方案”或等待方案批准。
+
 Web 新普通会话使用个人 `todo_write`，每次成功写入会把完整清单与 `todo.updated` 事件原子保存到 SQLite。刷新页面、后续轮次和进程重启后可恢复已保存清单；恢复清单不代表自动重跑中断任务。`GET /api/conversations/{id}/todos` 返回各 Agent 独立的清单，输入框上方展示主会话进度，任务面板还可查看成员步骤。
 
 停止或中断执行后保留清单，界面停止转圈并显示运行已停止；未完成步骤不会自动标成完成。再次执行时，第一次模型请求即提供最新清单，要求对照用户新消息核实已有结果、更新计划后继续；改换目标时调整或清空旧清单。新一轮尚未更新旧清单时显示“等待核对上次计划”。仅询问进度不应自行恢复旧任务。
 
-已有独立 Tasks 的历史会话保留原任务工具与依赖校验，避免隐藏旧依赖后无法继续执行。参与过 Team 的列表继续作为共享任务展示，普通会话使用自己的 todo。Team 规划阶段使用 Tasks 与 TeamPlanSubmit；执行阶段 Lead/成员保留任务查询和角色工具，并可使用以 AgentSession 为归属的个人 todo。个人步骤全部完成不会领取、完成或验收共享任务，仍需提交团队结果。todo 可以与 TaskGet/TaskList 共存，不能与 TaskCreate/TaskUpdate 同时注册。
+新 Web 会话的主 Agent 同时保留个人 todo 和原生协作的 Task 工具：todo 记录当前 Agent 的步骤，Task 记录成员分工、依赖与验证要求。原生成员不另建 todo 或任务列表，任务执行状态由协作执行器维护；完成个人步骤不等于成员任务已通过验证。
+原生 Task 工具由 Web 适配器在 Agent 创建后安装；基础 SDK 构造器仍拒绝同时传入 `todo_write` 和 `TaskCreate` / `TaskUpdate`，自定义工具池应明确选择规划后端。
+
+已有独立 Tasks 的历史会话保留原任务工具与依赖校验，避免隐藏旧依赖后无法继续执行。历史 Team 规划阶段使用 Tasks 与 TeamPlanSubmit；执行阶段 Lead/成员保留任务查询和角色工具，并可使用以 AgentSession 为归属的个人 todo。旧 Team 的个人步骤完成仍不能代替团队结果提交。
 
 个人清单不读文件、不运行命令、不写项目文件。每项只有 `content`、`status`，按数组顺序展示，每次写入完整替换。每个 Agent 的清单独立；Team 成员的个人清单不携带负责人和依赖图。
 
@@ -363,6 +418,10 @@ CLI 会在 `todo_write` 更新计划时打印用户可见的任务表：
 
 ## Task System：当前会话直接执行
 
+当前 Web 原生协作使用同一套 Task API，由 `delegate_task`、`delegate_batch`、`execute_plan` 执行已有 Task。
+执行中的状态由运行时维护，主 Agent 不能提前把未通过检查的任务标成完成。详见 [原生协作指南](collaboration.md)。
+下述“当前会话直接执行”适用于显式启用 Tasks 的 CLI 和保留旧工具集合的历史会话。
+
 显式启用 Tasks 的 CLI 与已有独立 Tasks 的 Web 会话注册 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。Task 持久化在
 CodeWeft 外部数据目录的 `state/state.db`，支持 TaskList、依赖、owner、原子认领和 Activity。
 任务业务对象保持九字段：`id`、`subject`、`description`、`activeForm`、`owner`、
@@ -380,13 +439,19 @@ Web 历史 Tasks 会话的右侧“任务”页可查看 Ready、Blocked、进�
 
 ## 子 Agent：subagent
 
+本节介绍 CLI、基础 SDK 和历史普通 Web 会话的委派工具。新 Web 会话使用 [原生协作](#原生协作与先出方案)，不同时提供两套委派入口。
+
+`subagent(description)` 默认继承工具权限并前台串行执行；只有任务明确授权时才应修改文件。
+`subagent(description, access="read_only")` 用于可并行的只读调查，支持 `run_in_background=true`。
+这与给整个会话开启 `--read-only` 不同：会话只读权限会阻止委派。
+
 `subagent` 是一个委派工具，由 `SubagentTool(spawn_fn=...)` 实现。工具层只保存 schema
 和被注入的 `spawn_fn`，不 import `Agent`，因此不会形成循环依赖。`Agent` 默认
 会给自身注入 `SubagentTool(spawn_fn=self._spawn_subagent)`。模型调用 `subagent` 时，父
 Agent 会创建一个新的子 Agent：
 
 - 子 Agent 使用全新的 `messages` 列表，只包含父 Agent 传入的子任务描述。
-- 子 Agent 跑自己的 agent loop，可承担独立且边界清晰的调查、实现、修复、重构或验证，
+- 默认继承权限的子 Agent 跑自己的 agent loop，可承担独立且边界清晰的调查、实现、修复、重构或验证，
   并继续调用读文件、搜索、bash、写入、编辑、`todo_write` 等工具。
 - 子 Agent 的工具表会移除 `subagent`，避免递归生成子 Agent。
 - 父 Agent 的上下文只收到子 Agent 的最终文本结论，不接收其中间消息和工具历史。
@@ -782,16 +847,17 @@ MCP_CONFIG=config/mcp.json
 
 ## Agent Team
 
-Web 输入框提供 `Agent Team` 开关。先在本地 `.env` 启用所需能力，再重启后端：
+本节保留旧 Team 的配置与恢复说明。新任务使用 **Agent** 按需协作；当前执行方式菜单只对已有团队显示 **历史团队**，不再提供新建 Team 的常规入口。
+继续旧记录时，运行时仍使用以下配置，变更后需重启后端：
 
 ```dotenv
 TEAM_RUNTIME_ENABLED=true
 TEAM_WRITE_ENABLED=true
 ```
 
-第一项启用团队运行时，第二项允许代码任务。打开 Team 开关并发送需求后，Lead 提交团队方案；用户批准方案后才创建成员、Attempt 和代码 Worktree。只读保护下不能启动 Team，团队模式暂不支持内置联网搜索。
+第一项启用旧团队运行时，第二项允许旧团队代码任务。旧流程由 Lead 提交团队方案，批准后创建成员、Attempt 和代码 Worktree；已有运行中的 Team 继续使用原记录。只读权限下不能启动或接管 Team，旧团队模式暂不支持内置联网搜索。
 
-新 Team 默认采用 `managed` 模式：候选通过审查和验证后，Runtime 在内部集成工作区合并、执行组合验证，并在全部任务完成后进行本地交付。交付会核对用户同期修改，保留用户 HEAD 与暂存区，将成果作为未暂存修改写回。冲突或验证失败不会推进版本，也不会自动推送到远程仓库。
+采用 `managed` 模式的历史 Team 在候选通过审查和验证后，由 Runtime 在内部集成工作区合并、执行组合验证，并在全部任务完成后进行本地交付。交付会核对用户同期修改，保留用户 HEAD 与暂存区，将成果作为未暂存修改写回。冲突或验证失败不会推进版本，也不会自动推送到远程仓库。
 
 旧 Team 保留 `manual` 模式。配置开关、审批和本地交付不能替代项目自身的验证命令；具体工作流与失败恢复以 [Team 自动集成与本地交付](team-managed-integration.md) 和 [Team 协作边界](team-collaboration-boundaries.md) 为准。
 

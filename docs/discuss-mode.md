@@ -1,7 +1,7 @@
 # Discuss 模式：历史研究与旧版实现
 
 > 2026-10-03：Code/Discuss 交互模式已移除。本文保留原仓库研究和旧版接入背景；
-> 当前使用独立的 `read_only` 权限，接口与行为以 [README](../README.md#只读权限) 为准。
+> 当前使用独立的 `read_only` 权限，接口与行为以 [只读权限说明](usage-guide.md#只读权限) 为准；先设计再审批的流程见 [规划模式](plan-mode.md)。返回 [文档导航](README.md)。
 
 ## 结论
 

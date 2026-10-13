@@ -1,5 +1,7 @@
 # Team 自动集成与本地交付
 
+> **旧 Team 兼容文档。** 本文的 Team Plan、Candidate、managed/manual 描述旧 Team 的集成协议，仍用于已有记录和兼容 API。新建 Web 普通会话的委派与计划执行见 [多 Agent 协作](collaboration.md)，其验证和本地回写不使用旧 Candidate 流程。[文档导航](README.md)
+
 新建 Team 默认 `managed`。现有数据库里的 Team 保留 `manual`；API 也可显式创建 manual Team。
 仍需原有 Team Plan 审批、高风险 Attempt Plan 审批和 Candidate 语义审查。
 正常集成、组合验证、下游启动和最后回写由 Runtime 自动执行。

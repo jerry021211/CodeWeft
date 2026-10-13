@@ -1,5 +1,9 @@
 # 多 Agent 目录整理
 
+[文档导航](README.md) · [项目架构](architecture.md) · [当前协作指南](collaboration.md)
+
+本文说明模块依赖与目录迁移；末尾验收记录对应注明的版本和日期。新用户使用原生协作，旧 Team 的兼容代码仍保留。
+
 ## 当前结构
 
 ```text

@@ -1,21 +1,55 @@
-**C01 最小 Agent 评测**
+# CodeWeft 评测入口
+
+[项目首页](../README.md) · [文档导航](../docs/README.md) · [贡献指南](../CONTRIBUTING.md)
+
+本目录包含针对特定机制的评测套件。先选择要验证的问题，再阅读对应指南；不同任务材料、工具范围和评分口径的成绩不能直接合并。常规代码回归见贡献指南，不需要先运行全部评测。
+
+## 选择套件
+
+下表入口不调用真实模型。`offline` 使用固定响应或本地夹具，验证执行、证据和评分是否接通，不代表模型能力或性能收益。命令在仓库根目录、已安装项目依赖的 Python 环境中运行。
+
+| 套件 | 验证什么 | 无模型调用入口 | 说明 |
+| --- | --- | --- | --- |
+| C01 最小任务 | 读取、编辑、独立验收与证据保存 | `python -m evals run --mode offline` | [本页 C01 说明](#c01-最小-agent-评测) |
+| `context_suite` | 固定历史续答、摘要与请求投影 | `python -m evals.context_suite run --mode offline` | [操作指南](../docs/context-evaluation-walkthrough.md) · [材料包](../docs/context-evaluation-kit.md) |
+| `context_journey` | 多轮需求变化、压缩后的连续任务保持 | `python -m evals.context_journey run --mode offline` | [连续任务指南](../docs/context-journey-walkthrough.md) |
+| `code_retrieval` | 代码定位题库、检索证据与逐题评分 | `python -m evals.code_retrieval validate` | [检索评测](../docs/code-retrieval-evaluation.md)；此入口只校验题库，离线运行需先冻结材料 |
+| `cvm_verification` | 验证建议开关对照与证据绑定 | `python -m evals.cvm_verification --mode offline --repeats 1` | [CVM 对照指南](../docs/cvm-evaluation-guide.md) |
+| `engineering_ab` | 工程提示词与 CVM 组合的受控对照 | `python -m evals.engineering_ab --mode offline --repeats 1` | [实验协议](../docs/engineering-ab-protocol-2026-10-13.md) |
+| 前缀缓存对照 | 请求前缀、Token、费用估计与任务结果 | 先准备 offline 材料，再运行 | [本页复现步骤](#长任务前缀缓存成本对照) |
+
+真实模型运行会读取对应服务配置并产生 API 费用，部分套件还有指定模型和价格条件。运行前阅读各指南的调用额度、停止条件、结果目录和隐私范围。费用估计不等于账单，历史价格与实验结果也不代表当前服务或当前代码的表现。
+
+## 上下文评测补充说明
 
 首次做上下文评测，请先打开 [通俗逐步操作指南](../docs/context-evaluation-walkthrough.md)。`python -m evals.context_suite prepare-kit` 生成完整材料，`steps` 查看步骤，`step 01-check` 开始免费检查；后续每步独立启动，live 步骤会调用真实模型。新报告含完整 token 分项与配对比较，旧记录可免费 regrade。
 
 上下文报告同时展示人民币费用估算：`context_suite/pricing.json` 保存用户提供的峰谷价格，主模型与摘要分别计价，报告保留价格版本和哈希。尚未核实模型及计费时段，因此两种价格场景均为条件估算，实际账单字段保持 null；缺失用量不算零成本。旧记录执行 regrade 即可新增费用表，无需再调模型。
 
-上下文专用的固定历史、A/B/C/D 批量评测和规则测试已经提供，入口为 `python -m evals.context_suite`。详细材料、运行命令和验收标准见 [上下文评测材料包](../docs/context-evaluation-kit.md)。以下仍是原有 C01 入口，两者互不替代。
+上下文专用的固定历史、A/B/C/D 批量评测和规则测试已经提供，入口为 `python -m evals.context_suite`。详细材料、运行命令和验收标准见 [上下文评测材料包](../docs/context-evaluation-kit.md)。下一节的 C01 是独立的最小任务入口，两者互不替代。
 
 上下文评分 context-v2 修正 format 的 JSON 大小写判定，报告给出失败原因并单独统计本地额度拦截。已有封存实验可以用 `python -m evals.context_suite regrade <原实验目录>` 免费重新评分，结果另存，原证据不变。
 
-从 `D:\new_codeAgent` 运行，使用项目已安装的 Python 依赖。无需新增服务。
+## C01 最小 Agent 评测
+
+从仓库根目录运行，使用项目已安装的 Python 依赖。离线检查无需新增服务。
 
 ```powershell
 python -m evals validate
 python -m evals run --mode offline
-python -m evals run --mode live --timeout 300 --max-iterations 20 --max-tokens 4096
 python -m evals verify eval-results/<experiment-directory>
 ```
+
+最后一条命令中的 `<experiment-directory>` 替换为运行输出的实际目录名。
+
+<details>
+<summary>真实模型复现命令（会产生 API 费用）</summary>
+
+```powershell
+python -m evals run --mode live --timeout 300 --max-iterations 20 --max-tokens 4096
+```
+
+</details>
 
 `validate` 检查故障版本失败、参考修复通过、空补丁失败，并保留 5 个 FAIL_TO_PASS 和 6 个 PASS_TO_PASS 的逐项结果。
 
@@ -23,9 +57,9 @@ python -m evals verify eval-results/<experiment-directory>
 
 `live` 同时沿用环境/`.env` 的 LangSmith 配置，`offline` 关闭追踪。C01 记录名为 `eval.C01-read-offset`，上下文评测记录名形如 `eval.context.S03.D.r1`。每次试验的 tracing.json 保存项目名、记录 ID 和发送等待状态；worker 正常退出前最多等待 5 秒发送队列。凭据不会写入实验配置。
 
-每次命令创建独立时间戳＋随机 ID 目录，不覆盖历史结果，不自动删除失败数据。默认存放在 `D:\new_codeAgent\eval-results`，可用 `--output` 指定其他位置。CLI 成功返回 0，任务或校验失败返回 1。
+每次命令创建独立时间戳＋随机 ID 目录，不覆盖历史结果，不自动删除失败数据。默认存放在仓库的 `eval-results/`，可用 `--output` 指定其他位置。CLI 成功返回 0，任务或校验失败返回 1。
 
-**证据布局**
+### 证据布局
 
 ```text
 experiment/
@@ -54,7 +88,7 @@ experiment/
 
 public trace 会去除 provider thinking/signature 字段并脱敏；SQLite checkpoint 保持运行时原有结构。校验结果封存后不要直接编辑实验目录，补充说明或重新验收写到另一个目录。`checksums.json` 检查已有证据改动或新增文件，但不构成外部公证/时间戳；Python 缓存目录不参与校验。
 
-**第一步的测量边界**
+### 第一步的测量边界
 
 被测代码是当前项目读取工具的最小提取副本。只人为注入 `offset` 的偏移缺陷；没有修改产品中的读取工具。运行 Agent 的源码与待修复代码分别存储，worker 使用 Python `-P` 避免目标包遮蔽执行框架；grader 独立进程显式加载验收副本。
 
@@ -64,7 +98,7 @@ profile 为 `web-task-file-only-c01-v1`：复用 WebAgentFactory 的 Task 规划
 
 耗时分别记录 Agent 执行与整个 worker 时长；超时采用父进程截止时间强制退出，本 profile 不暴露能生成后台命令的工具。正常失败、超时、无 usage 等情况均保留记录。SDK 重试为 0，项目恢复重试上限为 1。`usage.updated` 按 call_id 去重；模型失败或缺失 usage 时标记不完整，未核实单价时成本为 null。
 
-**验证代码**
+### 验证代码
 
 ```powershell
 python -m unittest discover -s tests -p test_evals.py
@@ -72,7 +106,7 @@ python -m unittest discover -s tests -p test_evals.py
 
 覆盖 seed/gold、候选语法失败、用量去重、用量缺失、校验和、离线执行/验收导入隔离、超时留证。
 
-**长任务前缀缓存成本对照**
+## 长任务前缀缓存成本对照
 
 `prefix_cache_live` 复用连续任务的真实 Agent、文件工具、SQLite checkpoint 和独立验收。
 两组都从空历史开始，默认运行 T01（需求变更后编码）和 T06（长日志精确回读），
@@ -82,10 +116,21 @@ python -m unittest discover -s tests -p test_evals.py
 ```powershell
 python -m evals.prefix_cache_live prepare eval-results/cache-offline --mode offline --repeats 1
 python -m evals.prefix_cache_live run eval-results/cache-offline
+python -m evals.prefix_cache_live seal eval-results/cache-offline
+```
+
+以上只运行离线接线检查，结果目录应使用新路径。以下保留原真实模型对照的复现参数，指定提交与价格仅适用于该实验，不是当前性能声明。
+
+<details>
+<summary>原真实模型对照命令（会产生 API 费用）</summary>
+
+```powershell
 python -m evals.prefix_cache_live prepare eval-results/cache-live --mode live --baseline 512b627
 python -m evals.prefix_cache_live run eval-results/cache-live
 python -m evals.prefix_cache_live seal eval-results/cache-live
 ```
+
+</details>
 
 live 使用本地已配置的官方 DeepSeek Flash 凭据并产生实际 API 费用。
 所有时段统一按用户给定闲时价格折算：普通输入 ¥1、缓存读取 ¥0.02、输出 ¥4／百万 tokens；

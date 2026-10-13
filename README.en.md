@@ -1,109 +1,103 @@
 <h1 align="center">CodeWeft</h1>
 
-<p align="center"><a href="README.md">简体中文</a> · <strong>English</strong></p>
-
-<p align="center"><strong>An AI coding workbench for understanding, editing, and verifying code in your local projects.</strong></p>
-
-<p align="center">Web workbench · Command line · Python SDK</p>
+<p align="center"><strong>A local AI coding workbench that makes the execution process visible.</strong></p>
 
 <p align="center">
+  <a href="README.md">简体中文</a> · <strong>English</strong> ·
+  <a href="#quick-start">Quick start</a> · <a href="docs/README.md">Documentation</a> ·
+  <a href="#how-it-works">How it works</a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-2563EB"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
-  <img alt="React and TypeScript" src="https://img.shields.io/badge/Web-React%20%2B%20TypeScript-149ECA?logo=react&logoColor=white">
-  <img alt="Local workspace" src="https://img.shields.io/badge/Workspace-Local-334155">
 </p>
 
-<p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#features">Features</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#documentation">Documentation</a> ·
-  <a href="#development-and-validation">Development and validation</a>
-</p>
+Connect your own model to explore an existing project, plan changes, and run checks. Follow tool calls, task progress, collaboration, and results in the web workbench, or use the agent runtime from the command line or Python.
 
-CodeWeft connects model APIs, code search, file editing, command execution, and task management into a coding workflow. Describe a task in your browser or terminal, let the agent find the relevant implementation, edit files, and run checks, and follow its tool calls, task progress, token usage, and file changes.
+![CodeWeft workbench showing project conversations, task results, and run statistics](docs/assets/workbench.png)
 
-The agent runtime is built in Python, with a local React + TypeScript web workbench. Model protocols, tools, permissions, context management, and collaboration are organized as separate components, making the project useful both for everyday development and for studying or extending coding agent runtimes.
-
-**Why CodeWeft?** A weft connects the threads of a fabric. CodeWeft connects models, tools, and collaborating agents to take local coding tasks from understanding to verified changes. The Python package and commands remain `codeagent`, preserving existing configuration and data directories.
+*The workbench after a local task: projects and conversations on the left, the delivery report in the center, and run statistics and context usage on the right. Click the image to view the original.*
 
 ## Features
 
-| Capability | What it provides |
-| --- | --- |
-| **Visible execution** | Follow streaming responses, tool execution, tasks, subagents, file changes, and model usage in the web UI. Conversations and run records persist in SQLite. |
-| **Multiple model protocols** | Use Anthropic Messages, OpenAI Chat Completions, or Responses. Configure conversation, speech recognition, and embedding services separately in model settings. |
-| **Code understanding and retrieval** | Combine keywords, code structure, and optional vector retrieval to find implementations, with file paths, symbols, and source excerpts. Structured retrieval supports languages including Python, Java, JavaScript, and TypeScript. |
-| **Project overview and batch reading** | `repo_map` shows directories, file sizes, and likely entry points, tests, and configuration. `read_file` accepts up to five `file_paths`, preserving separate line numbers and continuation cursors. |
-| **Context management for longer tasks** | Check requests against model context windows and summarize history in chunks. Large tool results have bounded pages, archives, and follow-up reading tools. |
-| **Tasks and parallel collaboration** | Persistent tasks track dependencies and status. Ordinary agents can run parallel reads and delegate read-only subtasks; Teams can develop in separate Git worktrees. |
-| **Extensible tools** | Load instructions on demand through Skills, retain project conventions in long-term memory, connect MCP tools, and optionally enable Tavily web search. |
-| **Attachments** | Attach files through the web UI or CLI. Image, PDF, text, and audio handling depends on the selected protocol and configured model capabilities. |
+- **Follow the work as it happens.** Inspect tool calls, tasks, modified file paths, and model usage. Conversations and execution records are stored locally.
+- **Understand and plan before editing.** Explore a project in read-only mode, or review a plan before approving execution. Repository overviews, keyword and structural search help locate code; vector retrieval is optional.
+- **Delegate when the task calls for it.** New web conversations can delegate one task, delegate a batch, or execute a dependency plan. Plan execution supports staged checks and local delivery. [Compare the three execution paths](docs/collaboration.md).
+- **Manage context for longer tasks.** Check request budgets against the model window and summarize earlier history. Large tool results are paged and archived with follow-up reading links.
+- **Choose your models and tools.** Use Anthropic Messages, OpenAI Chat Completions, or Responses. Extend workflows with Skills, MCP, and long-term memory. Attachment support depends on the selected model and configuration.
+
+<details>
+<summary>See collaboration in action: an inventory, orders, and reporting plan</summary>
+
+![Native collaboration dependency graph connecting inventory to orders and reporting, then integration checks](docs/assets/collaboration-plan.png)
+
+This example organizes inventory, orders, reporting, and integration checks into four tasks. The interface shows dependencies, stage checks, and local delivery status. Dependency levels do not imply simultaneous execution; see [Collaboration](docs/collaboration.md) for scheduling and verification details.
+
+</details>
 
 ## Quick start
 
-You need **Python 3.11+ and Git**. The web workbench also requires **Node.js 22+ and npm**. Model calls use your own provider endpoint, model ID, and API key.
+Start with the **web workbench**. You need **Python 3.11+, Git, Node.js 22.12+, and npm**, plus your own endpoint, model ID, and API key for a model that supports tool calling.
 
-### 1. Clone and install
+### 1. Install and launch
 
-```bash
+Windows PowerShell:
+
+```powershell
 git clone https://github.com/jerry021211/Coding-Agent.git
 cd Coding-Agent
 python -m venv .venv
-```
-
-Activate the virtual environment and install:
-
-```powershell
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[web]"
+.\.venv\Scripts\python.exe -m pip install -e ".[web]"
+npm.cmd --prefix web ci
+npm.cmd --prefix web run build
+.\.venv\Scripts\python.exe -m codeagent.web.cli --workspace . --port 8765
 ```
 
 <details>
 <summary>macOS / Linux</summary>
 
 ```bash
-source .venv/bin/activate
-python -m pip install -e ".[web]"
+git clone https://github.com/jerry021211/Coding-Agent.git
+cd Coding-Agent
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[web]"
+npm --prefix web ci
+npm --prefix web run build
+.venv/bin/python -m codeagent.web.cli --workspace . --port 8765
 ```
 
 </details>
 
-### 2. Build and start the web workbench
+The Python package, commands, and configuration variables retain the `codeagent` name. These commands use the virtual environment's Python directly, so activation is not required.
 
-From the repository root:
+### 2. Configure a model and select a project
 
-```powershell
-cd web
-npm.cmd ci
-npm.cmd run build
-cd ..
-python -m codeagent.web.cli --workspace . --port 8765
-```
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765), then select **Settings → Models and capabilities** (设置 → 模型与能力) at the bottom of the sidebar. Choose a conversation protocol, enter your model settings, and save. You do not need to create `.env` before the first launch. See [Model services](docs/model-services.md) for protocol and configuration details.
 
-On macOS / Linux, use `npm` instead of `npm.cmd`. Open [http://127.0.0.1:8765](http://127.0.0.1:8765), select **Model settings** (模型设置) at the bottom of the left sidebar, choose a protocol, and save your model configuration. You can configure the model through the UI on first launch without creating a `.env` file.
+Click **New project** (新建项目) and select an existing local directory. That directory becomes the conversation's workspace. The current interface uses Chinese labels; English translations here identify the corresponding controls.
 
-When creating a conversation, select the local project directory you want to work on. For example, enable **Read-only protection** (只读保护) below the input box and ask:
+### 3. Complete your first request
+
+Click the **Agent** button below the composer to open the execution mode menu, select **Read-only** (只读), and send:
 
 > Map this project's entry points, main modules, and test commands. Include the key file paths.
 
-When you want to make changes, turn off read-only protection and provide a specific task:
+Your first run is complete when you can see tool execution records and a project overview with file paths. To make changes, switch back to **Agent**. You can also enable **Plan first** (先出方案), review the plan, and choose **Approve and execute** (批准并执行). Approving a plan does not remove an existing read-only restriction. See [Plan mode](docs/plan-mode.md).
 
-> Fix the exception this endpoint raises on empty input, add a regression test, and report the validation results.
+## Three tasks to try
 
-### 3. Use the CLI
+Adapt the requests to the code in your project:
 
-For CLI-only use, install the core package with `python -m pip install -e .`; no frontend build is needed. The following example uses an OpenAI Chat Completions-compatible service. Create `.env` in the directory where you launch the CLI and replace the placeholders with your provider's settings:
+| Goal | Mode | Example request |
+| --- | --- | --- |
+| Explore the code | Read-only | Trace a request from its entry point to data access. Identify the relevant files and tests. |
+| Plan a feature | Agent + Plan first | Add CSV export to this module. Investigate its interfaces and tests, then submit an implementation plan. |
+| Fix a bug | Agent | Fix this endpoint's exception on empty input, add a regression test, and report the changes and check results. |
 
-```dotenv
-MODEL_PROTOCOL=openai_chat
-MODEL_ID=your-model-id
-API_KEY=your-api-key
-BASE_URL=https://your-provider.example/v1
-STREAMING=true
-```
+## Other ways to use CodeWeft
 
-The CLI uses the **current directory** as its workspace. Run these commands from your target project:
+**Command line.** For CLI-only use, create and activate a virtual environment in the CodeWeft repository, then install the core package with `python -m pip install -e .`. Node.js and the frontend build are not required. Keep that environment active, enter your target project directory, and configure your model using [Model services](docs/model-services.md) before running:
 
 ```bash
 codeagent --read-only "Explain this project's architecture and test entry points"
@@ -111,95 +105,58 @@ codeagent "Fix the issue and run the relevant tests"
 codeagent
 ```
 
-Running without a prompt starts an interactive session. See [Model services](docs/model-services.md) for other protocols, attachments, reasoning options, and configuration precedence, and [.env.example](.env.example) for environment variables. Model settings saved through the web UI take precedence over the corresponding environment variables. The detailed guides are currently in Chinese.
+The CLI uses the current directory as its workspace. Running without a prompt starts an interactive session. Place `.env` in the directory where you launch the CLI or a parent directory, or set process environment variables. Changing projects does not automatically load `.env` from the installation repository. Model settings saved through the web UI can be shared when using the same data directory and take precedence over the corresponding environment variables. See [.env.example](.env.example).
+
+**Python SDK.** Create an `Agent`, register tools, and call `agent.run(...)` from your script. See the [Usage guide](docs/usage-guide.md). Native collaboration and Plan first are provided by the web host; CLI and base SDK tooling and planning entry points differ. See [Architecture and entry points](docs/architecture.md).
 
 ## How it works
 
-The core loop follows “model request → tool execution → result feedback.” Permissions, budgets, memory, and collaboration extend this loop.
-
 ```mermaid
 flowchart LR
-    U[Web / CLI / Python SDK] --> A[Agent loop]
-    A --> M[Model client]
-    M --> P[Anthropic / OpenAI protocols]
-    A --> G[Permissions and execution budgets]
-    G --> T[Tools and subagents]
-    T --> W[Project files / Shell / Search / MCP]
-    T --> C[Output pages and context management]
-    C --> A
-    A --> E[Events, usage, and checkpoints]
-    E --> U
+    A[Select a local project] --> B[Read and locate code]
+    B --> C[Execute directly or review a plan]
+    C --> D[Edit files and run checks]
+    D --> E[Inspect activity and results]
 ```
 
-| Entry point | Responsibility |
-| --- | --- |
-| [`codeagent/agent.py`](codeagent/agent.py) | Agent loop, tool results, and subagent coordination |
-| [`codeagent/providers.py`](codeagent/providers.py) / [`anthropic_client.py`](codeagent/anthropic_client.py) | Model protocol adapters and streaming calls |
-| [`codeagent/tools/`](codeagent/tools) / [`code_search/`](codeagent/code_search) | Files, commands, retrieval, and tool registration |
-| [`codeagent/context/`](codeagent/context) | Request budgets, summaries, archives, and read references |
-| [`codeagent/multiagent/`](codeagent/multiagent) / [`runtime/`](codeagent/runtime) / [`worktrees/`](codeagent/worktrees) | Native collaboration scheduling, shared validation, and Git workspaces |
-| [`codeagent/legacy/teams/`](codeagent/legacy/teams) | Compatibility for historical Team records and execution |
-| [`codeagent/web/`](codeagent/web) / [`web/src/`](web/src) | FastAPI, SQLite, SSE, and the React interface |
-
-See the [Usage guide](docs/usage-guide.md) for a fuller module overview and SDK examples.
+The Python agent runtime connects model requests to tool execution, with permissions, context management, and budgets governing each run. The web host uses FastAPI, SQLite, and event streams to persist and display activity; the frontend uses React and TypeScript. See the [Architecture guide](docs/architecture.md) for module responsibilities, collaboration paths, and a source reading order.
 
 ## Scope and boundaries
 
 ### Read-only permissions
 
-Read-only protection blocks file and memory writes, task updates, delegation, unknown tools, and external MCP calls. Shell access is limited to supported read-only commands. This is a tool execution policy, **not an operating system sandbox**. See [Read-only permissions](docs/usage-guide.md#只读权限) for details.
+Read-only mode restricts the agent's writes, delegation, and external tool calls. It is a tool execution policy, **not an operating system sandbox**. The runtime still saves conversations and events. See [Read-only permissions](docs/usage-guide.md#只读权限).
 
 ### Local runtime and data
 
-The web server listens only on localhost and is intended for local, single-user use. Conversations, checkpoints, archives, and indexes are stored outside the repository by default; set `CODEAGENT_DATA_DIR` to choose a different location. Requests to remote models, embedding providers, web search, or MCP services are sent to the configured services.
+The web workbench is intended for local, single-user use and listens only on localhost. Runtime data is stored outside the repository by default; set `CODEAGENT_DATA_DIR` to choose a location. Requests to models, embedding providers, web search, and MCP services are sent to the configured services.
 
 ### Multiple agents and recovery
 
-Ordinary conversations can run concurrently, but conversations operating on the same directory still share its files. Teams are disabled by default and require approval of a team plan when enabled. New Teams support candidate validation, internal integration, and local delivery; they **do not automatically push to GitHub**. See [Team integration and delivery](docs/team-managed-integration.md) for workspace and recovery behavior.
-
-Each logical execution of an ordinary agent is limited to 200 rounds, with a wrap-up reminder starting at round 185. Unfinished ordinary runs are marked as interrupted after a restart; operations are not replayed automatically. See [Execution budgets](docs/loop-guard.md) for round limits, cancellation, loop detection, and other budgets.
-| Task contracts and verification evidence (off by default) | [CVM stage 2: configuration, boundaries, and validation](docs/cvm-stage2-acceptance-2026-10-11.md) |
+Direct delegation and read-only plans work in the current project. Plans with write tasks use managed collaboration workspaces, checks, and local writeback without automatically pushing to a remote. Ordinary conversations targeting the same directory still share files. A restart does not automatically replay unfinished operations; see [Collaboration](docs/collaboration.md) for continuation and recovery. Legacy Teams remain for compatibility. CVM verification supervision is off by default; see the [Documentation index](docs/README.md).
 
 ## Documentation
 
-The following detailed guides are currently available in Chinese.
+The detailed guides below are currently in Chinese.
 
-| Topic | Guide |
+| Reading goal | Start here |
 | --- | --- |
-| Full usage, SDK, permissions, Skills, and MCP | [Usage guide](docs/usage-guide.md) |
-| Model configuration, protocol differences, and attachments | [Model services](docs/model-services.md) |
-| Code search, indexing, and optional vector retrieval | [Code retrieval](docs/code-search.md) |
-| Output pages, source archives, and summary limits | [Tool output policy](docs/tool-output-policy.md) |
-| Read-only subagents and parallel reads | [Ordinary agent parallelism](docs/parallel-execution.md) |
-| Conversation queues and run isolation | [Concurrent sessions](docs/concurrent-sessions.md) |
-| Long-term memory storage and retrieval | [Memory](docs/memory-retrieval.md) |
-| Team planning, collaboration, and local delivery | [Collaboration boundaries](docs/team-collaboration-boundaries.md) · [Managed integration](docs/team-managed-integration.md) |
-| Loop detection, retries, and execution stops | [Execution budgets](docs/loop-guard.md) |
-| Evaluation methods and reproduction | [Evaluation tools](evals/README.md) · [Code retrieval evaluation](docs/code-retrieval-evaluation.md) |
+| Configure and use the workbench | [Usage guide](docs/usage-guide.md) · [Model services](docs/model-services.md) · [Plan mode](docs/plan-mode.md) |
+| Understand task collaboration | [Native collaboration](docs/collaboration.md) · [Concurrent sessions](docs/concurrent-sessions.md) |
+| Study or extend the runtime | [Architecture](docs/architecture.md) · [Code retrieval](docs/code-search.md) · [Context and tool output](docs/tool-output-policy.md) |
+| Develop and reproduce evaluations | [Contributing](CONTRIBUTING.md) · [Evaluation entry points](evals/README.md) |
+
+The [full documentation index](docs/README.md) also covers optional experiments and historical designs.
 
 ## Development and validation
 
-Run backend tests from the repository root:
-
-```bash
-python -m unittest discover -s tests
-```
-
-Run frontend tests and build for production:
-
-```powershell
-cd web
-npm.cmd test
-npm.cmd run build
-```
-
-For frontend development, open a second terminal in `web` and run `npm.cmd run dev`. Vite proxies `/api` requests to localhost port `8765`. Use `npm` on macOS / Linux.
-
-Reproducible bug reports and improvement suggestions are welcome through [Issues](https://github.com/jerry021211/Coding-Agent/issues). When submitting changes, describe the problem, resulting behavior, and validation performed. Keep API keys, runtime data, and private evaluation artifacts out of commits.
+Reproducible bug reports and improvement suggestions are welcome through [Issues](https://github.com/jerry021211/Coding-Agent/issues). See [Contributing](CONTRIBUTING.md) for development setup, tests, and submission guidance, and the [Web development guide](web/README.md) for frontend work.
 
 ## Acknowledgments
 
-The project draws on [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) and its approach to separating the agent loop from tools, permissions, memory, and other capabilities. CodeWeft builds on these ideas with a local web workbench, context management, code retrieval, and multi-agent collaboration.
+The project draws on [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) and its separation of the agent loop, tools, permissions, and memory. CodeWeft builds on these ideas with a local web workbench, context management, code retrieval, and collaboration.
+
+The weft runs across the threads of a fabric. CodeWeft takes its name from connecting models, tools, and collaborating agents into a local development workflow.
 
 ## License
 

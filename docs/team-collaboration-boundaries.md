@@ -1,5 +1,7 @@
 # Team 协作：简单流程，严格执行边界
 
+> **旧 Team 兼容文档。** 当前新建 Web 普通会话使用 [原生多 Agent 协作](collaboration.md)。下文的 Lead、Attempt、Candidate 和“新 Team”均指旧 Team 系统及其记录，不代表新会话的默认流程。保留正文用于已有会话与 API 的维护；参见 [目录边界](multiagent-layout.md#保留边界) 和 [文档导航](README.md)。
+
 这次改动不增加第二套任务系统，不增加通用契约管理或运行中多版本重规划。
 Root 仍然是 Lead；模型决定如何拆分、阅读、实现和沟通，Runtime 管认领、权限、持久化与恢复。
 

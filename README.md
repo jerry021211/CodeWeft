@@ -1,109 +1,103 @@
 <h1 align="center">CodeWeft</h1>
 
-<p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
-
-<p align="center"><strong>在本地项目中理解代码、执行修改、验证结果的 AI 编程工作台。</strong></p>
-
-<p align="center">Web 工作台 · 命令行 · Python SDK</p>
+<p align="center"><strong>看得见执行过程的本地 AI 编程工作台。</strong></p>
 
 <p align="center">
+  <strong>简体中文</strong> · <a href="README.en.md">English</a> ·
+  <a href="#快速开始">快速开始</a> · <a href="docs/README.md">使用文档</a> ·
+  <a href="#工作原理">工作原理</a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-2563EB"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
-  <img alt="React and TypeScript" src="https://img.shields.io/badge/Web-React%20%2B%20TypeScript-149ECA?logo=react&logoColor=white">
-  <img alt="Local workspace" src="https://img.shields.io/badge/Workspace-Local-334155">
 </p>
 
-<p align="center">
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#核心能力">核心能力</a> ·
-  <a href="#工作原理">工作原理</a> ·
-  <a href="#文档导航">文档导航</a> ·
-  <a href="#开发与验证">开发与验证</a>
-</p>
+连接你自己的模型，在已有项目中查找实现、规划修改并运行检查。通过 Web 工作台查看工具调用、任务进度、协作状态与执行结果，也可以通过命令行或 Python 接入 Agent 运行时。
 
-CodeWeft 将模型接入、代码检索、文件编辑、命令执行和任务管理连接成完整的编程流程。你可以在浏览器或终端中提出需求，让 Agent 在指定项目里查找实现、修改文件并运行验证，同时查看工具调用、任务进度、Token 用量和文件变化。
+![CodeWeft 工作台：项目会话、任务结果与运行统计](docs/assets/workbench.png)
 
-项目以 Python 实现 Agent 运行时，以 React + TypeScript 提供本机 Web 工作台。模型协议、工具、权限、上下文和协作能力独立组织，适合日常项目开发，也适合学习和扩展 Coding Agent 的执行机制。
-
-**名字的含义：** Weft 是织物的纬线。CodeWeft 将模型、工具与多个 Agent 的协作连接起来，在本地项目中完成从理解需求到验证修改的流程。Python 包与命令继续使用 `codeagent`，已有配置和数据目录兼容。
+*一次本地任务结束后的工作台：左侧管理项目与会话，中间查看交付说明，右侧展示运行统计与上下文用量。点击图片可查看原图。*
 
 ## 核心能力
 
-| 能力 | 在项目中如何使用 |
-| --- | --- |
-| **可观察的编程过程** | Web 展示流式回复、工具执行、任务、子 Agent、文件改动和模型用量；会话与运行记录持久化到 SQLite。 |
-| **多协议模型接入** | 支持 Anthropic Messages、OpenAI Chat Completions 和 Responses；可在模型设置页分别配置对话、语音识别和向量服务。 |
-| **代码理解与检索** | 结合关键词、代码结构与可选向量检索定位实现，返回路径、符号和源码片段；支持 Python、Java、JavaScript、TypeScript 等语言的结构化检索。 |
-| **项目概览与批量阅读** | `repo_map` 展示目录、文件大小及入口/测试/配置候选；`read_file` 的 `file_paths` 一次读取最多5个相关文件，分别保留行号和续读位置。 |
-| **长任务上下文管理** | 按模型窗口检查请求预算，对历史进行分块摘要；大型工具结果提供有界页面、归档和后续读取入口。 |
-| **任务与并行协作** | 持久化任务支持依赖与状态管理；普通 Agent 可并行读取、委派只读子任务，Team 可通过独立 Git worktree 协作开发。 |
-| **可扩展工具能力** | 通过 Skills 按需加载说明，使用长期记忆保存项目约定，接入 MCP 工具；可选启用 Tavily 联网搜索。 |
-| **附件输入** | Web 和 CLI 支持附件；图片、PDF、文本与音频的处理方式取决于模型协议和已配置的输入能力。 |
+- **看清每一步执行。** 在对话中跟踪工具调用，查看任务、修改文件和模型用量；会话与执行记录保存在本机。
+- **先理解，再动手。** 选择只读方式分析项目，或开启“先出方案”，查看实施步骤后批准执行。项目概览、关键词与结构化检索帮助定位代码，可按需配置向量检索。
+- **按任务需要协作。** 新 Web 会话可以委派单任务、批量任务，或执行带依赖的计划；计划执行支持阶段检查与本地交付。[了解三种执行方式](docs/collaboration.md)。
+- **为长任务管理上下文。** 根据模型窗口检查请求预算、摘要较早历史；较大的工具结果分页并归档，保留后续回读入口。
+- **接入自己的模型与工具。** 支持 Anthropic Messages、OpenAI Chat Completions 和 Responses，通过 Skills、MCP 与长期记忆扩展项目工作流。附件能力取决于所选模型与配置。
+
+<details>
+<summary>查看协作实例：库存、订单与报表的依赖计划</summary>
+
+![原生协作依赖图：库存模块连接订单与报表，最后进入集成验收](docs/assets/collaboration-plan.png)
+
+示例将基础库存、订单、报表和集成验收组织为四个任务，界面显示依赖关系、阶段检查和本地交付状态。依赖分层不等于实际同时执行，调度与验证机制见[协作指南](docs/collaboration.md)。
+
+</details>
 
 ## 快速开始
 
-准备 **Python 3.11+、Git**；使用 Web 工作台还需要 **Node.js 22+ 和 npm**。模型调用需要你自己的服务地址、模型名称和密钥。
+推荐先体验 **Web 工作台**。准备 **Python 3.11+、Git、Node.js 22.12+ 和 npm**，以及支持工具调用的模型服务地址、模型名称和密钥。
 
-### 1. 获取代码并安装
+### 1. 安装并启动
 
-```bash
+Windows PowerShell：
+
+```powershell
 git clone https://github.com/jerry021211/Coding-Agent.git
 cd Coding-Agent
 python -m venv .venv
-```
-
-激活虚拟环境后安装：
-
-```powershell
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[web]"
+.\.venv\Scripts\python.exe -m pip install -e ".[web]"
+npm.cmd --prefix web ci
+npm.cmd --prefix web run build
+.\.venv\Scripts\python.exe -m codeagent.web.cli --workspace . --port 8765
 ```
 
 <details>
 <summary>macOS / Linux</summary>
 
 ```bash
-source .venv/bin/activate
-python -m pip install -e ".[web]"
+git clone https://github.com/jerry021211/Coding-Agent.git
+cd Coding-Agent
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[web]"
+npm --prefix web ci
+npm --prefix web run build
+.venv/bin/python -m codeagent.web.cli --workspace . --port 8765
 ```
 
 </details>
 
-### 2. 构建并启动 Web 工作台
+Python 包、命令和配置变量继续使用 `codeagent` 名称。以上命令直接使用虚拟环境中的 Python，无需先激活环境。
 
-在仓库根目录执行：
+### 2. 配置模型并选择项目
 
-```powershell
-cd web
-npm.cmd ci
-npm.cmd run build
-cd ..
-python -m codeagent.web.cli --workspace . --port 8765
-```
+打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，进入左侧底部的 **设置 → 模型与能力**，选择对话协议，填写模型信息并保存。首次启动无需先创建 `.env`；协议与配置说明见[模型服务](docs/model-services.md)。
 
-macOS / Linux 将 `npm.cmd` 换成 `npm`。打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，从左侧底部进入 **模型设置**，选择协议并填写模型信息，保存后即可创建会话。首次启动可以不配置 `.env`。
+点击 **新建项目**，选择要操作的已有本地目录。该目录会成为会话的工作区。
 
-新建会话时选择要操作的本机项目目录。例如，先开启输入框下方的 **只读保护**，发送：
+### 3. 完成第一次请求
+
+点击输入框下方的 **Agent** 按钮，打开执行方式菜单，选择 **只读**，发送：
 
 > 梳理这个项目的入口、主要模块和测试方式，给出关键文件路径。
 
-需要修改时关闭只读保护，再发送具体任务：
+看到工具执行记录，以及带文件路径的项目说明，就完成了首次体验。准备修改时，切换回 **Agent**；也可以开启 **先出方案**，审阅后点击 **批准并执行**。批准方案不会解除已有的只读权限，具体流程见[方案模式](docs/plan-mode.md)。
 
-> 修复这个接口在空输入时的异常，补充对应测试，并说明验证结果。
+## 从这三个任务开始
 
-### 3. 使用命令行
+按项目实际内容调整需求：
 
-只使用 CLI 时，无需构建前端，安装核心包 `python -m pip install -e .` 即可。下面以 OpenAI Chat Completions 兼容服务为例，在启动目录创建 `.env`，将占位值替换为实际配置：
+| 想做什么 | 工作方式 | 示例请求 |
+| --- | --- | --- |
+| 熟悉代码 | 只读 | 找到请求从入口到数据访问的调用路径，说明涉及的文件和测试。 |
+| 规划功能 | Agent + 先出方案 | 为现有模块增加 CSV 导出，先调查接口与测试，提交实施方案。 |
+| 修复问题 | Agent | 修复这个接口在空输入时的异常，补充回归测试，说明改动和检查结果。 |
 
-```dotenv
-MODEL_PROTOCOL=openai_chat
-MODEL_ID=your-model-id
-API_KEY=your-api-key
-BASE_URL=https://your-provider.example/v1
-STREAMING=true
-```
+## 其他使用方式
 
-CLI 以**当前目录**作为工作区。在目标项目目录中运行：
+**命令行。** 只使用 CLI 时，在 CodeWeft 仓库目录创建并激活虚拟环境，安装核心包 `python -m pip install -e .`，无需 Node.js 或前端构建。保持该环境激活，进入目标项目目录，并按[模型服务](docs/model-services.md)配置模型后运行：
 
 ```bash
 codeagent --read-only "解释这个项目的架构和测试入口"
@@ -111,93 +105,56 @@ codeagent "修复问题并运行相关测试"
 codeagent
 ```
 
-不传提示词会进入交互会话。其他协议、附件、推理参数及配置优先级见 [模型服务配置](docs/model-services.md)；完整环境变量参考 [.env.example](.env.example)。Web 中已保存的模型设置会优先于对应环境变量生效。
+CLI 使用当前目录作为工作区；不传提示词会进入交互会话。若使用 `.env`，应放在实际启动目录或其父目录，也可直接设置进程环境变量；切换项目不会自动读取安装仓库中的 `.env`。同一数据目录下通过 Web 保存的模型设置可共用，并优先于对应环境变量。配置示例见 [.env.example](.env.example)。
+
+**Python SDK。** 在脚本中创建 `Agent`、注册工具并调用 `agent.run(...)`，见[使用指南](docs/usage-guide.md)。Web 原生协作与“先出方案”由 Web 宿主提供；CLI 和基础 SDK 的工具与规划入口有所不同，见[架构与入口](docs/architecture.md)。
 
 ## 工作原理
 
-核心循环围绕“模型请求 → 工具执行 → 结果回传”运行，权限、预算、记忆与协作机制围绕这个循环扩展。
-
 ```mermaid
 flowchart LR
-    U[Web / CLI / Python SDK] --> A[Agent 执行循环]
-    A --> M[模型客户端]
-    M --> P[Anthropic / OpenAI 协议]
-    A --> G[权限与执行预算]
-    G --> T[工具与子 Agent]
-    T --> W[项目文件 / Shell / 检索 / MCP]
-    T --> C[结果分页与上下文管理]
-    C --> A
-    A --> E[事件、用量与检查点]
-    E --> U
+    A[选择本地项目] --> B[阅读与定位代码]
+    B --> C[直接执行或先审方案]
+    C --> D[修改文件与运行检查]
+    D --> E[查看过程与结果]
 ```
 
-| 代码入口 | 职责 |
-| --- | --- |
-| [`codeagent/agent.py`](codeagent/agent.py) | Agent 主循环、工具结果回传与子 Agent 协调 |
-| [`codeagent/providers.py`](codeagent/providers.py) / [`anthropic_client.py`](codeagent/anthropic_client.py) | 模型协议适配与流式调用 |
-| [`codeagent/tools/`](codeagent/tools) / [`code_search/`](codeagent/code_search) | 文件、命令、搜索与工具注册 |
-| [`codeagent/context/`](codeagent/context) | 请求预算、摘要、归档与读取引用 |
-| [`codeagent/multiagent/`](codeagent/multiagent) / [`runtime/`](codeagent/runtime) / [`worktrees/`](codeagent/worktrees) | 原生协作调度、共享验证与 Git 工作目录 |
-| [`codeagent/legacy/teams/`](codeagent/legacy/teams) | 旧 Team 历史记录与执行兼容；[结构说明](docs/multiagent-layout.md) |
-| [`codeagent/web/`](codeagent/web) / [`web/src/`](web/src) | FastAPI、SQLite、SSE 与 React 界面 |
-
-更完整的模块说明和 SDK 示例见 [使用指南](docs/usage-guide.md)。
+Python Agent 运行时连接模型请求与工具执行，权限、上下文和预算约束每次运行。Web 使用 FastAPI、SQLite 和事件流保存并呈现过程，前端由 React + TypeScript 实现。模块职责、协作路径与源码阅读顺序见[架构导览](docs/architecture.md)。
 
 ## 使用边界
 
 ### 只读权限
 
-只读保护会阻止文件和记忆写入、任务更新、委派、未知工具与外部 MCP 调用；Shell 仅允许受支持的只读命令。它是工具执行策略，**不是操作系统沙箱**。详细行为见 [只读权限说明](docs/usage-guide.md#只读权限)。
+只读方式限制 Agent 的写入、委派与外部工具调用，是工具执行策略，**不是操作系统沙箱**。运行时仍会保存会话和事件。详见[只读权限](docs/usage-guide.md#只读权限)。
 
 ### 本地运行与数据
 
-Web 服务仅监听本机，面向本地单用户使用。会话、检查点、归档和索引默认保存到仓库外的运行时目录，可用 `CODEAGENT_DATA_DIR` 指定位置。连接远程模型、向量服务、联网搜索或 MCP 时，相应请求会发送到所配置的服务。
+Web 面向本地单用户，仅监听本机地址。数据默认保存在仓库外的运行时目录，可用 `CODEAGENT_DATA_DIR` 指定位置。模型、向量检索、联网搜索和 MCP 请求会发送到配置的服务。
 
 ### 多 Agent 与恢复
 
-普通会话可以并发运行，但操作同一个目录时仍共享项目文件。Team 默认关闭，启用后需要批准团队方案；新 Team 默认支持候选验证、内部集成和本地交付，**不会自动推送到 GitHub**。查看 [Team 集成与交付](docs/team-managed-integration.md) 了解工作区及恢复边界。
-
-普通 Agent 的每次逻辑执行最多 200 轮，第 185 轮开始提醒收尾。重启后未完成的普通运行会标记为中断，不自动重放操作；固定轮数、取消、循环检测和其他预算的关系见 [执行预算](docs/loop-guard.md)。
-| 任务契约与验证证据（默认关闭） | [CVM 阶段 2：配置、边界与验收](docs/cvm-stage2-acceptance-2026-10-11.md) |
+直接委派和纯只读计划在当前项目中工作；有写任务的计划使用受管理的协作目录、检查与本地回写，不自动推送远程。同目录的普通会话仍共享文件。重启不会自动重放未完成操作，继续与恢复方式见[协作指南](docs/collaboration.md)。旧 Team 保留历史兼容；CVM 验证监督默认关闭，详见[文档索引](docs/README.md)。
 
 ## 文档导航
 
-| 想了解什么 | 文档 |
+| 阅读目的 | 入口 |
 | --- | --- |
-| 完整用法、SDK、权限、Skills 与 MCP | [使用指南](docs/usage-guide.md) |
-| 模型配置、协议差异与附件 | [模型服务](docs/model-services.md) |
-| 代码搜索、索引与可选向量检索 | [代码检索](docs/code-search.md) |
-| 结果分页、原文归档与摘要限制 | [工具输出策略](docs/tool-output-policy.md) |
-| 只读子 Agent 与读取并行 | [普通 Agent 并行](docs/parallel-execution.md) |
-| 多会话队列与运行隔离 | [多会话并发](docs/concurrent-sessions.md) |
-| 长期记忆的存储与召回 | [记忆机制](docs/memory-retrieval.md) |
-| Team 方案、协作与本地交付 | [协作边界](docs/team-collaboration-boundaries.md) · [自动集成](docs/team-managed-integration.md) |
-| 防循环、重试与执行停止 | [执行预算](docs/loop-guard.md) |
-| 评测方法与复现入口 | [评测工具](evals/README.md) · [代码检索评测](docs/code-retrieval-evaluation.md) |
+| 配置和使用工作台 | [使用指南](docs/usage-guide.md) · [模型服务](docs/model-services.md) · [先出方案](docs/plan-mode.md) |
+| 理解任务协作 | [原生协作](docs/collaboration.md) · [多会话并发](docs/concurrent-sessions.md) |
+| 学习和扩展运行时 | [架构导览](docs/architecture.md) · [代码检索](docs/code-search.md) · [上下文与工具输出](docs/tool-output-policy.md) |
+| 开发与复现评测 | [贡献指南](CONTRIBUTING.md) · [评测入口](evals/README.md) |
+
+更多使用说明、实验能力与历史设计见[完整文档索引](docs/README.md)。
 
 ## 开发与验证
 
-后端测试在仓库根目录执行：
-
-```bash
-python -m unittest discover -s tests
-```
-
-前端测试与生产构建：
-
-```powershell
-cd web
-npm.cmd test
-npm.cmd run build
-```
-
-开发界面时，在另一个终端进入 `web` 目录，运行 `npm.cmd run dev`；Vite 会将 `/api` 请求代理到本机 `8765` 端口。macOS / Linux 使用 `npm`。
-
-欢迎通过 [Issues](https://github.com/jerry021211/Coding-Agent/issues) 提交可复现的问题或改进建议。提交修改时请说明问题、改动行为和验证结果，避免提交密钥、运行时数据或评测产生的私有内容。
+欢迎通过 [Issues](https://github.com/jerry021211/Coding-Agent/issues) 提交可复现的问题或改进建议。开发环境、测试命令与提交要求见[贡献指南](CONTRIBUTING.md)，前端开发见 [Web 开发说明](web/README.md)。
 
 ## 致谢
 
-项目设计参考了 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 将 Agent loop 与工具、权限、记忆等能力分层组织的思路，并在此基础上实现本地 Web 工作台、上下文管理、代码检索与多 Agent 协作。
+项目设计参考了 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 对 Agent loop、工具、权限与记忆的分层组织，并在此基础上实现本地 Web 工作台、上下文管理、代码检索与协作。
+
+Weft 是织物的纬线；CodeWeft 取意于将模型、工具与 Agent 协作连接到本地项目的开发流程。
 
 ## 开源协议
 

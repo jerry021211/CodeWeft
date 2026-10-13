@@ -1,13 +1,63 @@
 # CodeWeft Web
 
-本机 CodeWeft 的 React 工作台。开发服务器会把 `/api` 代理到 `http://127.0.0.1:8765`，生产构建输出到 `web/dist/`，由后端同源托管。
+本目录是 CodeWeft 的 React + TypeScript 前端。使用产品请从 [项目首页](../README.md) 开始；本文面向修改界面的开发者。
+整体结构见 [架构说明](../docs/architecture.md)，提交流程见 [贡献指南](../CONTRIBUTING.md)。
+
+## 本地开发
+
+准备 Python 3.11+、Git，推荐 Node.js 22.12+。以下命令从仓库根目录执行，并假设已激活 Python 虚拟环境。
+先安装并启动后端：
 
 ```powershell
-npm.cmd install
-npm.cmd run dev
+python -m pip install -e ".[web]"
+python -m codeagent.web.cli --workspace . --port 8765
 ```
 
-如需修改开发代理目标，请调整 `vite.config.ts`。前端不读取任何模型密钥；运行时信息仅来自脱敏的 `/api/runtime-config`。
+另开一个终端，在仓库根目录安装前端依赖并启动 Vite：
+
+```powershell
+npm.cmd --prefix web ci
+npm.cmd --prefix web run dev
+```
+
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。Vite 将 `/api` 代理到 `http://127.0.0.1:8765`，开发时无需先生成 `web/dist/`。
+macOS / Linux 使用 `npm`。代理目标和固定开发端口在 [`vite.config.ts`](vite.config.ts) 中配置。
+首次启动可以通过 **设置 → 模型与能力** 配置模型；设置表单将密钥提交给后端，读取配置时只返回密钥是否已保存，
+普通运行界面使用脱敏的 `/api/runtime-config`，不从前端环境变量加载模型凭据。
+
+## 检查与生产构建
+
+```powershell
+npm.cmd --prefix web test
+npm.cmd --prefix web run typecheck
+npm.cmd --prefix web run build
+```
+
+测试使用 Node 自带测试运行器；`typecheck` 运行 TypeScript 检查，`build` 包含类型检查并生成 `web/dist/`。
+构建后由后端同源托管，访问 [http://127.0.0.1:8765](http://127.0.0.1:8765)。`dist/` 是生成产物，无需手工编辑。
+
+## 代码入口
+
+| 文件或目录 | 职责 |
+| --- | --- |
+| [`src/App.tsx`](src/App.tsx) | 页面状态、会话选择、设置路由和功能接入 |
+| [`src/components/ChatWorkspace.tsx`](src/components/ChatWorkspace.tsx) | 对话、输入框与执行过程 |
+| [`src/components/ComposerModeMenu.tsx`](src/components/ComposerModeMenu.tsx) | Agent / 只读执行方式，以及“先出方案” |
+| [`src/components/PlanPreview.tsx`](src/components/PlanPreview.tsx) | 方案预览、版本和用户决策 |
+| [`src/features/multiagent/`](src/features/multiagent/README.md) | 原生协作任务图、成员链路和状态同步 |
+| [`src/components/InspectorPanel.tsx`](src/components/InspectorPanel.tsx) | 运行、任务和调试面板 |
+| [`src/lib/api.ts`](src/lib/api.ts) / [`src/types/api.ts`](src/types/api.ts) | API 请求和传输类型 |
+| [`src/hooks/useRunEvents.ts`](src/hooks/useRunEvents.ts) / [`src/store/runStore.ts`](src/store/runStore.ts) | SSE 订阅与运行状态 |
+| [`src/styles.css`](src/styles.css) | 全局样式和主题 |
+| [`tests/`](tests) | 界面行为、展示逻辑与契约测试 |
+
+新任务使用 Agent 按需协作。`Team*` 组件用于历史 Team 的记录、继续执行和恢复；不要用原生协作执行阶段直接解释旧 Candidate / Attempt。
+
+## 界面行为约定
+
+下面保留维护界面时需要核对的交互与数据口径。
+
+### 项目、会话与设置
 
 左侧会话按完整工作区路径分组，点击项目标题可展开或收起。项目及组内会话按最近更新排序，
 同名但不同路径的项目保持独立。收起状态保存在本机浏览器，桌面侧栏和移动抽屉共用；
@@ -21,6 +71,8 @@ npm.cmd run dev
 归档页显示各项目的归档会话，支持搜索、按项目筛选、查看聊天历史、恢复和永久删除。
 恢复后会话回到原项目，“恢复并打开”可直接继续对话；永久删除需确认，工作区文件会保留。
 归档列表从后端独立筛选并分页加载，不受普通列表默认 100 条的限制。
+
+### 运行指标与上下文用量
 
 右侧默认打开“运行”页，展示本轮耗时、模型调用、已执行工具及失败次数、工作区和会话 ID。
 调用计数包含子 Agent；模型计数包括失败尝试和辅助模型调用，工具计数按已开始的调用 ID 去重。
@@ -44,6 +96,8 @@ npm.cmd run dev
 
 
 ### Team Token 统计
+
+以下口径用于历史 Team；新会话的成员协作展示由 `features/multiagent/` 负责。
 
 运行面板的“团队累计”读取持久化模型调用记录，涵盖团队根 Run、后续主 Agent 轮次、成员调用，以及明确关联到团队的规划 Run。摘要、记忆等辅助调用和有 usage 的失败重试一并计入；同一调用不会因同时匹配多个归属条件而重复累计。单 Agent 模式仍显示“本轮累计”。
 
