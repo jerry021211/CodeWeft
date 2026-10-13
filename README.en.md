@@ -200,3 +200,7 @@ Reproducible bug reports and improvement suggestions are welcome through [Issues
 ## Acknowledgments
 
 The project draws on [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) and its approach to separating the agent loop from tools, permissions, memory, and other capabilities. CodeWeft builds on these ideas with a local web workbench, context management, code retrieval, and multi-agent collaboration.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

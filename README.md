@@ -198,3 +198,7 @@ npm.cmd run build
 ## 致谢
 
 项目设计参考了 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 将 Agent loop 与工具、权限、记忆等能力分层组织的思路，并在此基础上实现本地 Web 工作台、上下文管理、代码检索与多 Agent 协作。
+
+## 开源协议
+
+本项目采用 [MIT License](LICENSE)。
