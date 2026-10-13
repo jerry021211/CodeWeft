@@ -61,6 +61,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  collaborationStatuses(conversationId: string, signal?: AbortSignal) {
+    return request<Record<string, unknown>[]>(`/conversations/${encodeURIComponent(conversationId)}/collaborations`, {signal});
+  },
+  collaborationDetails(conversationId: string, executionId: string, taskId: string, signal?: AbortSignal) {
+    return request<Record<string, unknown>>(`/conversations/${encodeURIComponent(conversationId)}/collaborations/${encodeURIComponent(executionId)}/members/${encodeURIComponent(taskId)}`, {signal});
+  },
   getPlans(conversationId: string) {
     return request<PlanningSnapshot>(`/conversations/${encodeURIComponent(conversationId)}/plans`);
   },

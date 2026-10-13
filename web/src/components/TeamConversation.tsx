@@ -9,7 +9,7 @@ import { cx } from "@/lib/utils";
 import { Spinner, StatusDot } from "@/components/ui";
 import { ProcessStep } from "@/components/ThinkingProcess";
 
-export function TeamConversation({ team, busy, error, onPause, onResume, onResolveIntegration, onResumeAttempt }: { team: TeamSnapshot; busy?: boolean; error?: string; onPause?: () => void; onResume?: () => void; onResolveIntegration?: ResolveIntegration; onResumeAttempt?: (id: string, reason: string, acknowledge: boolean) => void }) {
+export function TeamConversation({ team, busy, error, onPause, onResume, onResolveIntegration, onResumeAttempt, onPlanDecision }: { team: TeamSnapshot; busy?: boolean; error?: string; onPause?: () => void; onResume?: () => void; onResolveIntegration?: ResolveIntegration; onResumeAttempt?: (id: string, reason: string, acknowledge: boolean) => void; onPlanDecision?: (revision: number, decision: "approve" | "reject", reason: string) => void }) {
   const active = isTeamActive(team);
   const activity = useTeamActivity(team.team.id, team.team.root_run_id, active);
   const members = useMemo(() => teamMembers(team, activity.events), [team, activity.events]);
@@ -17,7 +17,7 @@ export function TeamConversation({ team, busy, error, onPause, onResume, onResol
   const [earlier, setEarlier] = useState<Record<string, boolean>>({});
   const working = members.filter(member => member.working).length;
   const delivered = team.tasks.filter(({ task }) => task.status === "completed").length;
-  const integrated = new Set(team.candidates.filter(candidate => candidate.integrated_at).map(candidate => candidate.task_id)).size;
+  const integrated = new Set(team.candidates.filter(candidate => candidate.integrated_at || candidate.team_integrated_revision != null).map(candidate => candidate.task_id)).size;
   const pending = team.tasks.filter(({ task }) => task.status === "pending");
   const attention = team.recoveries.length > 0 || team.candidates.some(candidate => candidate.user_approval_required && candidate.status === "accepted" && !candidate.user_decision);
   return <section aria-label="团队执行进度" className="min-w-0 rounded-2xl border border-line bg-surface">
@@ -71,11 +71,47 @@ export function TeamConversation({ team, busy, error, onPause, onResume, onResol
         <ul className="mt-2 space-y-2">{pending.map(({ task }) => {
           const scheduling = team.scheduling.find(item => item.task_id === task.id);
           const dependencies = task.blockedBy.map(id => team.tasks.find(item => item.task.id === id)?.task.subject ?? id);
-          return <li key={task.id}><span className="text-ink">{task.subject}</span><p className="mt-0.5 text-[11px]">{scheduling?.schedulable ? "等待空闲成员领取" : dependencies.length ? `等待依赖：${dependencies.join("、")}` : "等待调度条件满足"}</p></li>;
+          return <li key={task.id}><span className="text-ink">{task.subject}</span><p className="mt-0.5 text-[11px]">{scheduling?.schedulable ? "等待空闲成员领取" : scheduling?.reasons.length ? scheduling.reasons.join("；") : dependencies.length ? `等待依赖：${dependencies.join("、")}` : "正在核对调度条件"}</p></li>;
         })}</ul>
       </details>}
+      {(team.plans ?? []).filter(plan => plan.status === "pending_user_approval" && !plan.plan.preview_plan_id).map(plan => (
+        <section key={plan.revision} className="rounded-xl border border-accent/30 bg-accent/5 p-4 text-sm">
+          <h3 className="font-semibold">团队方案修订 · 第 {plan.revision} 版 · 等待你确认</h3>
+          <p className="mt-2 text-ink-muted">确认后采用新的任务安排。已执行的成果会保留，未受影响的成员继续原任务。</p>
+          {typeof plan.plan.shared_context === "string" && <p className="mt-3 whitespace-pre-wrap">{plan.plan.shared_context}</p>}
+          <ul className="mt-3 space-y-3">{(Array.isArray(plan.plan.tasks) ? plan.plan.tasks : []).map((item: Record<string, unknown>) => {
+            const task = team.tasks.find(t => t.task.id === String(item.task_id))?.task;
+            const paths = Array.isArray(item.write_scopes) ? item.write_scopes.map(String) : [];
+            const limits = Array.isArray(item.strict_write_scopes) ? item.strict_write_scopes.map(String) : [];
+            return <li key={String(item.task_id)} className="rounded-lg border border-line bg-surface p-3">
+              <p className="font-medium">任务 #{String(item.task_id)} · {task?.subject ?? "任务详情待同步"}</p>
+              {task && <p className="mt-1 whitespace-pre-wrap text-xs text-ink-muted">{task.description}</p>}
+              <p className="mt-1 text-xs text-ink-muted">预计分工：{paths.join("、") || "只读分析"}</p>
+              {limits.length > 0 && <p className="mt-1 text-xs text-warning">必须遵守的文件限制：{limits.join("、")}</p>}
+            </li>;
+          })}</ul>
+          {Array.isArray(plan.plan.continue_attempts) && plan.plan.continue_attempts.length > 0 && <p className="mt-3 text-xs text-warning">本次还将解除以下成员的方案等待；原文件授权不扩大，继续前仍检查现场：{plan.plan.continue_attempts.map(id => {
+            const attempt = team.attempts.find(a => a.id === String(id));
+            return attempt ? `任务 #${attempt.task_id}` : String(id);
+          }).join("、")}</p>}
+          <details className="mt-3"><summary className="cursor-pointer">查看验证配置及完整记录</summary><pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(plan.plan, null, 2)}</pre></details>
+          {onPlanDecision && <div className="mt-4 flex gap-3">
+            <button disabled={busy} onClick={() => onPlanDecision(plan.revision, "approve", "用户确认对话中的方案修订")} className="rounded-lg bg-accent px-3 py-2 text-white disabled:opacity-40">确认修订</button>
+            <button disabled={busy} onClick={() => onPlanDecision(plan.revision, "reject", "用户保留当前方案")} className="rounded-lg border border-line px-3 py-2 disabled:opacity-40">保留当前方案</button>
+          </div>}
+        </section>
+      ))}
       <TeamDeliveryProgress team={team} busy={busy} onResolve={onResolveIntegration} />
-      {(team.recoveries ?? []).map(recovery => onResumeAttempt ? <RecoveryCard key={recovery.attempt_id} recovery={recovery}
+      {(team.coordination_issues ?? []).filter(issue => issue.status === "open" && !issue.id.startsWith("integration:") && (!team.recoveries.some(r => r.attempt_id === issue.subject_id) || issue.owner !== "user")).map(issue => (
+        <div key={issue.id} role="status" className="rounded-xl border border-warning/30 bg-warning/5 p-4 text-sm">
+          <div className="font-semibold">任务 #{issue.evidence.task_id} · {issue.evidence.summary}</div>
+          <p className="mt-2 text-ink-muted">处理人：{({ lead: "主 Agent", runtime: "系统", user: "你", external: "外部服务" } as Record<string, string>)[issue.owner] ?? issue.owner}</p>
+          <p className="mt-1 text-ink-muted">下一步：{issue.evidence.next_step}</p>
+          {issue.evidence.error != null && <details className="mt-2"><summary className="cursor-pointer text-xs">查看具体原因</summary><pre className="mt-2 whitespace-pre-wrap break-words text-xs">{typeof issue.evidence.error === "string" ? issue.evidence.error : JSON.stringify(issue.evidence.error, null, 2)}</pre></details>}
+          {issue.owner !== "user" && <p className="mt-1 text-ink-faint">当前不需要你审批，可在下方补充说明。</p>}
+        </div>
+      ))}
+      {(team.recoveries ?? []).filter(recovery => !(team.coordination_issues ?? []).some(issue => issue.status === "open" && issue.subject_id === recovery.attempt_id && issue.owner !== "user")).map(recovery => onResumeAttempt ? <RecoveryCard key={recovery.attempt_id} recovery={recovery}
         taskName={team.tasks.find(t => t.task.id === recovery.task_id)?.task.subject}
         teammateName={team.agents.find(a => a.id === recovery.agent_id)?.name} busy={busy} onResume={onResumeAttempt} />
         : <p key={recovery.attempt_id} role="status" className="rounded-lg bg-warning/10 p-3 text-xs">{recovery.summary}</p>)}

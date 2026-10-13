@@ -248,6 +248,9 @@ class TeamIntegrationStorage:
                 raise StorageConflictError("Operation requires inspection or is not retryable")
             if not reason.strip():
                 raise ValueError("Resolution reason is required")
+            if actor != "user":
+                candidate_task = connection.execute("SELECT task_id FROM candidates WHERE id=?", (op["candidate_id"],)).fetchone() if op["candidate_id"] else None
+                self._consume_repair_budget(connection, team, candidate_task[0] if candidate_task else "delivery")
             if repair:
                 # Diagnostics guide the Lead; they are not authorization gates.
                 # A dependency error can still require a scoped manifest repair.
@@ -267,6 +270,8 @@ class TeamIntegrationStorage:
                 connection.execute("UPDATE task_lists SET revision=revision+1,updated_at=? WHERE id=?", (now, team["task_list_id"]))
             connection.execute("UPDATE team_integrations SET status='superseded',error=?,updated_at=? WHERE id=?",
                                (reason, utc_now_iso(), identifier))
+            self._append_team_event(connection, team, "team.integration.updated", {
+                "integration_id": identifier, "status": "superseded", "repair": bool(repair), "actor": actor})
         self._notify_activity()
         return self.get_team_integration(identifier)
 

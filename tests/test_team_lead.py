@@ -19,13 +19,13 @@ from codeagent.memory import (
 from codeagent.permissions import WaitingPermissionBroker
 from codeagent.runtime import CancellationToken
 from codeagent.prompts import PromptMode
-from codeagent.teams import LeadTeamPlanTool
-from codeagent.teams.tool_gate import TeamPlannerToolExecutionGate
+from codeagent.legacy.teams import LeadTeamPlanTool
+from codeagent.legacy.teams.tool_gate import TeamPlannerToolExecutionGate
 from codeagent.tools import ToolRegistry
 from codeagent.tools.tasks import create_task_tools
 from codeagent.web.factory import WebAgentFactory
 from codeagent.web.storage import SQLiteRepository, StorageConflictError
-from codeagent.worktrees import DirtyWorkspaceConfirmationRequired, WorktreeManagerRegistry
+from codeagent.legacy.teams.worktrees import DirtyWorkspaceConfirmationRequired, WorktreeManagerRegistry
 
 
 class LeadTeamPlanToolTests(unittest.TestCase):

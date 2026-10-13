@@ -15,6 +15,37 @@ from codeagent.events import (
 
 
 class EventTests(unittest.TestCase):
+    def test_large_collaboration_control_state_survives_redaction_and_reapplication(self):
+        import json
+        from codeagent.events.redaction import redact_event_payload
+        payload = dict(id='collab_test', status='completed', revision=185,
+            objective='说明' * 60000, tasks=[dict(id=str(i), subject='任务' * 1000,
+                objective='要求' * 10000, depends_on=[str(j) for j in range(i)], profile='implement') for i in range(32)],
+            records={str(i): dict(status='accepted', attempts=1, summary='报告' * 10000,
+                reason='credential very-secret-value') for i in range(32)}, checks=[dict(output='日志' * 100000)])
+        with patch.dict(os.environ, {'TEST_API_KEY': 'very-secret-value'}):
+            event = EventEmitter().emit('collaboration.snapshot', payload)
+            again = redact_event_payload(event.type, event.payload)
+        self.assertEqual(event.payload, again)
+        self.assertEqual(again['status'], 'completed')
+        self.assertEqual(again['revision'], 185)
+        self.assertEqual(len(again['records']), 32)
+        self.assertEqual(again['tasks'][-1]['depends_on'], [str(i) for i in range(31)])
+        encoded = json.dumps(again, ensure_ascii=False).encode()
+        self.assertLess(len(encoded), 32768)
+        self.assertNotIn(b'very-secret-value', encoded)
+        self.assertNotIn('summary', again['records']['0'])
+        self.assertNotIn('checks', again)
+        with patch.dict(os.environ, {'TEST_API_KEY': 'very-secret-value'}):
+            boundary = redact_event_payload('collaboration.snapshot', dict(id='c', tasks=[
+                dict(id='1', subject='x' * 115 + 'very-secret-value')], records={}))
+        self.assertNotIn('very-', boundary['tasks'][0]['subject'])
+
+    def test_ordinary_events_keep_original_redaction_and_payload(self):
+        from codeagent.events.redaction import redact_event_payload
+        for payload in ({'text': 'hello'}, {'output': 'x' * 100000}, {'usage': {'input_tokens': 123, 'cache_read_input_tokens': 456}}):
+            self.assertEqual(redact_event_payload('tool.completed', payload), redact_payload(payload))
+
     def test_emitter_orders_events_and_propagates_child_identity(self) -> None:
         events = []
         emitter = EventEmitter(

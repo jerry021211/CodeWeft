@@ -115,6 +115,47 @@ class WebApiTests(unittest.TestCase):
         self.repository.update_run_status(run.id, "cancelled")
         self.assertEqual(self.client.get(f"/api/runs/{run.id}").json()["status"], "cancelled")
 
+    def test_collaboration_status_repairs_truncated_history_without_rerunning(self):
+        from codeagent.multiagent.executions import ExecutionRepository
+        from codeagent.events import EventEmitter
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        other = self.repository.create_conversation(workspace=self.workspace)
+        task_list = self.repository.ensure_conversation_task_list(conversation.id)
+        task = self.repository.create_task(task_list.id, subject='A', description='完整需求' * 20000,
+            metadata={'execution': {'profile': 'implement', 'files': ['a.py']}})
+        executions = ExecutionRepository(self.repository)
+        value = executions.create(conversation.id, self.workspace, 'goal', [task.task.id])
+        def complete(record):
+            record['status'] = 'completed'
+            record['records'][task.task.id].update(status='accepted', summary='完整报告' * 20000 + ' report-END very-secret-value')
+            record['checks'] = [dict(task_id=task.task.id, status='passed', command='python test.py', output='日志' * 50000 + ' log-END')]
+        value = executions.change(value['id'], complete)
+        run = self.repository.create_run(conversation.id)
+        # Old truncated event stays untouched. Current status comes from the journal.
+        broken = self.repository.append_event(RunEvent(type='collaboration.snapshot', run_id=run.id,
+            payload={'truncated': True, 'preview': 'old incomplete message'}))
+        url = f'/api/conversations/{conversation.id}/collaborations'
+        before_revision = value['revision']
+        with patch.dict('os.environ', {'TEST_API_KEY': 'very-secret-value'}):
+            summaries = self.client.get(url).json()
+            details = self.client.get(f"{url}/{value['id']}/members/{task.task.id}").json()
+        self.assertEqual(summaries[0]['status'], 'completed')
+        self.assertEqual(summaries[0]['records'][task.task.id]['status'], 'accepted')
+        self.assertLess(len(json.dumps(summaries).encode()), 32768)
+        self.assertTrue(details['checks'][0]['output'].endswith('log-END'))
+        self.assertIn('report-END', details['record']['summary'])
+        self.assertNotIn('very-secret-value', details['record']['summary'])
+        self.assertEqual(self.client.get(f'/api/conversations/{other.id}/collaborations').json(), [])
+        self.assertNotEqual(self.client.get(f"/api/conversations/{other.id}/collaborations/{value['id']}/members/{task.task.id}").status_code, 200)
+        self.assertEqual(executions.get(value['id'])['revision'], before_revision)
+        self.assertEqual(self.repository.get_event(broken.id).payload, broken.payload)
+        self.assertEqual(self.scheduler.submissions, [])
+        # The same large event can pass through emitter AND storage without losing state.
+        small = EventEmitter().emit('collaboration.snapshot', executions.public(value))
+        persisted = self.repository.append_event(RunEvent(type=small.type, run_id=run.id, payload=small.payload))
+        self.assertEqual(persisted.payload['status'], 'completed')
+        self.assertEqual(persisted.payload['revision'], before_revision)
+
     def test_personal_todo_snapshots_include_clears_and_are_conversation_scoped(self):
         conversation = self.repository.create_conversation(workspace=self.workspace)
         other = self.repository.create_conversation(workspace=self.workspace)
@@ -129,6 +170,10 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()[0]["todos"], todos)
         self.assertEqual(response.json()[0]["revision"], 2)
+        self.repository.update_run_status(run.id, "cancelled")
+        stopped = self.client.get(url).json()[0]
+        self.assertEqual(stopped["run_status"], "cancelled")
+        self.assertEqual(stopped["revision"], 2)
         self.assertEqual(self.client.get(f"/api/conversations/{other.id}/todos").json(), [])
         self.assertEqual(self.client.get("/api/conversations/missing/todos").status_code, 404)
 

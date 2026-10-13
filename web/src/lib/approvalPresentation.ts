@@ -7,7 +7,7 @@ export function approvalPresentation(approval: Approval) {
   const value = (key: string) => typeof input[key] === "string" ? (input[key] as string).trim() : "";
   const command = value("command");
   const path = value("file_path") || value("path");
-  const purpose = value("description");
+  const purpose = value("description") || value("member_task");
   const effects: string[] = [];
   let title = "执行工具操作";
   let scope = "具体访问范围以工具参数为准；当前没有足够信息确认全部影响。";
@@ -27,6 +27,7 @@ export function approvalPresentation(approval: Approval) {
     effects.push("执行下方参数指定的工具操作；工具的外部影响需要结合详情核对。");
     if (path) scope = path;
   }
+  if (value("execution_workspace")) effects.push(`执行目录：${value("execution_workspace")}`);
   return { title, purpose, effects, scope, command,
     explanation: "当前权限规则要求这次操作先获得你的确认。授权只用于本次请求，不代表之后的同类操作也被允许。",
     declined: "本次请求不会获准执行。Agent 会收到拒绝结果，再决定调整操作或停止；此前已完成的修改不会自动撤销。" };

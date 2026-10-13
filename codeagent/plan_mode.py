@@ -22,11 +22,29 @@ PLAN_REMINDER = """[Plan Mode]
 方案应包含需求与范围、现状依据、实现步骤、验证方式和待确认假设；不要将推测写成已验证事实。
 单 Agent 使用 plan(action="submit", ...) 提交；Team 先创建 pending Tasks，声明 kind、write_scopes、
 risk_level、plan_required、validation_commands，然后调用 TeamPlanSubmit 提交同一份方案。
+新团队的 write_scopes 是分工范围，不是硬性写入限制。若用户明确限制只能修改某些文件，必须在任务 metadata.strict_write_scopes 中原样声明，不能省略或扩大。
+明确声明 metadata.artifact_paths（如测试报告、编译缓存目录）；只有这些路径下未跟踪的文件排除成果提交，已有源码不排除。不要把源码目录声明为产物。
 TeamPlanSubmit 在本模式仅保存方案，不创建 Git 快照；baseCommit 可省略。不要探查 .git/HEAD。
 新 Team 缺少本地 Git 仓库或初始提交时，用户批准后由 Runtime 自动准备；无需因此阻塞方案或安排初始化任务。
 提交后结束本轮，等待用户在方案预览中批准。不能自行批准或退出 Plan Mode。
 仅可使用 access="read_only" 的子 Agent 做调查，子 Agent 不得改变方案或权限。
 用户的修改意见仍属于规划；批准和启动由 Runtime 负责。
+"""
+
+NATIVE_PLAN_REMINDER = """[Plan Mode]
+当前只调查和设计方案，不修改项目源码、不安装依赖、不初始化 Git。
+使用 inspect_project 检查环境，使用读取工具调查。使用 plan(action="update") 保存可预览草稿，
+使用 plan(action="submit") 提交方案后结束本轮，等待用户批准；不能自行批准或退出 Plan Mode。
+任务统一使用 TaskCreate/Get/List/Update，blockedBy 表达依赖，metadata.execution 表达成员执行配置。
+规划期间可以定义待实施任务，但只能委派 profile=research/review 的只读调查任务。
+一个调查任务用 delegate_task，多项调查用 delegate_batch；不可启动 implement/verify 或回写代码。
+执行证据、风险和未验证部分如实写进方案，不使用旧 TeamPlanSubmit、Candidate 或 artifacts 排除规则。
+"""
+
+NATIVE_RESEARCH_REMINDER = """[Read-only member]
+只调查被分配的任务，不修改项目源码、不运行任意 Shell、不安装依赖、不初始化 Git。
+使用 inspect_project 与读取工具获取证据，结束时直接向主 Agent 报告结论与未验证部分。
+不提交用户方案、不创建或修改 Task，不调用其他成员。
 """
 
 
@@ -180,10 +198,20 @@ class PlannedTeamSubmitTool:
 
 
 class PlanModeGate:
-    def __init__(self, repository, conversation_id, *, team=False):
+    def __init__(self, repository, conversation_id, *, team=False, native=False):
         self.repository, self.conversation_id, self.team = repository, conversation_id, team
+        self.native = native
 
     def check(self, name, args):
+        # The native tool is installed by the host with read_only=True in Plan Mode.
+        # It validates every task and persisted resume before creating any workspace.
+        from codeagent.multiagent.tools import EXECUTION_TOOL_NAMES
+        if self.native and name in EXECUTION_TOOL_NAMES:
+            return None
+        if self.native and not self.team and name in {'TaskCreate', 'TaskUpdate'}:
+            if name == 'TaskUpdate' and ('status' in args or 'owner' in args):
+                return 'Blocked: 规划期间不能手动领取或完成任务'
+            return None
         if name in PLAN_READERS or name == 'plan':
             return None
         if name == 'subagent' and args.get('access') == 'read_only':
@@ -203,6 +231,9 @@ class PlanModeGate:
 
     def filter(self, registry):
         allowed = PLAN_READERS | {'plan', 'subagent'}
+        if self.native:
+            from codeagent.multiagent.tools import EXECUTION_TOOL_NAMES
+            allowed |= EXECUTION_TOOL_NAMES | {'TaskCreate', 'TaskUpdate'}
         if self.team:
             allowed |= {'TaskCreate', 'TaskUpdate', 'TeamPlanSubmit', 'team_get_status'}
         return registry.copy_without(s['name'] for s in registry.schemas() if s['name'] not in allowed)

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from codeagent.web.storage import SQLiteRepository
-from codeagent.web.team_observation import TABLE_SCOPES, install_observation
+from codeagent.legacy.teams.observation import TABLE_SCOPES, install_observation
 
 
 class TeamObservationTests(unittest.TestCase):
@@ -40,13 +40,23 @@ class TeamObservationTests(unittest.TestCase):
     def detail(self, change: dict) -> dict:
         return self.repo.list_team_changes(self.team.id, seq=change["seq"])["items"][0]
 
-    def test_all_business_tables_and_columns_are_covered(self) -> None:
+    def test_declared_observation_boundary_and_columns_are_covered(self) -> None:
         connection = self.repo._connection
         tables = {r[0] for r in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )} - {"database_changes"}
-        self.assertEqual(tables, set(TABLE_SCOPES))
-        for table in tables:
+        # The legacy observer has an explicit allowlist. Later execution journals
+        # and coordination/contract tables were never part of its trigger coverage;
+        # moving it must not silently start copying those records into Team history.
+        unobserved = {"agent_executions", "agent_root_recovery", "team_attempt_contracts",
+                      "team_contract_approvals", "team_coordination_issues"}
+        self.assertEqual(tables, set(TABLE_SCOPES) | unobserved)
+        for table in unobserved:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+                (f"observe_{table}_insert",),
+            ).fetchone())
+        for table in TABLE_SCOPES:
             for operation in ("insert", "update", "delete"):
                 self.assertIsNotNone(connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",

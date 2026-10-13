@@ -1,10 +1,6 @@
-"""Agent Team domain contracts and extension points."""
+"""Legacy Team contracts, retained for existing TeamRun/Attempt/Candidate workflows."""
 
-from codeagent.teams.bus import MessageBus
-from codeagent.teams.candidates import CandidateService
-from codeagent.teams.integration import ManualIntegrationVerifier
-from codeagent.teams.lead import LeadTeamPlanTool
-from codeagent.teams.models import (
+from codeagent.legacy.teams.models import (
     AgentSessionCheckpointRecord,
     AgentSessionRecord,
     AgentSessionState,
@@ -28,14 +24,25 @@ from codeagent.teams.models import (
     ValidationRunRecord,
     WorktreeBindingRecord,
 )
-from codeagent.teams.session import AgentSessionRunner
-from codeagent.teams.tool_gate import (
-    ActiveTeamRootToolExecutionGate,
-    ReadOnlyTeamToolExecutionGate,
-    TeamPlannerToolExecutionGate,
-    TeamToolExecutionGate,
-)
-from codeagent.teams.tools import TeamStatusTool, create_lead_tools, create_teammate_tools
+# Load services on demand: model imports must not initialize the Worktree runtime.
+_SERVICE_MODULES = {
+    "MessageBus": "bus", "CandidateService": "candidates",
+    "ManualIntegrationVerifier": "integration", "LeadTeamPlanTool": "lead",
+    "AgentSessionRunner": "session", "TeamStatusTool": "tools",
+    "create_lead_tools": "tools", "create_teammate_tools": "tools",
+    "ActiveTeamRootToolExecutionGate": "tool_gate", "ReadOnlyTeamToolExecutionGate": "tool_gate",
+    "TeamPlannerToolExecutionGate": "tool_gate", "TeamToolExecutionGate": "tool_gate",
+}
+
+
+def __getattr__(name):
+    if name not in _SERVICE_MODULES:
+        raise AttributeError(name)
+    from importlib import import_module
+    value = getattr(import_module(f"codeagent.legacy.teams.{_SERVICE_MODULES[name]}"), name)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "AgentSessionCheckpointRecord",

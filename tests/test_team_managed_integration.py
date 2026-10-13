@@ -10,10 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from codeagent.teams.candidates import CandidateService
-from codeagent.teams.managed_integration import IntegrationService
+from codeagent.legacy.teams.candidates import CandidateService
+from codeagent.legacy.teams.managed_integration import IntegrationService
 from codeagent.web.storage import SQLiteRepository, StorageConflictError
-from codeagent.worktrees import WorktreeManager
+from codeagent.legacy.teams.worktrees import WorktreeManager
 from codeagent.worktrees.snapshots import LocalGit, exclusive_file
 
 
@@ -92,7 +92,7 @@ class ManagedIntegrationTests(unittest.TestCase):
         return self.service.process_team(self.team.id)
 
     def test_pause_during_trial_keeps_version_and_resume_requeues_without_redoing_task(self):
-        from codeagent.runtime import TeamSupervisor
+        from codeagent.legacy.teams.supervisor import TeamSupervisor
         self.start()
         candidate = self.candidate("A", {"new.txt": "finished work\n"})
         original = self.service._validate
@@ -116,7 +116,7 @@ class ManagedIntegrationTests(unittest.TestCase):
             supervisor.stop()
 
     def test_pause_during_validation_requeues_only_the_interrupted_trial(self):
-        from codeagent.runtime import TeamSupervisor
+        from codeagent.legacy.teams.supervisor import TeamSupervisor
         self.start()
         self.candidate("A", {"new.txt": "finished work\n"})
         original = self.service._validate
@@ -308,7 +308,7 @@ class ManagedIntegrationTests(unittest.TestCase):
         self.repo.mark_attempt_suspect(attempt.id, reason="model_call_timeout")
         self.repo.pause_attempt_after_worker_exit(attempt.id, reason="model_call_timeout")
         self.integrate()
-        from codeagent.runtime import TeamSupervisor
+        from codeagent.legacy.teams.supervisor import TeamSupervisor
         supervisor = TeamSupervisor(self.repo, lambda *_: None, enabled=True, worktree_manager=self.manager)
         try:
             resumed = supervisor.resume_attempt(attempt.id, resumed_by="user", reason="checked", command_id="resume")
@@ -343,7 +343,7 @@ class ManagedIntegrationTests(unittest.TestCase):
             if Path(target).name == "b.txt":
                 raise OSError("simulated process interruption")
             return replace(source, target)
-        with patch("codeagent.teams.managed_integration.os.replace", side_effect=interrupted):
+        with patch("codeagent.legacy.teams.managed_integration.os.replace", side_effect=interrupted):
             result = self.integrate()
         self.assertEqual(result["status"], "recovery_required", result)
         self.assertFalse((self.source / "base.txt").exists())
@@ -397,7 +397,7 @@ class ManagedIntegrationTests(unittest.TestCase):
         self.assertEqual(self.repo.get_team_run(self.team.id).integration_revision, 0)
 
     def test_supervisor_automatically_integrates_and_delivers_with_one_slot(self):
-        from codeagent.runtime import TeamSupervisor
+        from codeagent.legacy.teams.supervisor import TeamSupervisor
         self.start()
         self.candidate("A", {"a.txt": "A\n"})
         supervisor = TeamSupervisor(self.repo, lambda *_: self.fail("No model call needed"),
@@ -414,7 +414,7 @@ class ManagedIntegrationTests(unittest.TestCase):
             supervisor.stop()
 
     def test_attempt_from_published_version_resumes_after_later_publication(self):
-        from codeagent.runtime import TeamSupervisor
+        from codeagent.legacy.teams.supervisor import TeamSupervisor
         self.start(("A", "B", "D"), {"B": ["A"]})
         self.candidate("A", {"a.txt": "A\n"})
         first = self.integrate()

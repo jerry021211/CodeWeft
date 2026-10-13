@@ -86,8 +86,8 @@ class ConcurrentMcpTests(unittest.TestCase):
                 self.assertEqual(constructor.call_count, 1)
                 (root / "a").mkdir()
                 (root / "b").mkdir()
-                team_a = factory.for_team_workspace(root / "a", project_workspace=root)
-                team_b = factory.for_team_workspace(root / "b", project_workspace=root)
+                team_a = factory.for_execution_workspace(root / "a", project_workspace=root)
+                team_b = factory.for_execution_workspace(root / "b", project_workspace=root)
                 team_routers = [owner._mcp_router(force_workspace_cwd=True) for owner in (team_a, team_b)]
                 self.assertIsNot(*team_routers)
                 factory.reload_mcp(root)

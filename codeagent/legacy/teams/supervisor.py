@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from codeagent.teams.scopes import path_is_allowed
+from codeagent.worktrees.scopes import path_is_allowed
 from codeagent.runtime.cancellation import CancellationToken, CancelledError
 from codeagent.runtime.cancellation import ModelCallTimeout
 from codeagent.runtime.activity import ExecutionActivity, MODEL_TIMEOUT_REASONS
-from codeagent.teams import (
+from codeagent.legacy.teams import (
     AgentSessionRunner,
     AgentSessionState,
     CandidateService,
@@ -22,9 +22,9 @@ from codeagent.teams import (
     TeamAgentRole,
     TeamRunState,
 )
-from codeagent.worktrees import WorktreeError, WorktreeManager
-from codeagent.teams.tasks import validate_task_execution
-from codeagent.teams.managed_integration import IntegrationService
+from codeagent.legacy.teams.worktrees import WorktreeError, WorktreeManager
+from codeagent.legacy.teams.tasks import validate_task_execution
+from codeagent.legacy.teams.managed_integration import IntegrationService
 
 
 class TeamAgentBuilder(Protocol):
@@ -87,6 +87,7 @@ class TeamSupervisor:
         lead_runner: Any | None = None,
         lead_activity_provider: Callable[[], tuple[ExecutionActivity, ...]] | None = None,
         team_lead_control: Callable[[str, bool], bool] | None = None,
+        validation_permission_check: Callable | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
@@ -113,6 +114,7 @@ class TeamSupervisor:
         self.lead_runner = lead_runner
         self.lead_activity_provider = lead_activity_provider
         self.team_lead_control = team_lead_control
+        self.validation_permission_check = validation_permission_check
         self._control_lock = threading.RLock()
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
@@ -243,7 +245,8 @@ class TeamSupervisor:
                     assert self.worktree_manager is not None
                     try:
                         self.worktree_manager.ensure_baseline_ready(team.id)
-                    except WorktreeError:
+                    except WorktreeError as exc:
+                        self.repository.record_dispatch_issue(team.id, task.task.id, str(exc))
                         continue
                 try:
                     attempt = self.repository.claim_task_attempt(
@@ -254,17 +257,20 @@ class TeamSupervisor:
                         expected_task_revision=task.revision,
                         command_id=f"dispatch:{team.id}:{task.task.id}:{uuid4().hex}",
                     )
-                except Exception:
+                except Exception as exc:
                     # A competing claim may have taken this session. A task-only
                     # conflict must not consume an otherwise idle teammate.
                     if self.repository.get_agent_session(session.id).state is not AgentSessionState.IDLE:
                         idle_sessions.pop(0)
+                    else:
+                        self.repository.record_dispatch_issue(team.id, task.task.id, str(exc))
                     continue
                 if is_code:
                     try:
                         self.worktree_manager.create_for_attempt(attempt)
                         attempt = self.repository.get_task_attempt(attempt.id)
                     except Exception as exc:
+                        self.repository.record_dispatch_issue(team.id, task.task.id, f"Worktree setup failed: {exc}")
                         self.repository.fail_attempt_after_worker_exit(
                             attempt.id,
                             error={
@@ -273,6 +279,7 @@ class TeamSupervisor:
                             },
                         )
                         continue
+                self.repository.record_dispatch_issue(team.id, task.task.id)
                 idle_sessions.pop(0)
                 cancellation = CancellationToken()
                 activity = self._new_activity(cancellation)
@@ -474,7 +481,9 @@ class TeamSupervisor:
                 binding = self.worktree_manager.validate_recoverable_binding(binding.id)
                 for path in self.worktree_manager.recovery_changed_paths(binding.id):
                     repository_lease = any(r.resource_kind == "repository" for r in self.repository.list_resource_leases(team_id, attempt_id=attempt.id))
-                    if not _path_allowed_for_recovery(path, binding.write_scopes, repository_lease=repository_lease):
+                    from codeagent.legacy.teams.policy import collaborative, authorized_path
+                    allowed = authorized_path(path, team.metadata, self.repository.get_attempt_contract(attempt.id), binding.write_scopes) if collaborative(team.metadata) else _path_allowed_for_recovery(path, binding.write_scopes, repository_lease=repository_lease)
+                    if not allowed:
                         raise WorktreeError(f"工作目录含有超出任务范围的修改：{path}")
                 fingerprints[attempt.id] = binding.fingerprint
             self.repository.resume_team_run(team_id, fingerprints=fingerprints, reason=reason, command_id=command_id)
@@ -574,6 +583,11 @@ class TeamSupervisor:
                     ),
                 )
             ]
+            from codeagent.legacy.teams.policy import collaborative, authorized_path
+            policy = self.repository.get_team_run(attempt.team_run_id).metadata
+            if collaborative(policy):
+                contract = self.repository.get_attempt_contract(attempt.id)
+                outside = [p for p in changed_paths if not authorized_path(p, policy, contract, binding.write_scopes)]
             if outside:
                 raise WorktreeError(
                     "Worktree still contains changes outside the declared write "
@@ -961,7 +975,8 @@ class TeamSupervisor:
                         continue
                     future = self._executor.submit(
                         CandidateService(
-                            self.repository, self.worktree_manager
+                            self.repository, self.worktree_manager, stop_event=self._stopping,
+                            permission_check=self.validation_permission_check,
                         ).validate_and_commit,
                         candidate.id,
                         trace_id=f"runtime:{team.id}",
@@ -992,7 +1007,8 @@ class TeamSupervisor:
                 if len(self._jobs) + len(self._lead_jobs) + len(self._validation_jobs) + len(self._integration_jobs) >= self.max_workers:
                     return
                 self._integration_jobs[team.id] = self._executor.submit(
-                    IntegrationService(self.repository, self.worktree_manager, stop_event=self._stopping).process_team, team.id)
+                    IntegrationService(self.repository, self.worktree_manager, stop_event=self._stopping,
+                        permission_check=self.validation_permission_check).process_team, team.id)
 
     def _mark_stale_workers(self) -> None:
         with self._lock:
@@ -1053,8 +1069,4 @@ def _has_repository_lease(repository: Any, team_run_id: str, attempt_id: str) ->
     )
 
 
-# Kept as an import-compatible name for the former extension point.
-BackgroundTaskRunner = TeamSupervisor
-
-
-__all__ = ["BackgroundTaskRunner", "TeamAgentBuilder", "TeamSupervisor"]
+__all__ = ["TeamAgentBuilder", "TeamSupervisor"]

@@ -15,7 +15,7 @@ from codeagent.events import TokenTotals, EventEmitter, ExecutionContext, Record
 from codeagent.permissions import WaitingPermissionBroker
 from codeagent.prompts import PromptMode
 from codeagent.runtime import CancelledError, CancellationToken
-from codeagent.teams import AgentSessionState, MessageBus
+from codeagent.legacy.teams import AgentSessionState, MessageBus
 from codeagent.tools import TodoStore
 from codeagent.web.scheduler import RunScheduler
 from codeagent.web.storage import SQLiteRepository
@@ -513,7 +513,7 @@ class SchedulerTests(unittest.TestCase):
             scheduler.stop()
 
     def test_empty_non_git_team_workspace_can_plan_without_creating_git(self):
-        from codeagent.worktrees import WorktreeManagerRegistry
+        from codeagent.legacy.teams.worktrees import WorktreeManagerRegistry
 
         workspace = Path(self.tempdir.name) / "new-project"
         workspace.mkdir()

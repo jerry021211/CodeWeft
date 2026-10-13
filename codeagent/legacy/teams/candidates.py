@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-import subprocess
-import shutil
-import os
-import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from codeagent.teams.validation import validate_step, portable_chain, decode_output, command_label
-from codeagent.runtime_platform import current_runtime_platform
-from codeagent.teams.models import CandidateRecord, CandidateStatus
-from codeagent.worktrees import WorktreeError, WorktreeManager
+from codeagent.runtime.validation import ValidationRunner, validate_step, command_label
+from codeagent.legacy.teams.models import CandidateRecord, CandidateStatus
+from codeagent.legacy.teams.worktrees import WorktreeError, WorktreeManager
 
 
-class CandidateService:
+class CandidateService(ValidationRunner):
     """Orchestrate Git side effects around transactional Candidate state."""
 
     def __init__(
@@ -27,10 +22,16 @@ class CandidateService:
         worktrees: WorktreeManager,
         *,
         validation_timeout: int = 600,
+        stop_event=None,
+        permission_check=None,
     ) -> None:
+        super().__init__(timeout=validation_timeout)
         self.repository = repository
         self.worktrees = worktrees
-        self.validation_timeout = max(1, int(validation_timeout))
+        self.validation_team_id = None
+        self.stop_event = stop_event
+        self.permission_check = permission_check
+        self.validation_attempt_id = None
 
     def submit(
         self,
@@ -50,6 +51,15 @@ class CandidateService:
         snapshot = self.worktrees.capture_candidate(
             binding.id, candidate_id=candidate_id
         )
+        from codeagent.legacy.teams.policy import collaborative
+        from codeagent.worktrees.scopes import path_is_allowed
+        team = self.repository.get_team_run(attempt.team_run_id)
+        contract = self.repository.get_attempt_contract(attempt.id)
+        if collaborative(team.metadata):
+            extra = [p for p in (*snapshot.changed_files, *snapshot.untracked_files)
+                     if not path_is_allowed(p, contract.get("write_scopes", []))]
+            if extra:
+                known_risks = [*known_risks, "Responsibility changes for Lead review: " + ", ".join(extra)]
         return self.repository.submit_candidate(
             attempt_id,
             candidate_id=candidate_id,
@@ -80,10 +90,8 @@ class CandidateService:
         if binding is None:
             raise WorktreeError("Candidate Worktree binding is missing")
         binding = self.worktrees.validate_binding(binding.id)
-        if not self.worktrees.candidate_snapshot_matches(
-            binding.id,
-            expected_hash=candidate.diff_hash,
-            expected_head=candidate.worktree_head,
+        if decision == "accept" and not self.worktrees.candidate_snapshot_matches(
+            binding.id, expected_hash=candidate.diff_hash, expected_head=candidate.worktree_head,
         ):
             raise WorktreeError("Candidate changed after submission")
         return self.repository.decide_candidate_review(
@@ -117,13 +125,14 @@ class CandidateService:
             raise WorktreeError("Candidate Worktree binding is missing")
         binding = self.worktrees.validate_binding(binding.id)
         self._require_frozen_snapshot(candidate, binding.id)
+        self.validation_team_id = attempt.team_run_id
+        self.validation_attempt_id = attempt.id
         candidate = self.repository.mark_candidate_validating(candidate_id)
-        task = self.repository.get_task_resource(attempt.task_list_id, attempt.task_id)
         team = self.repository.get_team_run(attempt.team_run_id)
         assert team is not None
         commands = ["git diff --check HEAD"]
         commands.extend(_string_list(team.metadata.get("mandatory_validation_commands")))
-        commands.extend(_string_list(task.task.metadata.get("validation_commands")))
+        commands.extend(_string_list(self.repository.get_attempt_contract(attempt.id).get("validation_commands")))
         commands = list(dict.fromkeys(commands))
         last_validation_id = ""
         for command in commands:
@@ -144,6 +153,13 @@ class CandidateService:
                 output_ref=output_ref,
                 duration_ms=duration_ms,
             )
+            if self.validation_cleanup_unknown:
+                self.repository.mark_candidate_commit_unknown(candidate_id,
+                    reason="验证进程未能确认停止，需核对进程与工作目录后恢复；不能自动重跑。")
+                return self.repository.get_candidate(candidate_id)
+            if status != "passed" and self.validation_interrupted:
+                self.repository.defer_candidate_validation(candidate_id)
+                return self.repository.get_candidate(candidate_id)
             if status != "passed":
                 return self.repository.mark_candidate_validation_failed(
                     candidate_id,
@@ -240,78 +256,42 @@ class CandidateService:
         ):
             raise WorktreeError("Candidate changed after review")
 
-    def _run_validation(
-        self, cwd: Path, command: str | dict[str, Any]
-    ) -> tuple[str, int, str, int]:
+    def _run_validation(self, cwd, command):
         started = time.monotonic()
-        outputs = []
         try:
+            self.validation_interrupted = False
+            self.validation_cleanup_unknown = False
             validate_step(command)
-            chain = portable_chain(command) if isinstance(command, str) else None
-            steps = [{"argv": argv} for argv in chain] if chain else [command]
-            for step in steps:
-                step_cwd = cwd
-                if isinstance(step, dict):
-                    step_cwd = (cwd / step.get("cwd", ".")).resolve()
-                    step_cwd.relative_to(cwd.resolve())
-                    if not step_cwd.is_dir():
-                        raise FileNotFoundError(f"Validation working directory does not exist: {step_cwd}")
-                    argv = list(step["argv"])
-                    executable = shutil.which(argv[0])
-                    if executable is None:
-                        raise FileNotFoundError(f"Validation executable not found: {argv[0]}")
-                    argv[0] = executable
-                    if os.name == "nt" and executable.lower().endswith((".cmd", ".bat")):
-                        if any(any(c in arg for c in '&|<>^%!\r\n') for arg in argv):
-                            raise ValueError("Batch validation arguments contain shell metacharacters; use an explicit script")
-                        argv = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", subprocess.list2cmdline(argv)]
-                else:
-                    argv = (["git", "-C", str(cwd), "diff", "--check", "HEAD"]
-                            if step == "git diff --check HEAD" else current_runtime_platform().command_argv(step))
-                remaining = self.validation_timeout - (time.monotonic() - started)
-                if remaining <= 0:
-                    return "timed_out", 124, "\n".join(outputs) + "\nValidation time budget exhausted before next step", round((time.monotonic() - started) * 1000)
-                status, code, output, _ = self._run_validation_process(step_cwd, argv, timeout=remaining)
-                outputs.append(f"$ {command_label(step)}\n{output}")
-                if status != "passed":
-                    return status, code, "\n".join(outputs), round((time.monotonic() - started) * 1000)
-            return "passed", 0, "\n".join(outputs), round((time.monotonic() - started) * 1000)
+            if self.validation_team_id:
+                from codeagent.legacy.teams.policy import collaborative
+                from codeagent.runtime.validation import ValidationCancellation
+                from codeagent.runtime.cancellation import CancelledError
+                if collaborative(self.repository.get_team_run(self.validation_team_id).metadata):
+                    cancellation = ValidationCancellation(lambda: self._validation_stopped())
+                    try:
+                        cancellation.raise_if_cancelled()
+                        if self.permission_check is not None:
+                            decision = self.permission_check(self.validation_team_id, self.validation_attempt_id, cwd, command, cancellation)
+                        else:
+                            # Non-web embedders still use the ordinary permission
+                            # policy; they must supply a broker to grant a request.
+                            from codeagent.permissions import PermissionPolicy
+                            from codeagent.runtime.validation import permission_input
+                            decision = PermissionPolicy(workspace=cwd, ask=lambda *_: False, cancellation=cancellation).check("bash", permission_input(cwd, command))
+                        cancellation.raise_if_cancelled()
+                    except CancelledError:
+                        self.validation_interrupted = True
+                        return "failed", 130, "Validation approval interrupted; command not executed", round((time.monotonic() - started) * 1000)
+                    if not decision.allowed:
+                        return "failed", 126, "Validation command not executed: " + decision.reason, round((time.monotonic() - started) * 1000)
+            return super().run(cwd, command)
         except (OSError, ValueError) as exc:
-            return "failed", 1, "\n".join([*outputs, f"{type(exc).__name__}: {exc}"]), round((time.monotonic() - started) * 1000)
+            return "failed", 1, f"{type(exc).__name__}: {exc}", round((time.monotonic() - started) * 1000)
 
-    def _run_validation_process(self, cwd, argv, *, timeout=None):
-        started = time.monotonic()
-        from codeagent.tools.bash import BashTool
-        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
-        # Files avoid waiting forever for inherited stdout pipes when a timed
-        # out shell leaves children behind. Cleanup is bounded and PID-scoped.
-        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-            proc = subprocess.Popen(
-                argv,
-                cwd=str(cwd),
-                stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                **options,
-            )
-            timed_out = False
-            try:
-                proc.wait(timeout=self.validation_timeout if timeout is None else timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                cleaned = BashTool._stop_process(proc)
-            stdout.seek(0)
-            stderr.seek(0)
-            output = decode_output(stdout.read())
-            errors = decode_output(stderr.read())
-            if errors:
-                output += f"\n[stderr]\n{errors}"
-            if timed_out:
-                output += f"\nTimed out after {self.validation_timeout}s; process cleanup confirmed={cleaned}"
-        return (
-            "timed_out" if timed_out else "passed" if proc.returncode == 0 else "failed",
-            124 if timed_out else proc.returncode,
-            output or "(no output)",
-            round((time.monotonic() - started) * 1000),
-        )
+    def _validation_stopped(self):
+        return bool((self.validation_team_id and self.repository.get_team_run(self.validation_team_id).state.value != "running")
+                    or (self.stop_event is not None and self.stop_event.is_set()))
+
 
 
 def _string_list(value: Any) -> list[str]:

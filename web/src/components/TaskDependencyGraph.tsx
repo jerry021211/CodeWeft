@@ -151,9 +151,16 @@ function taskVisual(resource: TaskResource, completedIds: Set<string>) {
       badge: "bg-accent/10 text-accent",
     };
   }
+  if (resource.task.status === "failed" || resource.task.status === "cancelled") {
+    return {
+      label: resource.task.status === "failed" ? "需要处理" : "已取消",
+      card: "border-warning/30 bg-warning/5 hover:border-warning/50",
+      dot: "bg-warning", labelColor: "text-warning", badge: "bg-warning/10 text-warning",
+    };
+  }
   if (isTaskBlocked(resource, completedIds)) {
     return {
-      label: "Blocked",
+      label: "等待前置任务",
       card: "border-warning/30 bg-warning/5 hover:border-warning/50",
       dot: "bg-warning",
       labelColor: "text-warning",
@@ -161,7 +168,7 @@ function taskVisual(resource: TaskResource, completedIds: Set<string>) {
     };
   }
   return {
-    label: "Ready",
+    label: "待执行",
     card: "border-line bg-surface hover:border-line-strong",
     dot: "bg-ink-faint",
     labelColor: "text-ink-muted",

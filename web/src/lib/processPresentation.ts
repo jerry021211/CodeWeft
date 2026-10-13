@@ -46,6 +46,8 @@ type EventInfo = { seq: number; type: string; reason?: string; callKind?: string
 type Narration = { key: string; callId: string; agentId: string; parentAgentId?: string | null; seq: number; chunks: string[]; callKind?: string };
 
 const toolLabels: Record<string, string> = {
+  delegate_task: "委派单个任务", delegate_batch: "并行委派任务", execute_plan: "执行任务计划",
+  agentrunstatus: "查看成员进度", agentresumerun: "继续成员执行", agentrecoverrun: "恢复中断现场", agentcloserun: "结束成员执行",
   web_search: "联网搜索",
   repo_map: "项目概览", search_code: "搜索代码",
   read_file: "读取文件", read: "读取文件", write_file: "写入文件", write: "写入文件",

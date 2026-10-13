@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Any, Iterator, Protocol
 from uuid import uuid4
 
-from codeagent.teams.scopes import normalize_scopes, scope_is_within, path_is_allowed
+from codeagent.worktrees.scopes import normalize_scopes, scope_is_within, path_is_allowed
 from codeagent.events import RunEvent, TokenUsage, redact_payload, utc_now_iso
+from codeagent.events.redaction import redact_event_payload
 from codeagent.runtime.data_paths import RuntimeDataPaths
 from codeagent.tasks import (
     TaskActivityRecord,
@@ -33,7 +34,7 @@ from codeagent.tasks import (
     TaskResource,
     TaskStatus,
 )
-from codeagent.teams import (
+from codeagent.legacy.teams import (
     AgentSessionCheckpointRecord,
     AgentSessionRecord,
     AgentSessionState,
@@ -57,8 +58,8 @@ from codeagent.teams import (
     ValidationRunRecord,
     WorktreeBindingRecord,
 )
-from codeagent.teams.messages import validate_team_message
-from codeagent.teams.tasks import requires_attempt_plan, validate_task_execution
+from codeagent.legacy.teams.messages import validate_team_message
+from codeagent.legacy.teams.tasks import requires_attempt_plan, validate_task_execution
 from codeagent.web.models import (
     ApprovalRecord,
     CheckpointRecord,
@@ -68,11 +69,13 @@ from codeagent.web.models import (
     ModelCallRecord,
     RunRecord,
 )
-from codeagent.web.team_observation import install_observation, read_changes
-from codeagent.web.team_integration_storage import INTEGRATION_SCHEMA, TeamIntegrationStorage
+from codeagent.legacy.teams.observation import install_observation, read_changes
+from codeagent.legacy.teams.integration_storage import INTEGRATION_SCHEMA, TeamIntegrationStorage
 from codeagent.web.plan_storage import PLAN_SCHEMA, PlanStorage
-from codeagent.web.team_lifecycle import TeamLifecycleStorage
-from codeagent.teams.models import SESSION_ACTIVITY_PHASES
+from codeagent.legacy.teams.lifecycle import TeamLifecycleStorage
+from codeagent.legacy.teams.coordination import COORDINATION_SCHEMA, TeamCoordinationStorage
+from codeagent.legacy.teams.policy import authorized_path, collaborative
+from codeagent.legacy.teams.models import SESSION_ACTIVITY_PHASES
 
 
 ACTIVE_RUN_STATUSES = frozenset({"queued", "running"})
@@ -189,7 +192,7 @@ class Repository(Protocol):
     ) -> JsonObject: ...
 
 
-class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage):
+class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage):
     """A single-process, thread-safe SQLite repository.
 
     One connection is protected by a re-entrant lock.  This deliberately
@@ -490,6 +493,17 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             ON task_activity(task_list_id, id);
         CREATE INDEX IF NOT EXISTS task_activity_task_idx
             ON task_activity(task_list_id, task_id, id DESC);
+
+        CREATE TABLE IF NOT EXISTS agent_executions (
+            id TEXT PRIMARY KEY,
+            conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            task_list_id TEXT NOT NULL REFERENCES task_lists(id) ON DELETE CASCADE,
+            workspace TEXT NOT NULL,
+            data TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS agent_root_recovery (
+            run TEXT PRIMARY KEY, conversation TEXT NOT NULL, data TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS team_runs (
             id TEXT PRIMARY KEY,
@@ -836,6 +850,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             self._connection.executescript(schema)
             self._connection.executescript(INTEGRATION_SCHEMA)
             self._connection.executescript(PLAN_SCHEMA)
+            self._connection.executescript(COORDINATION_SCHEMA)
             for table, additions in {
                 "team_runs": (("integration_mode", "TEXT NOT NULL DEFAULT 'manual'"),
                               ("integration_head", "TEXT"),
@@ -1193,7 +1208,8 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
 
             # These children use RESTRICT references to agents/sessions/plans;
             # remove them before the conversation's normal cascading deletes.
-            for table in ("tool_executions", "worktree_bindings", "task_attempts"):
+            connection.execute("DELETE FROM team_attempt_contracts WHERE attempt_id IN (SELECT id FROM task_attempts WHERE team_run_id IN (SELECT id FROM team_runs WHERE conversation_id=?))", (conversation_id,))
+            for table in ("team_contract_approvals", "team_coordination_issues", "tool_executions", "worktree_bindings", "task_attempts"):
                 connection.execute(
                     f"DELETE FROM {table} WHERE team_run_id IN "
                     "(SELECT id FROM team_runs WHERE conversation_id = ?)",
@@ -1442,6 +1458,9 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
     ) -> TaskResource:
         clean_subject = str(subject).strip()
         clean_description = str(description).strip()
+        if metadata and 'execution' in metadata:
+            from codeagent.tasks.execution import validate_execution_metadata
+            validate_execution_metadata(metadata)
         if not clean_subject or not clean_description:
             raise ValueError("Task subject and description cannot be empty")
         now = utc_now_iso()
@@ -1574,6 +1593,9 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             if expected_revision is not None and int(row["revision"]) != expected_revision:
                 raise StorageConflictError("Task revision conflict")
 
+            from codeagent.tasks.execution import guard_task_update
+            guard_task_update(connection, task_list_id, task_id, changes)
+
             subject = str(changes.get("subject", row["subject"])).strip()
             description = str(changes.get("description", row["description"])).strip()
             if not subject or not description:
@@ -1641,6 +1663,20 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     "add_blocks", "add_blocked_by", "remove_blocks", "remove_blocked_by"
                 )
             }
+            if 'execution' in metadata:
+                from codeagent.tasks.execution import validate_execution_metadata
+                validate_execution_metadata(metadata)
+            # A claimed V2 task is an immutable input, even while a later plan
+            # is being proposed. Routine progress/owner/status updates remain valid.
+            contracted_team = connection.execute(
+                "SELECT t.metadata_json FROM team_runs t JOIN task_attempts a ON a.team_run_id=t.id "
+                "WHERE a.task_list_id=? AND a.task_id=? ORDER BY a.created_at DESC LIMIT 1",
+                (task_list_id, str(task_id)),
+            ).fetchone()
+            if contracted_team and collaborative(_json_loads(contracted_team[0], {})):
+                if (metadata != _json_loads(row["metadata_json"], {}) or subject != row["subject"]
+                        or description != row["description"] or any(dependency_changes.values())):
+                    raise StorageConflictError("已领取任务的目标、依赖和执行约定已固定；请保留原任务，另建明确的修正任务并提交方案修订")
             self._apply_dependency_changes(
                 connection,
                 task_list_id,
@@ -2200,10 +2236,12 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     connection, team_run_id, int(replay["revision"])
                 )
             team = self._team_row(connection, team_run_id)
-            if str(team["state"]) != TeamRunState.PLANNING.value:
+            if str(team["state"]) != TeamRunState.PLANNING.value and not (collaborative(_json_loads(team["metadata_json"], {})) and team["state"] == "running"):
                 raise InvalidStateTransitionError(
-                    "Team Plan revisions can only be created while PLANNING"
+                    "Team Plan revisions can only be created while PLANNING or a V2 Team is running"
                 )
+            if collaborative(_json_loads(team["metadata_json"], {})) and team["state"] == "running" and connection.execute("SELECT 1 FROM team_plan_revisions WHERE team_run_id=? AND status IN ('draft','pending_user_approval')", (team_run_id,)).fetchone():
+                raise StorageConflictError("已有待确认的方案修订，请先处理该修订")
             revision = int(
                 connection.execute(
                     "SELECT COALESCE(MAX(revision), 0) + 1 AS value "
@@ -2264,9 +2302,10 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     connection, team_run_id, int(replay["revision"])
                 )
             team = self._team_row(connection, team_run_id)
-            if str(team["state"]) != TeamRunState.PLANNING.value:
+            revising = collaborative(_json_loads(team["metadata_json"], {})) and team["state"] == "running"
+            if str(team["state"]) != TeamRunState.PLANNING.value and not revising:
                 raise InvalidStateTransitionError(
-                    "TeamRun must be PLANNING before plan submission"
+                    "TeamRun must be PLANNING or a V2 Team must be running before plan submission"
                 )
             plan = self._team_plan_row(connection, team_run_id, revision)
             if str(plan["status"]) != TeamPlanStatus.DRAFT.value:
@@ -2283,14 +2322,8 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 """,
                 (now, team_run_id, revision),
             )
-            connection.execute(
-                """
-                UPDATE team_runs
-                SET state = 'waiting_approval', active_plan_revision = NULL,
-                    updated_at = ? WHERE id = ?
-                """,
-                (now, team_run_id),
-            )
+            if not revising:
+                connection.execute("UPDATE team_runs SET state='waiting_approval',active_plan_revision=NULL,updated_at=? WHERE id=?", (now, team_run_id))
             self._record_team_command(
                 connection,
                 team_run_id,
@@ -2339,7 +2372,8 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 raise InvalidStateTransitionError(
                     "Only a pending Team Plan can be approved or rejected"
                 )
-            if str(team["state"]) != TeamRunState.WAITING_APPROVAL.value:
+            revising = collaborative(_json_loads(team["metadata_json"], {})) and team["state"] == "running"
+            if str(team["state"]) != TeamRunState.WAITING_APPROVAL.value and not revising:
                 raise InvalidStateTransitionError(
                     "TeamRun is not waiting for Team Plan approval"
                 )
@@ -2353,7 +2387,13 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 if normalized == "approve"
                 else TeamRunState.PLANNING.value
             )
-            active_revision = revision if normalized == "approve" else None
+            active_revision = revision if normalized == "approve" else (team["active_plan_revision"] if revising else None)
+            if revising:
+                team_state = "running"
+                if normalized == "approve":
+                    if connection.execute("SELECT 1 FROM team_integrations WHERE team_run_id=? AND status IN ('preparing','validating','publishing','applying')", (team_run_id,)).fetchone():
+                        raise StorageConflictError("集成正在进行，请等待当前操作结束后再批准修订")
+                    self._approve_compatible_contracts(connection, team, revision, _json_loads(plan["plan_json"], {}))
             if normalized == "approve":
                 plan_data = _json_loads(plan["plan_json"], {})
                 preview_id = plan_data.get("preview_plan_id")
@@ -2809,7 +2849,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 connection, str(team["task_list_id"]), _json_loads(plan["plan_json"], {}),
                 require_validation_commands=team["integration_mode"] == "managed",
             )
-            resource_keys = _team_task_resource_keys(task_metadata)
+            resource_keys = _team_task_resource_keys(task_metadata, team=team, task_id=str(task_id))
             self._ensure_resources_available(
                 connection,
                 team_run_id,
@@ -2903,6 +2943,8 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 raise StorageConflictError(
                     "Task or agent already has an active Attempt"
                 ) from exc
+            connection.execute("INSERT INTO team_attempt_contracts(attempt_id,contract_json) VALUES (?,?)",
+                               (attempt_id, _json_dumps(task_metadata)))
             self._insert_task_activity(
                 connection,
                 task_list_id=str(team["task_list_id"]),
@@ -2956,6 +2998,9 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     ),
                     "risk_level": str(task_metadata.get("risk_level") or "low"),
                     "write_scopes": task_metadata.get("write_scopes", []),
+                    "kernel_version": _json_loads(team["metadata_json"], {}).get("kernel_version", 1),
+                    "strict_write_scopes": task_metadata.get("strict_write_scopes", []),
+                    "artifact_paths": task_metadata.get("artifact_paths", []),
                     "exclusive_resources": task_metadata.get(
                         "exclusive_resources", []
                     ),
@@ -3159,8 +3204,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             if (
                 str(team["state"]) != TeamRunState.RUNNING.value
                 or team["active_plan_revision"] is None
-                or int(team["active_plan_revision"])
-                != int(attempt["team_plan_revision"])
+                or not self._attempt_plan_compatible(connection, team, attempt)
             ):
                 raise InvalidStateTransitionError(
                     "Worktree requires the Attempt's approved active Team Plan"
@@ -3795,6 +3839,15 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 raise StorageConflictError(
                     "Task scope or risk changed after Team Plan approval"
                 )
+        policy_row = connection.execute("SELECT metadata_json FROM team_runs WHERE id=?", (attempt["team_run_id"],)).fetchone()
+        policy = _json_loads(policy_row[0], {})
+        if collaborative(policy):
+            frozen = connection.execute("SELECT contract_json FROM team_attempt_contracts WHERE attempt_id=?", (attempt["id"],)).fetchone()
+            contract = _json_loads(frozen[0], {}) if frozen else metadata
+            for boundary in (policy.get("authorized_write_scopes", []), contract.get("strict_write_scopes", [])):
+                if boundary and any(not _scope_is_within(scope, boundary) for scope in scopes):
+                    raise StorageConflictError("Attempt Plan exceeds explicit user authorization")
+            return  # Technical complexity is reviewed by Lead, not a user permission.
         if approved_scopes and any(
             not _scope_is_within(scope, approved_scopes) for scope in scopes
         ):
@@ -3816,7 +3869,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         if (
             str(team["state"]) != TeamRunState.RUNNING.value
             or team["active_plan_revision"] is None
-            or int(team["active_plan_revision"]) != int(plan["team_plan_revision"])
+            or not self._attempt_plan_compatible(connection, team, attempt)
             or int(attempt["team_plan_revision"]) != int(plan["team_plan_revision"])
         ):
             raise InvalidStateTransitionError(
@@ -3940,8 +3993,11 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 and str(item["resource_kind"]) == "repository"
                 for item in leases
             )
-            outside_paths = [item for item in all_paths if not path_is_allowed(item, scopes)]
-            if not repository_lease and outside_paths:
+            contract_row = connection.execute("SELECT contract_json FROM team_attempt_contracts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            contract = _json_loads(contract_row[0], {}) if contract_row else task_metadata
+            policy = _json_loads(team_policy["metadata_json"], {})
+            outside_paths = [item for item in all_paths if not authorized_path(item, policy, contract, scopes)]
+            if outside_paths and (collaborative(policy) or not repository_lease):
                 raise StorageConflictError(
                     "Candidate contains files outside the approved write scope: "
                     + _json_dumps({"outside_paths": outside_paths, "approved_write_scopes": scopes})
@@ -4274,6 +4330,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     else "runtime_validation"
                 )
             else:
+                self._consume_repair_budget(connection, team, attempt["task_id"])
                 self._ensure_attempt_plan_still_approved(connection, attempt)
                 candidate_status = CandidateStatus.REWORK.value
                 attempt_state = TaskAttemptState.RUNNING.value
@@ -4438,6 +4495,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 waiting_reason = "runtime_validation"
                 write_enabled = 0
             else:
+                self._consume_repair_budget(connection, team, attempt["task_id"])
                 self._ensure_attempt_plan_still_approved(connection, attempt)
                 candidate_status = CandidateStatus.REWORK.value
                 attempt_state = TaskAttemptState.RUNNING.value
@@ -4911,7 +4969,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
     def mark_candidate_commit_unknown(
         self, candidate_id: str, *, reason: str
     ) -> CandidateRecord:
-        """Quarantine a Worktree when Git committed but persistence was uncertain."""
+        """Quarantine a Worktree when validation or commit effects are uncertain."""
 
         now = utc_now_iso()
         with self._transaction(immediate=True) as connection:
@@ -4944,6 +5002,9 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 "WHERE attempt_id = ? AND state = 'active'",
                 (str(candidate["attempt_id"]),),
             )
+            self._append_team_event(connection, self._team_row(connection, candidate["team_run_id"]),
+                "team.candidate.result_unknown", {"candidate_id": candidate_id, "attempt_id": candidate["attempt_id"], "reason": reason})
+        self._notify_activity()
         return self.get_candidate(candidate_id)
 
     def get_candidate(self, candidate_id: str) -> CandidateRecord:
@@ -5512,6 +5573,19 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 raise StorageConflictError(
                     "This Attempt needs a user-approved plan change; safety recovery cannot change its scope"
                 )
+            if resumed_by not in {"user", "runtime"}:
+                policy = _json_loads(team["metadata_json"], {})
+                original = connection.execute("SELECT waiting_reason FROM agent_sessions WHERE id=?", (attempt["session_id"],)).fetchone()
+                cause = attempt_error.get("type") or (original[0] if original else None)
+                if (resumed_by != team["lead_agent_id"] or not collaborative(policy)
+                        or cause != "protocol_incomplete" or attempt["result_unknown"] or not attempt["worker_exited_at"]):
+                    raise StorageConflictError("Lead can only coordinate a safely stopped incomplete submission")
+                counts = policy.setdefault("coordination_resume_counts", {})
+                key = str(attempt["task_id"])
+                if counts.get(key, 0) >= 2 or self._automatic_budget_exhausted(policy):
+                    raise StorageConflictError("Automatic correction budget exhausted; ask the user to review progress")
+                counts[key] = counts.get(key, 0) + 1
+                connection.execute("UPDATE team_runs SET metadata_json=? WHERE id=?", (_json_dumps(policy), team_run_id))
             legacy_restart = (
                 str(attempt["state"]) == TaskAttemptState.ORPHANED.value
                 and str(attempt_error.get("type") or "") == "service_restart"
@@ -5524,7 +5598,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     "Only a waiting or service-restart orphaned Attempt can be resumed"
                 )
             active_revision = int(team["active_plan_revision"])
-            if active_revision != int(attempt["team_plan_revision"]):
+            if not self._attempt_plan_compatible(connection, team, attempt):
                 raise StorageConflictError("Attempt Team Plan revision is no longer active")
             if not self._attempt_base_allowed(connection, team, attempt):
                 raise StorageConflictError("Attempt base commit no longer matches TeamRun")
@@ -5651,7 +5725,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     raise StorageConflictError(
                         "Replacement Worktree fingerprint was not validated"
                     )
-            expected_resources = _team_task_resource_keys(metadata)
+            expected_resources = _team_task_resource_keys(metadata, team=team, task_id=str(attempt["task_id"]))
             leases = connection.execute(
                 "SELECT * FROM resource_leases WHERE attempt_id = ?",
                 (attempt_id,),
@@ -6205,6 +6279,12 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                         (attempt_id,),
                     )
                 error = {"type": reason, "message": reason}
+            elif outcome == "waiting" and error is None:
+                # Worker shutdown is a lifecycle observation, not a resolution of
+                # a pending question or scope finding. Keep its durable cause.
+                error = _json_loads(attempt["error_json"], None)
+                if error is None and reason in {"protocol_incomplete", "team_plan_change_required"}:
+                    error = {"type": reason, "message": reason}
             if outcome == "cancelled":
                 attempt_state = TaskAttemptState.CANCELLED.value
                 session_state = AgentSessionState.IDLE.value
@@ -6485,7 +6565,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 if str(metadata.get("kind") or "analysis").lower() == "code" and not allow_code:
                     reasons.append("team_write_disabled")
                 try:
-                    requested = _team_task_resource_keys(metadata)
+                    requested = _team_task_resource_keys(metadata, team=team, task_id=str(task["id"]))
                 except ValueError:
                     requested = []  # Not schedulable; retain a readable diagnostic in the snapshot.
                     if "task_configuration_conflict" not in reasons:
@@ -6867,7 +6947,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         if (attempt["state"] not in {"running", "plan_required", "review_rejected"}
                 or attempt["cancel_requested_at"] or attempt["result_unknown"]):
             raise StorageConflictError("An answer cannot resume a frozen, cancelled or finished Attempt")
-        if (team["state"] != "running" or team["active_plan_revision"] != attempt["team_plan_revision"]
+        if (team["state"] != "running" or not self._attempt_plan_compatible(connection, team, attempt)
                 or not self._attempt_base_allowed(connection, team, attempt)):
             raise StorageConflictError("Question Team Plan or base commit is no longer active")
         plan = self._team_plan_row(connection, str(team["id"]), int(attempt["team_plan_revision"]))
@@ -6885,7 +6965,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             raise StorageConflictError("Question Task no longer exists")
         metadata = _json_loads(task["metadata_json"], {})
         validate_task_execution(metadata)
-        required = set(_team_task_resource_keys(metadata))
+        required = set(_team_task_resource_keys(metadata, team=team, task_id=str(attempt["task_id"])))
         leases = connection.execute(
             "SELECT * FROM resource_leases WHERE attempt_id = ?", (attempt["id"],),
         ).fetchall()
@@ -7047,10 +7127,13 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     "Terminal AgentSession cannot create a checkpoint"
                 )
             next_state = target_state or str(session["state"])
-            if session["waiting_reason"] == "team_plan_change_required":
-                # A worker finishing its yield must not erase the Lead's earlier decision.
-                next_state = AgentSessionState.WAITING.value
-                waiting_reason = "team_plan_change_required"
+            if session["current_attempt_id"]:
+                blocked = connection.execute("SELECT state,error_json FROM task_attempts WHERE id=?", (session["current_attempt_id"],)).fetchone()
+                error_reason = (_json_loads(blocked["error_json"], {}).get("type") or session["waiting_reason"]) if blocked else None
+                if blocked and blocked["state"] in {"waiting", "orphaned"} and error_reason:
+                    # A generic model yield must never erase the durable blocker.
+                    next_state = AgentSessionState.WAITING.value
+                    waiting_reason = error_reason
             if (
                 next_state == AgentSessionState.WORK.value
                 and not session["current_attempt_id"]
@@ -7200,8 +7283,8 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             "JOIN task_attempts a ON a.id = m.attempt_id "
             "JOIN task_dependencies d ON d.task_list_id = ? AND d.blocker_id = m.task_id "
             "WHERE d.blocked_id = ? AND m.team_run_id = ? AND m.type = 'ANALYSIS_RESULT' "
-            "AND a.state = 'succeeded' AND a.team_plan_revision = ? ORDER BY m.created_at, m.id",
-            (str(team["task_list_id"]), task_id, str(team["id"]), team["active_plan_revision"]),
+            "AND a.state = 'succeeded' AND (a.team_plan_revision = ? OR EXISTS (SELECT 1 FROM team_contract_approvals ca WHERE ca.attempt_id=a.id AND ca.team_run_id=a.team_run_id AND ca.revision=?)) ORDER BY m.created_at, m.id",
+            (str(team["task_list_id"]), task_id, str(team["id"]), team["active_plan_revision"], team["active_plan_revision"]),
         ).fetchall()
         return [{"task_id": str(row["task_id"]), "message_id": str(row["id"]),
                  "summary": _json_loads(row["payload_json"], {}).get("summary", "")}
@@ -7224,7 +7307,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
     ) -> None:
         # Old plans contain descriptive strings, not task references. Their actual
         # Task metadata is still checked at claim time; never infer write permission.
-        from codeagent.teams.validation import validate_checks
+        from codeagent.legacy.teams.validation import validate_checks
         validate_checks(plan)
         shared_context = plan.get("shared_context", "")
         commands = plan.get("integration_validation_commands", [])
@@ -7244,11 +7327,13 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             metadata = _json_loads(row["metadata_json"], {})
             validate_task_execution(metadata, require_validation_commands=require_validation_commands)
             validate_task_execution({**metadata, **item})
-            for key in ("kind", "write_scopes", "risk_level", "plan_required"):
+            for key in ("kind", "write_scopes", "risk_level", "plan_required", "strict_write_scopes", "artifact_paths", "validation_commands"):
                 if key not in item:
+                    if plan.get("kernel_version") == 2 and key in {"strict_write_scopes", "artifact_paths", "validation_commands"} and metadata.get(key, []):
+                        raise StorageConflictError(f"Team Plan must include Task {item['task_id']} {key}")
                     continue
                 default = {
-                    "write_scopes": [], "kind": "analysis",
+                    "write_scopes": [], "strict_write_scopes": [], "artifact_paths": [], "validation_commands": [], "kind": "analysis",
                     "risk_level": "low", "plan_required": False,
                 }[key]
                 actual, expected = metadata.get(key, default), item[key]
@@ -7390,6 +7475,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         *,
         agent_id: str | None = None,
     ) -> RunEvent:
+        cls._sync_coordination(connection, str(team["id"]))
         return cls._append_event_in_transaction(
             connection,
             RunEvent(
@@ -7963,6 +8049,9 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                     auto_recoverable = not unknown and not previous_error and not attempt["cancel_requested_at"] and attempt["state"] in {
                         "assigned", "plan_required", "plan_submitted", "plan_approved", "running", "review_rejected",
                     }
+                    restart_policy = _json_loads(self._team_row(connection, attempt["team_run_id"])["metadata_json"], {})
+                    if collaborative(restart_policy) and restart_policy.get("restart_policy") != "auto_safe":
+                        auto_recoverable = False
                     error = {"type": "service_restart", "message": "Attempt interrupted by service restart",
                              "restart_state": attempt["state"], "auto_recoverable": auto_recoverable,
                              "previous_error": previous_error}
@@ -8024,6 +8113,15 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 """,
                 (now,),
             )
+            for interrupted_team in connection.execute("SELECT * FROM team_runs WHERE state IN ('running','pausing')").fetchall():
+                policy = _json_loads(interrupted_team["metadata_json"], {})
+                if collaborative(policy) and policy.get("restart_policy") != "auto_safe":
+                    # Restart is not user consent to restart tools, validation, or delivery.
+                    policy.setdefault("pause_attempts", {})
+                    policy["restart_interrupted"] = True
+                    connection.execute("UPDATE team_runs SET state='paused',metadata_json=?,updated_at=? WHERE id=?",
+                                       (_json_dumps(policy), now, interrupted_team["id"]))
+                    self._append_team_event(connection, interrupted_team, "team.paused", {"reason": "service_restart"})
             recovered_leads = self._recover_active_lead_sessions(connection, now)
         if attempts or recovered_leads:
             self._notify_activity()
@@ -8174,7 +8272,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
             event,
             seq=seq,
             conversation_id=conversation_id,
-            payload=redact_payload(event.payload),
+            payload=redact_event_payload(event.type, event.payload),
         )
         if (persisted.type.startswith("subagent.") and
                 persisted.payload.get("subagent_id") == persisted.agent_id and
@@ -8289,6 +8387,7 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
                 "tool.requested", "tool.started", "tool.completed", "tool.failed",
                 "tool.blocked", "tool.cancelled", "tool.interrupted",
                 "subagent.started", "subagent.completed", "subagent.failed",
+                "collaboration.snapshot", "collaboration.member", "collaboration.check",
                 "recovery.retrying", "recovery.completed", "recovery.failed", "context.compacted",
             )
             activity_clause = "AND type IN (" + ",".join("?" for _ in types) + ")"
@@ -9087,7 +9186,7 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return default
 
 
-def _team_task_resource_keys(metadata: Mapping[str, Any]) -> list[tuple[str, str]]:
+def _team_task_resource_keys(metadata: Mapping[str, Any], *, team=None, task_id=None) -> list[tuple[str, str]]:
     """Return normalized exclusive resources declared by one existing Task."""
 
     result: list[tuple[str, str]] = []
@@ -9099,6 +9198,9 @@ def _team_task_resource_keys(metadata: Mapping[str, Any]) -> list[tuple[str, str
         result.append(("path", scope.casefold()))
     if task_kind == "code" and not result:
         result.append(("repository", "*"))
+    if team is not None and collaborative(_json_loads(team["metadata_json"], {})) and task_kind == "code":
+        # Independent checkouts share Git objects, not writable source files.
+        result = [("worktree", str(task_id))]
     exclusive = metadata.get("exclusive_resources") or []
     if not isinstance(exclusive, Sequence) or isinstance(exclusive, str):
         raise ValueError("Task exclusive_resources must be a list")

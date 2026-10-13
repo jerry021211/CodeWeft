@@ -5,7 +5,8 @@ import { createRunEventBuffer } from "@/lib/runEventBuffer";
 import { parseRunEvent, useRunStore } from "@/store/runStore";
 import type { RunStatus } from "@/types/api";
 
-const EVENT_NAMES = [
+export const EVENT_NAMES = [
+  "collaboration_snapshot", "collaboration_member", "collaboration_check",
   "run_queued", "run_started", "run_completed", "run_failed", "run_cancelled", "run_interrupted",
   "message_completed", "agent_profile_selected",
   "plan_updated",

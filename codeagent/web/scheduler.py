@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -24,14 +25,14 @@ from codeagent.runtime import CancellationToken, CancelledError
 from codeagent.runtime.activity import ExecutionActivity
 from codeagent.runtime.cancellation import ModelCallTimeout
 from codeagent.runtime.execution import is_execution_failure
-from codeagent.teams import (
+from codeagent.legacy.teams import (
     AgentSessionRunner,
     AgentSessionState,
     MessageBus,
     TeamAgentRole,
 )
 from codeagent.web.factory import serialize_runtime_state
-from codeagent.worktrees import WorktreeError
+from codeagent.worktrees.errors import WorktreeError
 from codeagent.web.models import ApprovalRecord, RunRecord
 from codeagent.web.storage import (
     ACTIVE_RUN_STATUSES,
@@ -407,7 +408,7 @@ class RunScheduler:
     def _launch_plan(self, plan):
         import json
         from codeagent.plan_mode import task_snapshot, source_fingerprints
-        from codeagent.teams.lead import LeadTeamPlanTool
+        from codeagent.legacy.teams.lead import LeadTeamPlanTool
         repo = self.repository
         repo.update_plan_execution(plan['id'], status='starting')
         try:
@@ -620,6 +621,18 @@ class RunScheduler:
         )
         return broker
 
+    def authorize_team_validation(self, team_id, attempt_id, cwd, command, cancellation):
+        """Runtime checks use the same approval channel as member tool calls."""
+        from codeagent.permissions import PermissionPolicy
+        from codeagent.runtime.validation import permission_input
+        team = self.repository.get_team_run(team_id)
+        emitter = EventEmitter(RecordingEventSink(self.repository), context=ExecutionContext(
+            conversation_id=team.conversation_id, run_id=team.root_run_id,
+            turn_id=f"validation_{uuid4().hex}", agent_id=team.lead_agent_id))
+        policy = PermissionPolicy(workspace=Path(cwd), cancellation=cancellation,
+            broker=self._team_permission_broker(emitter, team_id, attempt_id), approval_timeout=self.approval_timeout)
+        return policy.check("bash", permission_input(Path(cwd), command))
+
     def create_team_agent(
         self,
         session: Any,
@@ -664,7 +677,7 @@ class RunScheduler:
         )
 
         broker = self._team_permission_broker(emitter, team.id, attempt.id)
-        team_factory_method = getattr(self.agent_factory, "for_team_workspace", None)
+        team_factory_method = getattr(self.agent_factory, "for_execution_workspace", None)
         if callable(team_factory_method):
             workspace_factory = team_factory_method(
                 execution_workspace,
@@ -791,7 +804,7 @@ class RunScheduler:
                 if callable(factory_method)
                 else self.agent_factory
             )
-            team_factory_method = getattr(self.agent_factory, "for_team_workspace", None)
+            team_factory_method = getattr(self.agent_factory, "for_execution_workspace", None)
             if team.integration_mode == "managed" and callable(team_factory_method):
                 workspace_factory = team_factory_method(lead_workspace, project_workspace=conversation.workspace)
             agent = workspace_factory.create(
@@ -1010,6 +1023,11 @@ class RunScheduler:
                     ) from exc
             if not job.use_team:
                 missing = self.repository.get_uncheckpointed_tool_run(job.conversation_id, exclude_run_id=job.run_id)
+                if missing is not None and getattr(self.agent_factory, "supports_native_collaboration", False):
+                    from codeagent.multiagent.adapter import recover_root
+                    recovery_factory = self.agent_factory.for_workspace(job.workspace)
+                    if recover_root(recovery_factory, self.repository, missing):
+                        missing = self.repository.get_uncheckpointed_tool_run(job.conversation_id, exclude_run_id=job.run_id)
                 if missing is not None:
                     raise RuntimeError(f"上次运行 {missing.id} 未能保存完整上下文，已暂停继续执行，以免重复产生副作用。请先恢复该运行的检查点，或核实实际状态后新建会话。")
             checkpoint = self.repository.get_latest_checkpoint(job.conversation_id)
@@ -1047,6 +1065,11 @@ class RunScheduler:
                 create_kwargs["web_search_enabled"] = True
             if job.reasoning_effort is not None:
                 create_kwargs["reasoning_effort"] = job.reasoning_effort
+            if not job.use_team and getattr(workspace_factory, "supports_native_collaboration", False):
+                # Pin tool schema generation to the conversation checkpoint. Existing
+                # ordinary conversations keep their prefix; new ones gain delegation.
+                create_kwargs["native_collaboration"] = checkpoint is None or bool(
+                    checkpoint.metadata.get("native_collaboration", False))
             agent = workspace_factory.create(**create_kwargs)
             with self._lock:
                 job.agent = agent
@@ -1173,6 +1196,9 @@ class RunScheduler:
                 agent.context.todo_store.revision if agent.context.todo_store else 0
             ),
         }
+        if "execute_plan" in getattr(agent, "tools", ()):
+            checkpoint_metadata["native_collaboration"] = True
+            checkpoint_metadata["native_tools_version"] = 2
         export_state = getattr(agent, "export_execution_state", None)
         if not job.use_team and callable(export_state):
             checkpoint_metadata["execution_guard"] = export_state()

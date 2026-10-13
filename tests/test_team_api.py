@@ -167,7 +167,7 @@ class TeamApiTests(unittest.TestCase):
 
     def test_managed_plan_rejects_missing_or_malformed_validation_before_snapshot(self) -> None:
         from unittest.mock import patch
-        from codeagent.worktrees import WorktreeManager
+        from codeagent.legacy.teams.worktrees import WorktreeManager
 
         for commands in (None, [], "python -m unittest", [None], [12], [" "]):
             with self.subTest(commands=commands):

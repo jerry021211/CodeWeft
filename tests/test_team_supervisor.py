@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codeagent import Agent, AgentConfig, ModelResponse
-from codeagent.runtime import TeamSupervisor
-from codeagent.teams import (
+from codeagent.legacy.teams.supervisor import TeamSupervisor
+from codeagent.legacy.teams import (
     AgentSessionState,
     MessageBus,
     ReadOnlyTeamToolExecutionGate,
@@ -19,7 +19,7 @@ from codeagent.teams import (
 )
 from codeagent.tools import ToolRegistry, WorkspaceGuard, WriteFileTool
 from codeagent.web.storage import SQLiteRepository, StorageConflictError
-from codeagent.teams.tools import TeamAnswerQuestionTool
+from codeagent.legacy.teams.tools import TeamAnswerQuestionTool
 
 
 class _BarrierClient:

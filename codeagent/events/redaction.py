@@ -44,6 +44,23 @@ def redact_payload(value: Any, *, max_bytes: int = DEFAULT_EVENT_PAYLOAD_BYTES) 
     }
 
 
+def redact_structured_content(value: Any) -> Any:
+    """Redact detail responses without replacing their schema with a preview."""
+    secrets = tuple(v for k, v in os.environ.items() if v and len(v) >= 8 and _is_sensitive_key(k))
+    return _redact(value, secrets=secrets, depth=0)
+
+
+def redact_event_payload(event_type: str, value: dict) -> Any:
+    # Control messages are bounded by task count/field size, never by replacing
+    # their identity and state. Ordinary events retain the original policy.
+    if event_type == "collaboration.snapshot" and value.get("id"):
+        from codeagent.events.collaboration import compact_snapshot
+        # Redact BEFORE shortening text: otherwise a cut could expose a prefix
+        # of a secret that no longer matches the complete redaction pattern.
+        return compact_snapshot(redact_structured_content(value))
+    return redact_payload(value)
+
+
 def _redact(value: Any, *, secrets: tuple[str, ...], depth: int) -> Any:
     if depth > 8:
         return "[truncated depth]"

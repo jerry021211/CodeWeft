@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from codeagent.teams.scopes import path_is_allowed, path_is_scope_parent
+from codeagent.worktrees.scopes import path_is_allowed, path_is_scope_parent
 from codeagent.events import redact_payload
 from codeagent.permissions.read_only import is_safe_read_only_command
-from codeagent.teams.models import TaskAttemptState
-from codeagent.teams.tasks import validate_task_execution
+from codeagent.legacy.teams.models import TaskAttemptState
+from codeagent.legacy.teams.tasks import validate_task_execution
 from codeagent.tools import ToolHandler, ToolRegistry, WorkspaceViolationError
-from codeagent.worktrees import WorktreeError, WorktreeManager
+from codeagent.legacy.teams.worktrees import WorktreeError, WorktreeManager
 
 
 _FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
@@ -382,6 +382,11 @@ class TeamToolExecutionGate:
         return [path for path in paths if not self._path_allowed(path, scopes)]
 
     def _path_allowed(self, path: str, scopes: tuple[str, ...]) -> bool:
+        from codeagent.legacy.teams.policy import authorized_path, collaborative
+        attempt = self.repository.get_task_attempt(self.attempt_id)
+        team = self.repository.get_team_run(attempt.team_run_id)
+        if collaborative(team.metadata):
+            return authorized_path(path, team.metadata, self.repository.get_attempt_contract(attempt.id), scopes)
         if not scopes:
             return self._has_repository_lease()
         return path_is_allowed(path, scopes)

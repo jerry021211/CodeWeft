@@ -208,6 +208,16 @@ function appendUnique(list: string[], values: unknown[]) {
   return [...next];
 }
 
+function withApprovalStatus(run: RunViewState, approvalId: string, status: Approval["status"]): RunViewState {
+  const approval = run.approvals[approvalId];
+  if (!approval) return run;
+  const approvals = { ...run.approvals, [approvalId]: { ...approval, status } };
+  // Both the decision response and event replay must release the waiting label,
+  // but only after the last pending approval, without reviving a stopped run.
+  const resumed = run.status === "waiting_approval" && !Object.values(approvals).some((item) => item.status === "pending");
+  return { ...run, approvals, status: resumed ? "running" : run.status };
+}
+
 function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
   const type = canonicalType(event.type);
   const payload = asRecord(event.payload);
@@ -218,9 +228,10 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
     lastSeq: Math.max(state.lastSeq, event.seq),
   };
 
-  if (type.includes("text_delta") || type === "assistant_delta" || type === "content_delta") {
+  const nativeWorker = Boolean(event.parent_agent_id && event.agent_id.startsWith("collab_"));
+  if (!nativeWorker && (type.includes("text_delta") || type === "assistant_delta" || type === "content_delta")) {
     next.streamingText += stringFrom(payload, "delta", "text", "content") ?? "";
-  } else if (type === "assistant_message" || type === "message_completed") {
+  } else if (!nativeWorker && (type === "assistant_message" || type === "message_completed")) {
     next.streamingText = stringFrom(payload, "content", "text") ?? next.streamingText;
   }
 
@@ -300,11 +311,11 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
     const id = stringFrom(payload, "approval_id", "id");
     if (id && next.approvals[id]) {
       const status: Approval["status"] = type.includes("allow") || type.includes("approve") ? "allowed" : type.includes("expire") || type.includes("timeout") ? "expired" : "denied";
-      next.approvals = { ...next.approvals, [id]: { ...next.approvals[id], status } as Approval };
+      next = withApprovalStatus(next, id, status);
     }
   }
 
-  if (type.includes("subagent") || type === "agent_spawned" || type === "agent_completed") {
+  if (type.includes("subagent") || type === "agent_spawned" || type === "agent_completed" || type === "collaboration_member") {
     const id = stringFrom(payload, "agent_id", "subagent_id") ?? event.agent_id;
     const existing = next.agents[id];
     const agentStatus = actionStatus(type, payload);
@@ -313,7 +324,7 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
       [id]: {
         id,
         parent_id: stringFrom(payload, "parent_agent_id") ?? event.parent_agent_id,
-        label: stringFrom(payload, "label", "name") ?? (event.parent_agent_id ? "子 Agent" : "主 Agent"),
+        label: stringFrom(payload, "label", "name") ?? existing?.label ?? (event.parent_agent_id ? "子 Agent" : "主 Agent"),
         task: stringFrom(payload, "task", "description") ?? existing?.task,
         status: agentStatus,
         runtime_status: stringFrom(payload, "status") ?? existing?.runtime_status,
@@ -457,7 +468,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       return {
         runs: {
           ...store.runs,
-          [runId]: { ...run, approvals: { ...run.approvals, [approvalId]: { ...approval, status } } },
+          [runId]: withApprovalStatus(run, approvalId, status),
         },
       };
     }),

@@ -5,7 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from codeagent.teams import (
+from codeagent.legacy.teams import (
     AgentSessionState,
     DependencyRequirement,
     TaskAttemptState,

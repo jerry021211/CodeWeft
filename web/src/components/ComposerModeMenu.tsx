@@ -21,10 +21,10 @@ export function ComposerModeMenu(props: Props) {
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
   const choices = [
-    { value: "agent" as const, label: "Agent", detail: "直接开始实现，边做边验证", icon: Bot },
+    { value: "agent" as const, label: "Agent", detail: "按需独立完成或委派成员协作", icon: Bot },
     { value: "read" as const, label: "只读", detail: "阅读、分析项目，保护源代码", icon: ShieldCheck },
-    ...(props.teamEnabled || props.teamLeadActive ? [
-      { value: "team" as const, label: "Agent Team", detail: "先确认方案，再由团队协作实现", icon: Users },
+    ...(props.teamLeadActive || props.mode === "team" ? [
+      { value: "team" as const, label: "历史团队", detail: "继续已有团队；新任务由 Agent 按需协作", icon: Users },
     ] : []),
   ];
   const selected = choices.find(choice => choice.value === props.mode) ?? choices[0]!;

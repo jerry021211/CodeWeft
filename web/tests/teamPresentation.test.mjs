@@ -204,3 +204,38 @@ test("known recovery failures can be rechecked directly in the conversation", ()
   assert.match(html, /重新检查并继续/);
   assert.doesNotMatch(html, /填写现场核验说明（必填）/);
 });
+
+
+test("coordination belongs to Lead and is not presented as a user approval", () => {
+  const team = snapshot(); team.sessions = []; team.scheduling = []; team.recoveries = [];
+  team.coordination_issues = [{ id: "issue", subject_id: "aa", status: "open", owner: "lead",
+    evidence: { task_id: "1", summary: "成员尚未补交", next_step: "Lead 检查最后一次提交并安排补交" } }];
+  const html = renderToStaticMarkup(createElement(TeamConversation, { team }));
+  assert.match(html, /处理人：主 Agent/);
+  assert.match(html, /当前不需要你审批/);
+  assert.equal(teamStatusLabel(team), "团队等待 Lead 协调");
+  const composer = renderToStaticMarkup(createElement(ComposerTeamStatus, { team }));
+  assert.match(composer, /无需你审批/);
+  assert.doesNotMatch(composer, /等待调度、审查或集成/);
+});
+
+test("pending revision is actionable in the conversation without changing the active plan", () => {
+  const team = snapshot(); team.scheduling = []; team.recoveries = [];
+  team.plans = [{ revision: 2, status: "pending_user_approval", plan: { shared_context: "补充库兼容性验证", tasks: [] } }];
+  const html = renderToStaticMarkup(createElement(TeamConversation, { team, onPlanDecision: () => {} }));
+  assert.match(html, /确认修订/);
+  assert.match(html, /保留当前方案/);
+  assert.match(html, /补充库兼容性验证/);
+});
+
+test("integration failures assigned to Lead do not imply a required user action", () => {
+  const team = snapshot(); team.sessions = []; team.recoveries = []; team.scheduling = [];
+  team.integrations = [{ id: "op", kind: "candidate", status: "validation_failed", validations: [], result: {} }];
+  team.coordination_issues = [{ id: "integration:op", subject_id: "op", owner: "lead", status: "open",
+    evidence: { task_id: "1", summary: "检查失败", next_step: "Lead 查看日志并修复" } }];
+  assert.equal(teamStatusLabel(team), "团队等待 Lead 协调");
+  const html = renderToStaticMarkup(createElement(TeamConversation, { team }));
+  assert.match(html, /已交给主 Agent 处理，无需你审批/);
+  team.coordination_issues[0].owner = "user";
+  assert.equal(teamStatusLabel(team), "团队等待集成问题处理");
+});

@@ -8,7 +8,7 @@ from threading import Lock
 from typing import Any, Protocol
 
 from codeagent.events.models import ExecutionContext, RunEvent
-from codeagent.events.redaction import redact_payload
+from codeagent.events.redaction import redact_event_payload
 
 
 class EventSink(Protocol):
@@ -169,7 +169,7 @@ class EventEmitter:
     ) -> RunEvent:
         event = RunEvent(
             type=event_type,
-            payload=redact_payload(payload or {}),
+            payload=redact_event_payload(event_type, payload or {}),
             seq=self.sequencer.next(),
             conversation_id=self.context.conversation_id,
             run_id=self.context.run_id,

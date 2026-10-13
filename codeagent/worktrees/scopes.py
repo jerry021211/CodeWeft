@@ -1,4 +1,4 @@
-"""Shared Team scope semantics for admission, execution, submission and recovery.
+"""Repository-relative scope semantics for workspace operations.
 
 Scopes are repository-relative paths, optionally ending in /**. A bare path
 covers itself and descendants for compatibility with directory scopes. Other

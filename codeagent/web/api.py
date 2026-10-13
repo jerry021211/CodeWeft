@@ -90,10 +90,11 @@ from codeagent.web.storage import (
 )
 from codeagent.web.workspaces import WorkspaceCatalog
 from codeagent.tasks import TaskActivityRecord, TaskListRecord, TaskResource
-from codeagent.runtime import RuntimeDataPaths, TeamSupervisor
-from codeagent.teams import ManualIntegrationVerifier
-from codeagent.teams.models import integration_summary
-from codeagent.worktrees import WorktreeError, WorktreeManagerRegistry
+from codeagent.runtime import RuntimeDataPaths
+from codeagent.legacy.teams.supervisor import TeamSupervisor
+from codeagent.legacy.teams import ManualIntegrationVerifier
+from codeagent.legacy.teams.models import integration_summary
+from codeagent.legacy.teams.worktrees import WorktreeError, WorktreeManagerRegistry
 
 
 _SESSION_COOKIE = "codeagent_session"
@@ -204,6 +205,7 @@ def create_app(
                 lead_runner=lead_runner if callable(lead_runner) else None,
                 lead_activity_provider=getattr(scheduler, "team_lead_activities", None),
                 team_lead_control=getattr(scheduler, "control_team_lead", None),
+                validation_permission_check=getattr(scheduler, "authorize_team_validation", None),
             )
 
     @asynccontextmanager
@@ -610,6 +612,28 @@ def create_app(
     def list_personal_todos(conversation_id: str) -> list[dict[str, Any]]:
         _require_conversation(repo, conversation_id)
         return repo.list_personal_todos(conversation_id)
+
+    @app.get("/api/conversations/{conversation_id}/collaborations")
+    def collaboration_statuses(conversation_id: str) -> list[dict[str, Any]]:
+        from codeagent.multiagent.executions import ExecutionRepository
+        from codeagent.events.redaction import redact_event_payload
+        conversation = _require_conversation(repo, conversation_id)
+        executions = ExecutionRepository(repo)
+        return [redact_event_payload('collaboration.snapshot', executions.public(value))
+                for value in executions.list(conversation_id, conversation.workspace)]
+
+    @app.get("/api/conversations/{conversation_id}/collaborations/{execution_id}/members/{task_id}")
+    def collaboration_details(conversation_id: str, execution_id: str, task_id: str) -> dict[str, Any]:
+        from codeagent.multiagent.executions import ExecutionRepository
+        from codeagent.events.redaction import redact_structured_content
+        conversation = _require_conversation(repo, conversation_id)
+        value = ExecutionRepository(repo).get(execution_id, conversation=conversation_id, workspace=conversation.workspace)
+        task = next((item for item in value['tasks'] if item['id'] == task_id), None)
+        if task is None and task_id != '$result':
+            raise RecordNotFoundError('Unknown execution task')
+        return redact_structured_content(dict(id=execution_id, revision=value['revision'], task=task,
+            record=value['records'].get(task_id, {}),
+            checks=[check for check in value.get('checks', []) if task_id == '$result' or check.get('task_id') == task_id]))
 
     @app.get("/api/runs/{run_id}/activity")
     def run_activity(
@@ -1174,10 +1198,11 @@ def create_app(
         team = repo.get_team_run(team_run_id)
         if team is None:
             raise RecordNotFoundError(f"TeamRun not found: {team_run_id}")
-        repo.validate_team_plan_tasks(
-            team.task_list_id, body.plan, require_validation_commands=team.integration_mode == "managed",
-        )
         plan_payload = dict(body.plan)
+        plan_payload["kernel_version"] = team.metadata.get("kernel_version", 1)
+        repo.validate_team_plan_tasks(
+            team.task_list_id, plan_payload, require_validation_commands=team.integration_mode == "managed",
+        )
         plan_payload["base_commit"] = team.base_commit
         plan_payload["integration_mode"] = team.integration_mode
         revisions = repo.list_team_plan_revisions(team_run_id)
@@ -1215,14 +1240,14 @@ def create_app(
             raise HTTPException(status_code=409, detail='请在方案预览中决定此方案，避免重复审批或批准过期版本。')
         if body.decision == "approve":
             worktrees.ensure_baseline_ready(team_run_id)
-        repo.decide_team_plan_revision(
-            team_run_id,
-            revision,
-            decision=body.decision,
-            decided_by="user",
-            reason=body.reason,
-            command_id=body.commandId,
-        )
+        # Revision publication and Git integration share the same workspace lock.
+        from codeagent.worktrees.snapshots import exclusive_file
+        manager = worktrees.for_team(team_run_id) if hasattr(worktrees, "for_team") else worktrees
+        with exclusive_file(manager.managed_root / team_run_id / "integration.lock"):
+            repo.decide_team_plan_revision(
+                team_run_id, revision, decision=body.decision, decided_by="user",
+                reason=body.reason, command_id=body.commandId,
+            )
         return _team_snapshot(repo, team_run_id, allow_code=team_write_enabled)
 
     @app.post("/api/teams/{team_run_id}/attempts/{attempt_id}/plan-decision")
@@ -1374,7 +1399,7 @@ def create_app(
         if body.action == "resume":
             if not body.acknowledgeUnknownResult:
                 raise StorageConflictError("Inspect the retained delivery and acknowledge its unknown result before resuming")
-            from codeagent.teams.managed_integration import IntegrationService
+            from codeagent.legacy.teams.managed_integration import IntegrationService
             IntegrationService(repo, worktrees).resume_delivery(team_run_id, integration_id, reason=body.reason)
         else:
             repo.retry_team_integration(integration_id, actor="user", reason=body.reason, repair=body.action == "repair")
@@ -1535,6 +1560,7 @@ def _team_snapshot(
     )
     return {
         "team": team.to_dict(),
+        "coordination_issues": repository.list_coordination_issues(team_run_id),
         "base_confirmation": repository.get_team_base_confirmation(team_run_id),
         "plans": [
             item.to_dict()
@@ -1591,7 +1617,7 @@ def _team_snapshot(
 
 def _integration_view(record):
     """Expose bounded failure evidence, including legacy journals, without writes."""
-    from codeagent.teams.validation import diagnose
+    from codeagent.runtime.validation import diagnose
     view = integration_summary(record)
     view["validations"] = [dict(v) for v in record.get("validations", [])]
     for validation in view["validations"]:
@@ -1657,13 +1683,13 @@ def _team_recoveries(
             "unknown_write_result"
             if attempt.result_unknown and error_type != "service_restart"
             else str(
-                (session.waiting_reason if session is not None else None)
+                error_type
                 or (binding.frozen_reason if binding is not None else None)
-                or error_type
+                or (session.waiting_reason if session is not None else None)
                 or ""
             )
         )
-        if reason_code not in recoverable_reasons:
+        if not reason_code or reason_code in {"team_paused", "candidate_review", "runtime_validation"} or reason_code.startswith("waiting_for_lead_answer:"):
             continue
         if attempt.state.value not in {"waiting", "orphaned"}:
             continue
@@ -1737,7 +1763,7 @@ def _team_recoveries(
                     "服务重启后正在自动检查现场，无未完成的写操作" if (attempt.error or {}).get("auto_recoverable")
                     else "代码成果提交失败，任务已暂停；本地修改仍保留在工作目录中" if submission_failed
                     else summaries.get(reason_code, reason_code)),
-                "recoverable": (
+                "recoverable": reason_code in recoverable_reasons and (
                     attempt.state.value == "waiting"
                     or (
                         attempt.state.value == "orphaned"

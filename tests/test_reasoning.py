@@ -26,7 +26,7 @@ from codeagent.web.api import create_app
 from codeagent.web.factory import WebAgentFactory
 from codeagent.web.scheduler import RunScheduler
 from codeagent.web.storage import SQLiteRepository
-from codeagent.worktrees import WorktreeManagerRegistry
+from codeagent.legacy.teams.worktrees import WorktreeManagerRegistry
 
 
 BASE = "https://api.deepseek.com/anthropic"

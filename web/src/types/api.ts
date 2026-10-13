@@ -288,7 +288,13 @@ export type TeamRecovery = {
   blocking_checks: string[];
 };
 
+export type TeamCoordinationIssue = {
+  id: string; subject_id: string; reason: string; owner: string; status: string; version: number;
+  evidence: { task_id: string; attempt_id?: string; summary: string; next_step: string; result_unknown?: boolean; error?: unknown };
+};
+
 export type TeamSnapshot = {
+  coordination_issues?: TeamCoordinationIssue[];
   team: TeamRun;
   base_confirmation?: Record<string, unknown> | null;
   plans: TeamPlanRevision[];
@@ -457,6 +463,7 @@ export type PersonalTodoPlan = {
   agent_id: string;
   parent_agent_id?: string | null;
   run_id: string;
+  run_status?: RunStatus;
   todos: Array<Pick<TodoItem, "content" | "status">>;
   revision: number;
   updated_at: string;

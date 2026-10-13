@@ -10,7 +10,7 @@ const directory = mkdtempSync(join(tmpdir(), "codeagent-run-events-"));
 const bundle = join(directory, "store.cjs");
 await build({
   stdin: {
-    contents: 'export { useRunStore } from "./src/store/runStore"; export { createRunEventBuffer } from "./src/lib/runEventBuffer";',
+    contents: 'export { useRunStore } from "./src/store/runStore"; export { createRunEventBuffer } from "./src/lib/runEventBuffer"; export { EVENT_NAMES } from "./src/hooks/useRunEvents";',
     resolveDir: resolve("."),
     loader: "ts",
   },
@@ -20,9 +20,30 @@ await build({
   format: "cjs",
   outfile: bundle,
 });
-const { useRunStore, createRunEventBuffer } = createRequire(import.meta.url)(bundle);
+const { useRunStore, createRunEventBuffer, EVENT_NAMES } = createRequire(import.meta.url)(bundle);
 after(() => { unlinkSync(bundle); rmdirSync(directory); });
 beforeEach(() => useRunStore.setState({ runs: {} }));
+
+test("live subscriptions and replay retain named Task members", () => {
+  for (const kind of ['snapshot', 'member', 'check']) assert.ok(EVENT_NAMES.includes(`collaboration.${kind}`));
+  const events = [
+    {...event(1, 'collaboration.member', {label: '任务 #2 · 测试 CLI', task_id: '2'}), agent_id: 'collab_x_2', parent_agent_id: 'root'},
+    {...event(2, 'model.text_delta', {text: '正在测试'}), agent_id: 'collab_x_2', parent_agent_id: 'root'},
+  ];
+  useRunStore.getState().mergeEvents(events);
+  useRunStore.getState().mergeEvents(events);
+  assert.equal(useRunStore.getState().runs['run-a'].agents.collab_x_2.label, '任务 #2 · 测试 CLI');
+});
+
+test("native worker streaming never overwrites the main answer", () => {
+  useRunStore.getState().mergeEvents([
+    event(1, "model.text_delta", {text: "主答复"}),
+    {...event(2, "model.text_delta", {text: "成员日志"}), agent_id: "collab_x_a", parent_agent_id: "root"},
+  ]);
+  const run = Object.values(useRunStore.getState().runs)[0];
+  assert.equal(run.streamingText, "主答复");
+  assert.equal(run.events.length, 2);
+});
 
 test("personal lists stay ordered and isolated across root, child and Team session replay", () => {
   const todos = [{ content: "First", status: "completed" }, { content: "Second", status: "in_progress" }];

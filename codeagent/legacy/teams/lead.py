@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from codeagent.tasks import TaskStatus
-from codeagent.teams.models import TeamPlanStatus, TeamRunState
-from codeagent.teams.scopes import normalize_scopes
-from codeagent.teams.tasks import validate_task_execution
+from codeagent.legacy.teams.models import TeamPlanStatus, TeamRunState
+from codeagent.worktrees.scopes import normalize_scopes
+from codeagent.legacy.teams.tasks import validate_task_execution
 from codeagent.tools.base import ToolDefinition
 
 
@@ -171,6 +171,7 @@ class LeadTeamPlanTool:
         plan_payload = self._validated_plan(plan, base_commit)
         plan_payload["integration_mode"] = active.integration_mode if active else "managed"
         plan_payload["teammate_count"] = teammate_count
+        plan_payload["kernel_version"] = active.metadata.get("kernel_version", 1) if active else 2
         creation_guard = (
             self.memory_access.creating_team(conversation.workspace)
             if self.memory_access is not None
@@ -286,6 +287,8 @@ class LeadTeamPlanTool:
                     "manual_integration_only": False,
                     **(snapshot or {}),
                     "created_via": "lead_tool",
+                    "kernel_version": 2,
+                    "restart_policy": "manual",
                 },
             ),
             True,
@@ -296,7 +299,7 @@ class LeadTeamPlanTool:
     ) -> dict[str, Any]:
         if not isinstance(plan, Mapping) or not plan:
             raise ValueError("Team Plan cannot be empty")
-        from codeagent.teams.validation import validate_checks
+        from codeagent.legacy.teams.validation import validate_checks
         validate_checks(plan)
         shared_context = plan.get("shared_context", "")
         commands = plan.get("integration_validation_commands", [])
@@ -366,6 +369,9 @@ class LeadTeamPlanTool:
                     "write_scopes": scopes,
                     "risk_level": risk,
                     "plan_required": metadata.get("plan_required", False),
+                    "strict_write_scopes": metadata.get("strict_write_scopes", []),
+                    "artifact_paths": metadata.get("artifact_paths", []),
+                    "validation_commands": metadata.get("validation_commands", []),
                 }
             )
             normalized_tasks.append(normalized)

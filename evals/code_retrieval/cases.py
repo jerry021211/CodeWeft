@@ -51,7 +51,7 @@ CASES = [
          ref("tools/registry.py", "ToolRegistry.execute", 'output = f"Error: {type(exc).__name__}: {exc}"'),
          ref("tools/base.py", "normalize_tool_output", 'elif text.startswith(("Error:"', 'status = "error"')),
     case("C02", "cross_file", "运行事件送到记录器之前，哪里接入数据清洗？清洗后的内容如果仍然过大，哪里将它改成带原始大小的截断预览？请给出这两个文件中的实现。",
-         ref("events/sink.py", "EventEmitter.emit", "payload=redact_payload(payload or {})"),
+         ref("events/sink.py", "EventEmitter.emit", "payload=redact_event_payload(event_type, payload or {})"),
          ref("events/redaction.py", "redact_payload", '"original_bytes": len(encoded)', '"preview": preview')),
     case("C03", "cross_file", "接口返回了要求稍后再试的响应头。请分别找到提取等待秒数的位置，以及最终优先使用这个秒数而非自行计算退避时间的位置。",
          ref("recovery/classifier.py", "retry_after_seconds", 'getter("retry-after")', "return max(0.0, float(value))"),

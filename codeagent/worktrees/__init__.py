@@ -1,21 +1,4 @@
-"""Worktree isolation extension point."""
+"""Shared local Git snapshots and guarded file delivery, without Team lifecycle."""
+from .errors import WorktreeError
 
-from codeagent.worktrees.manager import (
-    CandidateSnapshot,
-    DirtyWorkspaceConfirmationRequired,
-    GitBaselineInspection,
-    RuntimeCommitResult,
-    WorktreeError,
-    WorktreeManager,
-    WorktreeManagerRegistry,
-)
-
-__all__ = [
-    "DirtyWorkspaceConfirmationRequired",
-    "CandidateSnapshot",
-    "GitBaselineInspection",
-    "RuntimeCommitResult",
-    "WorktreeError",
-    "WorktreeManager",
-    "WorktreeManagerRegistry",
-]
+__all__ = ["WorktreeError"]

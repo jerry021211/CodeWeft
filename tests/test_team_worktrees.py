@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 
 from codeagent import Agent, AgentConfig, ModelResponse
-from codeagent.runtime import TeamSupervisor
-from codeagent.teams import (
+from codeagent.legacy.teams.supervisor import TeamSupervisor
+from codeagent.legacy.teams import (
     AgentSessionState,
     AttemptPlanStatus,
     CandidateStatus,
@@ -31,12 +31,12 @@ from codeagent.web.storage import (
     SQLiteRepository,
     StorageConflictError,
 )
-from codeagent.worktrees import (
+from codeagent.legacy.teams.worktrees import (
     DirtyWorkspaceConfirmationRequired,
     WorktreeError,
     WorktreeManager,
 )
-from codeagent.teams.tools import TeamQuestionTool, TeamAnswerQuestionTool
+from codeagent.legacy.teams.tools import TeamQuestionTool, TeamAnswerQuestionTool
 
 
 class TeamWorktreeTests(unittest.TestCase):

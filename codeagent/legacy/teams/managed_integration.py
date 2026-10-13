@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import os
-import stat
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from uuid import uuid4
 
-from codeagent.teams.candidates import CandidateService
-from codeagent.teams.validation import validate_checks, command_label, diagnose
-from codeagent.worktrees.manager import WorktreeError
+from codeagent.legacy.teams.candidates import CandidateService
+from codeagent.legacy.teams.validation import validate_checks
+from codeagent.runtime.validation import command_label, diagnose
+from codeagent.worktrees.errors import WorktreeError
+from codeagent.worktrees.files import safe_path, file_state
 from codeagent.worktrees.snapshots import LocalGit, exclusive_file
 
 
@@ -20,11 +21,12 @@ class _TeamPaused(WorktreeError):
 
 
 class IntegrationService:
-    def __init__(self, repository, worktrees, *, validation_timeout=600, stop_event=None):
+    def __init__(self, repository, worktrees, *, validation_timeout=600, stop_event=None, permission_check=None):
         self.repository = repository
         self.worktrees = worktrees
         self.validation_timeout = validation_timeout
         self.stop_event = stop_event
+        self.permission_check = permission_check
 
     def process_team(self, team_id):
         manager = self.worktrees.for_team(team_id) if hasattr(self.worktrees, "for_team") else self.worktrees
@@ -91,6 +93,13 @@ class IntegrationService:
         op = self.repository.begin_team_integration(team.id, identifier=identifier,
             kind="candidate" if candidate else "delivery", candidate_id=candidate.id if candidate else None,
             worktree_path=str(path), commands=self._commands(team, candidate))
+        from codeagent.legacy.teams.policy import collaborative
+        artifact_paths = []
+        if collaborative(team.metadata):
+            for c in self.repository.list_candidates(team.id):
+                if not c.superseded_at and (c.team_integrated_revision is not None or (candidate and c.id == candidate.id)):
+                    artifact_paths.extend(self.repository.get_attempt_contract(c.attempt_id).get("artifact_paths", []))
+        op = self.repository.update_team_integration(identifier, result={"artifact_paths": sorted(set(artifact_paths))})
         if candidate:
             plan = self.repository.get_team_plan_revision(team.id, team.active_plan_revision).plan
             ids = self._available_tasks(team, candidate)
@@ -99,7 +108,7 @@ class IntegrationService:
                        for c in validate_checks(plan) if c["stage"] == "delivery" or not set(map(str, c.get("requires_tasks", []))) <= ids]
             if plan.get("integration_validation_commands"):
                 pending.append({"id": "final-acceptance", "reason": "所有任务集成后执行整体验收", "requires_tasks": []})
-            op = self.repository.update_team_integration(identifier, result={"pending_checks": pending})
+            op = self.repository.update_team_integration(identifier, result={**op.get("result", {}), "pending_checks": pending})
         return op
 
     def _integrate(self, git, manager, team, candidate):
@@ -138,7 +147,10 @@ class IntegrationService:
 
     def _validate(self, git, manager, op):
         path = Path(op["worktree_path"])
-        runner = CandidateService(self.repository, manager, validation_timeout=self.validation_timeout)
+        runner = CandidateService(self.repository, manager, validation_timeout=self.validation_timeout, permission_check=self.permission_check)
+        runner.validation_team_id = op["team_run_id"]
+        runner.validation_attempt_id = self.repository.get_candidate(op["candidate_id"]).attempt_id if op["candidate_id"] else None
+        runner.stop_event = self.stop_event
         expected = git.text("rev-parse", op["trial_commit"] + "^{tree}")
         records = []
         for command in op["commands"]:
@@ -146,6 +158,9 @@ class IntegrationService:
             log = manager.write_artifact(op["team_run_id"], f"{op['id']}-{len(records)}.log", output)
             records.append({"command": command_label(command), "status": status, "exit_code": exit_code,
                             "output_ref": log, "duration_ms": duration, "commit": op["trial_commit"]})
+            if runner.validation_interrupted:
+                self.repository.update_team_integration(op["id"], validations=records)
+                raise _TeamPaused("team_paused")
             if status != "passed":
                 records[-1]["diagnostic"] = diagnose(status, output)
                 records[-1]["output_excerpt"] = output[-6000:]
@@ -154,7 +169,7 @@ class IntegrationService:
                 self.repository.update_team_integration(op["id"], status="recovery_required" if status == "timed_out" else "validation_failed",
                     error=f"Combined validation {status}: {command_label(command)}", result={**op.get("result", {}), "diagnostic": records[-1]["diagnostic"]})
                 return False
-            if git.text("rev-parse", "HEAD", cwd=path) != op["trial_commit"] or git.tree(path) != expected:
+            if git.text("rev-parse", "HEAD", cwd=path) != op["trial_commit"] or git.tree(path, artifact_paths=op.get("result", {}).get("artifact_paths", [])) != expected:
                 self.repository.update_team_integration(op["id"], status="validation_failed",
                     error="Validation changed the frozen integration code; result was not published")
                 return False
@@ -176,7 +191,7 @@ class IntegrationService:
             self._require_current(op)
             if len(op["validations"]) != len(op["commands"]) or any(v["status"] != "passed" or v["commit"] != op["trial_commit"] for v in op["validations"]):
                 raise WorktreeError("Publish intent is missing successful validation")
-            if git.tree(Path(op["worktree_path"])) != git.text("rev-parse", op["trial_commit"] + "^{tree}"):
+            if git.tree(Path(op["worktree_path"]), artifact_paths=op.get("result", {}).get("artifact_paths", [])) != git.text("rev-parse", op["trial_commit"] + "^{tree}"):
                 raise WorktreeError("Validated integration tree changed before publication")
             ref = f"refs/heads/codex/{op['team_run_id']}/integration"
             current = git.run("rev-parse", "--verify", ref, check=False)
@@ -220,9 +235,9 @@ class IntegrationService:
                     if not raw:
                         continue
                     name = raw.decode("utf-8", "surrogateescape")
-                    target, result_file = self._safe_path(git.source, name), self._safe_path(path, name)
-                    old = self._file_state(target)
-                    new = self._file_state(result_file)
+                    target, result_file = safe_path(git.source, name), safe_path(path, name)
+                    old = file_state(target)
+                    new = file_state(result_file)
                     if old is not None and new is not None:
                         new["mode"] = (old["mode"] & ~0o111) | (new["mode"] & 0o111)
                     if name not in before and old is not None:
@@ -288,7 +303,7 @@ class IntegrationService:
         # overwrite a user's edits made after a partial delivery.
         for file in result["files"]:
             name = file["path"]
-            state = self._file_state(self._safe_path(git.source, name))
+            state = file_state(safe_path(git.source, name))
             if state != file["before"] and state != file["after"]:
                 raise WorktreeError(f"Local file changed during interrupted delivery: {name}")
             if state is None:
@@ -299,8 +314,8 @@ class IntegrationService:
             raise WorktreeError("Local workspace changed since delivery validation")
         for file in sorted(result["files"], key=lambda f: (f["after"] is not None, -len(f["path"]))):
             self._require_current(op)
-            target = self._safe_path(git.source, file["path"])
-            state = self._file_state(target)
+            target = safe_path(git.source, file["path"])
+            state = file_state(target)
             if state == file["after"]:
                 continue
             if state != file["before"] or git.index_hash() != result["index_hash"] or git.text("rev-parse", "HEAD") != result["source_head"]:
@@ -335,36 +350,13 @@ class IntegrationService:
             raise WorktreeError("Local state changed before delivery confirmation")
         return self.repository.complete_team_delivery(op["id"])
 
-    @staticmethod
-    def _safe_path(root, name):
-        parts = PurePosixPath(name).parts
-        if not parts or PurePosixPath(name).is_absolute() or any(p in {".", ".."} or p.rstrip(" .").casefold() == ".git" or ":" in p or "\\" in p for p in parts):
-            raise WorktreeError("Invalid delivery path")
-        target = root.joinpath(*parts)
-        cursor = root
-        for part in parts:
-            cursor = cursor / part
-            if cursor.is_symlink() or (hasattr(cursor, "is_junction") and cursor.is_junction()):
-                raise WorktreeError(f"Delivery through a symlink/junction requires resolution: {name}")
-        target.resolve().relative_to(root.resolve())
-        return target
-
-    @staticmethod
-    def _file_state(path):
-        if not path.exists():
-            return None
-        if not path.is_file() or path.is_symlink():
-            raise WorktreeError(f"Delivery needs a regular file: {path}")
-        mode = stat.S_IMODE(path.stat().st_mode)
-        return {"hash": hashlib.sha256(path.read_bytes()).hexdigest(), "mode": mode}
-
     def _manifest(self, git, include=()):
         names = git.run("ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout.split(b"\0")
         result = {}
         for raw in set(names) | {n.encode("utf-8", "surrogateescape") for n in include}:
             if raw:
                 name = raw.decode("utf-8", "surrogateescape")
-                state = self._file_state(self._safe_path(git.source, name))
+                state = file_state(safe_path(git.source, name))
                 if state is not None:
                     result[name] = state
         return result

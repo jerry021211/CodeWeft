@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from codeagent.teams.tasks import requires_attempt_plan, validate_task_execution
+from codeagent.legacy.teams.tasks import requires_attempt_plan, validate_task_execution
 
 
 class TeamTaskExecutionTests(unittest.TestCase):

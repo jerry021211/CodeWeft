@@ -6,7 +6,7 @@ import json
 
 class TeamLifecycleStorage:
     def request_team_pause(self, team_id, *, reason, command_id):
-        from .storage import InvalidStateTransitionError, utc_now_iso
+        from codeagent.web.storage import InvalidStateTransitionError, utc_now_iso
         now = utc_now_iso()
         with self._transaction(immediate=True) as db:
             team = self._team_row(db, team_id)
@@ -37,7 +37,7 @@ class TeamLifecycleStorage:
 
     def finish_team_pause(self, team_id):
         """Caller must first prove all in-process workers/Lead/validators exited."""
-        from .storage import utc_now_iso
+        from codeagent.web.storage import utc_now_iso
         with self._transaction(immediate=True) as db:
             team = self._team_row(db, team_id)
             if team["state"] != "pausing":
@@ -52,7 +52,7 @@ class TeamLifecycleStorage:
         Filesystem checks are supplied by the supervisor; domain checks and all
         state changes share one transaction. A failed check cannot resume half a Team.
         """
-        from .storage import StorageConflictError, utc_now_iso, _team_resources_overlap, _team_task_resource_keys
+        from codeagent.web.storage import StorageConflictError, utc_now_iso, _team_resources_overlap, _team_task_resource_keys
         now = utc_now_iso()
         with self._transaction(immediate=True) as db:
             team = self._team_row(db, team_id)
@@ -105,7 +105,7 @@ class TeamLifecycleStorage:
                                   (attempt["task_list_id"], attempt["task_id"])).fetchone()
                 if task["status"] not in ({"cancelled"} if was_cancelled else {"in_progress"}) or task["owner"] != attempt["agent_id"] or task["revision"] != snapshot["task_revision"]:
                     raise StorageConflictError(f"任务 {attempt['task_id']} 的归属或版本已变化")
-                if attempt["team_plan_revision"] != team["active_plan_revision"] or not self._attempt_base_allowed(db, team, attempt):
+                if not self._attempt_plan_compatible(db, team, attempt) or not self._attempt_base_allowed(db, team, attempt):
                     raise StorageConflictError("任务方案或固定基线已失效")
                 session = db.execute("SELECT * FROM agent_sessions WHERE id = ?", (attempt["session_id"],)).fetchone()
                 if session["state"] not in {"waiting", "idle", "work"} or session["current_attempt_id"] not in {None, attempt["id"]}:
@@ -128,7 +128,7 @@ class TeamLifecycleStorage:
                     binding = db.execute("SELECT * FROM worktree_bindings WHERE attempt_id = ?", (attempt["id"],)).fetchone()
                     if not binding or binding["state"] not in {"active", "frozen"} or fingerprints.get(attempt["id"]) != binding["fingerprint"] or binding["session_id"] != session["id"] or binding["generation"] != session["generation"]:
                         raise StorageConflictError("工作目录不存在、已清理或绑定发生变化")
-                expected = _team_task_resource_keys(task_meta)
+                expected = _team_task_resource_keys(task_meta, team=team, task_id=str(attempt["task_id"]))
                 held = db.execute("SELECT * FROM resource_leases WHERE team_run_id = ? AND attempt_id != ? AND state != 'released'", (team_id, attempt["id"])).fetchall()
                 leases = db.execute("SELECT * FROM resource_leases WHERE attempt_id = ?", (attempt["id"],)).fetchall()
                 if set(expected) != {(r["resource_kind"], r["resource_key"]) for r in leases}:

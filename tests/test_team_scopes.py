@@ -1,9 +1,9 @@
 import os
 import unittest
 
-from codeagent.teams.scopes import normalize_scopes, path_is_allowed, path_is_scope_parent, scope_is_within
-from codeagent.teams.tasks import validate_task_execution
-from codeagent.runtime.background import _path_allowed_for_recovery
+from codeagent.worktrees.scopes import normalize_scopes, path_is_allowed, path_is_scope_parent, scope_is_within
+from codeagent.legacy.teams.tasks import validate_task_execution
+from codeagent.legacy.teams.supervisor import _path_allowed_for_recovery
 from codeagent.web.storage import _scope_is_within, _team_resources_overlap
 
 

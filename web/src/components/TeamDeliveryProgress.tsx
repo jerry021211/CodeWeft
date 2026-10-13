@@ -14,6 +14,7 @@ function OperationCard({ operation, team, busy, onResolve }: { operation: Operat
   const candidate = team.candidates.find(c => c.id === operation.candidate_id);
   const task = team.tasks.find(t => t.task.id === candidate?.task_id)?.task;
   const problem = blocked.has(operation.status);
+  const coordination = team.coordination_issues?.find(issue => issue.status === "open" && issue.subject_id === operation.id);
   const environment = ["environment", "dependency_install", "timeout"].includes(diagnostic?.category ?? "");
   const canAct = team.team.state === "running" && !busy;
   return <article className={`rounded-xl border p-3 sm:p-4 ${problem ? "border-warning/30 bg-warning/5" : "border-line bg-surface"}`}>
@@ -23,6 +24,7 @@ function OperationCard({ operation, team, busy, onResolve }: { operation: Operat
         <p className="text-xs font-semibold text-ink">{operation.kind === "delivery" ? "最终验收与本地回写" : `任务 #${candidate?.task_id ?? "—"} · ${task?.subject ?? "成果集成"}`}</p>
         <p role="status" className="mt-1 text-xs leading-5 text-ink-muted">{diagnostic?.summary ?? labels[operation.status] ?? operation.status}</p>
         {problem && <p className="mt-1 text-xs leading-5 text-ink-muted">{environment ? "先处理执行环境；成果已保留，无需因此重写业务代码。" : operation.status === "recovery_required" ? "先核验现场和旧进程，避免重复执行结果不明的操作。" : "Lead 负责检查日志和安排处理；失败结果不会作为已通过版本发布。"}</p>}
+        {coordination && <p className="mt-2 text-xs leading-5 text-warning">{coordination.owner === "lead" ? "已交给主 Agent 处理，无需你审批。" : "需要你处理："}{coordination.evidence.next_step}</p>}
         {operation.result?.pending_checks?.map(check => <p key={check.id} className="mt-1 text-xs text-ink-faint">待执行：{check.id} · {check.reason}</p>)}
       </div>
     </div>

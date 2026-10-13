@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from codeagent.teams.bus import MessageBus
-from codeagent.teams.candidates import CandidateService
-from codeagent.teams.models import TaskAttemptRecord, integration_summary
+from codeagent.legacy.teams.bus import MessageBus
+from codeagent.legacy.teams.candidates import CandidateService
+from codeagent.legacy.teams.models import TaskAttemptRecord, integration_summary
 from codeagent.tools.base import ToolDefinition
-from codeagent.worktrees import WorktreeManager
+from codeagent.legacy.teams.worktrees import WorktreeManager
 
 
 @dataclass(slots=True)
@@ -314,11 +314,13 @@ class TeamCandidateContextTool:
         if binding is None:
             return "Error: Candidate Worktree binding is missing"
         binding = self.worktrees.validate_binding(binding.id)
-        if not self.worktrees.candidate_snapshot_matches(
+        snapshot_matches = self.worktrees.candidate_snapshot_matches(
             binding.id,
             expected_hash=candidate.diff_hash,
             expected_head=candidate.worktree_head,
-        ):
+        )
+        from codeagent.legacy.teams.policy import collaborative
+        if not snapshot_matches and not collaborative(self.repository.get_team_run(self.team_run_id).metadata):
             return "Error: Candidate changed after submission"
         artifact = Path(candidate.diff_ref).resolve()
         manager = (
@@ -334,7 +336,18 @@ class TeamCandidateContextTool:
         if artifact.name != f"{candidate.id}.patch" or not artifact.is_file():
             return "Error: Candidate patch reference is invalid"
         payload = candidate.to_dict()
+        payload["snapshot_matches"] = snapshot_matches
+        if not snapshot_matches:
+            payload["required_action"] = "工作目录已变化；下面是原始成果快照，仅供诊断。不可接受为当前成果，安排返工后重新提交。"
         payload["patch"] = artifact.read_text(encoding="utf-8")
+        payload["validation_runs"] = []
+        for validation in self.repository.list_validation_runs(candidate.id):
+            record = validation.to_dict()
+            if validation.output_ref:
+                log = Path(validation.output_ref).resolve()
+                log.relative_to(managed_root)
+                record["output_excerpt"] = log.read_text(encoding="utf-8")[-8000:] if log.is_file() else "验证日志不可用"
+            payload["validation_runs"].append(record)
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -347,7 +360,8 @@ class TeamAnswerQuestionTool:
         name="team_answer_question",
         description=(
             "Answer one Teammate QUESTION. Set scope_changed=true only to report that "
-            "the approved Team Plan must be replaced; the Attempt will remain paused."
+            "the user's hard authorization or task objective must change; the Attempt will remain paused. "
+            "In V2, coordinating necessary edits outside the planned responsibility is not by itself a scope change. Keep user restrictions intact."
         ),
         input_schema={
             "type": "object",
@@ -497,6 +511,63 @@ class TeamIntegrationTool:
 
 
 @dataclass(slots=True)
+class TeamRevisePlanTool:
+    repository: Any
+    team_run_id: str
+    lead_agent_id: str
+    definition: ToolDefinition = ToolDefinition(
+        name="team_revise_plan",
+        description="Propose a complete replacement Team plan for user confirmation. Preserve existing task IDs and contracts. Add explicit compensating tasks for completed work; never silently remove integrated code. To resolve a plan-change question while preserving the stopped member's original contract, explicitly include its ID in continue_attempts and explain the resolution in shared_context. Approval removes only the planning block; Runtime checks the retained work before continuation. Pending proposals do not stop compatible work.",
+        input_schema={"type": "object", "properties": {"plan": {"type": "object"}}, "required": ["plan"]},
+    )
+
+    def run(self, plan: dict) -> str:
+        team = self.repository.get_team_run(self.team_run_id)
+        payload = {**plan, "base_commit": team.base_commit, "integration_mode": team.integration_mode, "kernel_version": 2}
+        payload.pop("preview_plan_id", None)
+        self.repository.validate_team_plan_tasks(team.task_list_id, payload, require_validation_commands=team.integration_mode == "managed")
+        revision = self.repository.create_team_plan_revision(team.id, plan=payload, created_by=self.lead_agent_id, command_id="revision:" + uuid4().hex)
+        result = self.repository.submit_team_plan_revision(team.id, revision.revision, command_id=f"submit-revision:{revision.revision}")
+        return json.dumps(result.to_dict(), ensure_ascii=False)
+
+
+@dataclass(slots=True)
+class TeamResumeWorkTool:
+    repository: Any
+    worktrees: Any
+    team_run_id: str
+    lead_agent_id: str
+    definition: ToolDefinition = ToolDefinition(
+        name="team_resume_work",
+        description="Give a concrete correction instruction to a safely stopped member that has not completed its submission. Bounded per task; cannot bypass unknown writes, permissions, or user cancellation.",
+        input_schema={"type": "object", "properties": {
+            "attempt_id": {"type": "string"}, "instruction": {"type": "string"}},
+            "required": ["attempt_id", "instruction"]},
+    )
+
+    def run(self, attempt_id: str, instruction: str) -> str:
+        attempt = self.repository.get_task_attempt(attempt_id)
+        if attempt.team_run_id != self.team_run_id or not instruction.strip():
+            raise ValueError("Matching Team and a concrete correction instruction are required")
+        binding = self.repository.get_attempt_worktree_binding(attempt_id)
+        fingerprint = None
+        if binding:
+            manager = self.worktrees.for_team(self.team_run_id) if hasattr(self.worktrees, "for_team") else self.worktrees
+            binding = manager.validate_recoverable_binding(binding.id)
+            from codeagent.legacy.teams.policy import authorized_path
+            team = self.repository.get_team_run(self.team_run_id)
+            contract = self.repository.get_attempt_contract(attempt_id)
+            if any(not authorized_path(p, team.metadata, contract, binding.write_scopes)
+                   for p in manager.recovery_changed_paths(binding.id)):
+                raise ValueError("Retained changes cross the user authorization boundary")
+            fingerprint = binding.fingerprint
+        result = self.repository.resume_task_attempt(attempt_id, resumed_by=self.lead_agent_id,
+            reason=instruction, command_id=f"lead-correction:{attempt_id}:{attempt.updated_at}",
+            validated_worktree_fingerprint=fingerprint)
+        return json.dumps(result.to_dict(), ensure_ascii=False)
+
+
+@dataclass(slots=True)
 class TeamWaitTool:
     yield_callback: Callable[[str], None]
     definition: ToolDefinition = ToolDefinition(
@@ -550,7 +621,11 @@ def create_lead_tools(
     allow_code: bool,
     yield_callback: Callable[[str], None],
 ) -> list[Any]:
+    from codeagent.legacy.teams.policy import collaborative
+    coordination = [TeamResumeWorkTool(repository, worktrees, team_run_id, lead_agent_id),
+                    TeamRevisePlanTool(repository, team_run_id, lead_agent_id)] if collaborative(repository.get_team_run(team_run_id).metadata) else []
     return [
+        *coordination,
         TeamStatusTool(repository, team_run_id, allow_code),
         TeamCandidateContextTool(repository, worktrees, team_run_id),
         TeamAnswerQuestionTool(repository, team_run_id, lead_agent_id),

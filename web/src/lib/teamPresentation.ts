@@ -23,6 +23,8 @@ export function waitingReasonLabel(reason: string) {
     model_response_timeout: "模型长时间没有有效响应，已请求停止",
     model_call_timeout: "本轮模型调用达到总时限，已请求停止",
     worker_heartbeat_timeout: "执行进度异常，正在确认成员是否停止",
+    protocol_incomplete: "本轮已结束，等待 Lead 协调补交成果",
+    waiting: "等待下一步安排，查看上方协调事项",
     unknown_write_result: "写操作结果不确定，需要检查工作现场", scope_violation: "修改超出任务范围，需要检查工作现场",
     service_restart: "服务重启中断了执行，需要检查并恢复", team_paused: "团队已暂停",
   } as Record<string, string>)[reason] ?? reason;
@@ -49,10 +51,15 @@ export function teamExecutionState(team?: TeamSnapshot) {
   }
   const working = [...latest.values()].filter(session => ["work", "starting"].includes(session.state)).length;
   const recoveries = team?.recoveries ?? [];
-  const manual = recoveries.filter(item => !item.automatic).length;
-  const automatic = recoveries.length - manual;
-  const integrationBlocked = (team?.integrations ?? []).filter(op => ["validation_failed", "conflicted", "interrupted", "recovery_required"].includes(op.status)).length;
-  return { working, manual, automatic, integrationBlocked,
+  const openIssues = (team?.coordination_issues ?? []).filter(item => item.status === "open");
+  const coordination = openIssues.filter(item => item.owner !== "user").length;
+  const manual = recoveries.filter(item => !item.automatic && !openIssues.some(issue => issue.subject_id === item.attempt_id && issue.owner !== "user")).length
+    + openIssues.filter(issue => issue.owner === "user" && !issue.id.startsWith("integration:") && !recoveries.some(item => item.attempt_id === issue.subject_id)).length;
+  const automatic = recoveries.filter(item => item.automatic).length;
+  const integrationBlocked = (team?.integrations ?? []).filter(op => ["validation_failed", "conflicted", "interrupted", "recovery_required"].includes(op.status)
+    && !openIssues.some(issue => issue.subject_id === op.id && issue.owner !== "user")).length;
+  return { working, manual, automatic, integrationBlocked, coordination,
+    waitingCoordination: team?.team.state === "running" && coordination > 0 && working === 0,
     waitingIntegration: team?.team.state === "running" && integrationBlocked > 0 && working === 0,
     waitingRecovery: team?.team.state === "running" && manual > 0 && working === 0 };
 }
@@ -61,6 +68,7 @@ export function teamStatusLabel(team: TeamSnapshot) {
   if (team.team.state === "running") {
     if (progress.waitingRecovery) return "团队等待恢复";
     if (progress.waitingIntegration) return "团队等待集成问题处理";
+    if (progress.waitingCoordination) return "团队等待 Lead 协调";
     if (progress.manual) return "团队部分任务等待恢复";
     if (progress.automatic && !progress.working) return "团队正在检查恢复现场";
   }

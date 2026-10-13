@@ -7,8 +7,8 @@ from dataclasses import asdict
 from typing import Any
 
 from codeagent.context import RuntimeState
-from codeagent.teams.models import AgentSessionState, TeamMessageRecord
-from codeagent.teams.tasks import validate_task_execution
+from codeagent.legacy.teams.models import AgentSessionState, TeamMessageRecord
+from codeagent.legacy.teams.tasks import validate_task_execution
 from codeagent.tools import SUBAGENT_TOOL_NAME
 from codeagent.runtime.activity import ExecutionActivity
 from codeagent.runtime.cancellation import CancellationToken, CancelledError, ModelCallTimeout
@@ -181,7 +181,13 @@ def _task_assignment_context(message: TeamMessageRecord) -> str:
         f"基线 commit：{payload['attempt_base_commit']}",
         f"风险：{risk}",
     ]
-    if scopes:
+    if payload.get("kernel_version") == 2:
+        boundary.append("任务分工范围：" + ("、".join(map(str, scopes)) or "当前项目"))
+        boundary.append("分工用于协调，不是硬性文件隔离。必要的项目内配套修改需在成果说明中解释，由 Lead 审查；不可扩展用户目标。")
+        if payload.get("strict_write_scopes"):
+            boundary.append("用户明确限制的硬写入范围：" + "、".join(payload["strict_write_scopes"]))
+        boundary.append("声明的运行产物（仅未跟踪文件排除提交）：" + "、".join(payload.get("artifact_paths", [])))
+    elif scopes:
         boundary.append("声明的写入范围：" + "、".join(map(str, scopes)))
     elif kind == "code":
         boundary.append("未声明路径范围；必须由 Runtime 确认仓库级独占写租约。")

@@ -409,10 +409,10 @@ class IntelligenceTests(unittest.TestCase):
 
     def test_team_wrapper_preserves_edit_facts_and_diagnostic_feedback(self):
         from types import SimpleNamespace
-        from codeagent.teams.tool_gate import TeamToolExecutionGate
+        from codeagent.legacy.teams.tool_gate import TeamToolExecutionGate
         from codeagent.hooks.code_intelligence import CodeIntelligenceFeedback
         from codeagent.messages import ToolUse
-        from codeagent.teams.models import TaskAttemptState
+        from codeagent.legacy.teams.models import TaskAttemptState
         self.write('x.py', 'okay = 1\n')
         attempt = SimpleNamespace(state=TaskAttemptState.RUNNING, write_enabled=True)
         binding = SimpleNamespace(id='binding', path=str(self.root), write_scopes=('.',), write_enabled=True)

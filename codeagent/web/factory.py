@@ -38,7 +38,7 @@ from codeagent.runtime.activity import ExecutionActivity
 from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool, TodoWriteTool, ToolRegistry, WorkspaceGuard
 from codeagent.web.questions import WebUserQuestions
 from codeagent.tools.search_code import SearchCodeTool
-from codeagent.teams import (
+from codeagent.legacy.teams import (
     ActiveTeamRootToolExecutionGate,
     AgentSessionRecord,
     LeadTeamPlanTool,
@@ -52,11 +52,13 @@ from codeagent.teams import (
     create_lead_tools,
     create_teammate_tools,
 )
-from codeagent.worktrees import WorktreeManager, WorktreeManagerRegistry
+from codeagent.legacy.teams.worktrees import WorktreeManager, WorktreeManagerRegistry
 
 
 class WebAgentFactory:
     """Build fresh, non-shared mutable runtime objects for one workspace."""
+
+    supports_native_collaboration = True
 
     def __init__(
         self,
@@ -98,6 +100,8 @@ class WebAgentFactory:
         plan_mode: bool = False,
         web_search_enabled: bool = False,
         reasoning_effort: str | None = None,
+        native_collaboration: bool = False,
+        native_worker: bool = False,
     ) -> Agent:
         if team_attempt is not None and team_session is None:
             raise ValueError(
@@ -152,6 +156,7 @@ class WebAgentFactory:
         # checks. New personal sessions and Team members use separate checklists.
         legacy_tasks = (
             team_session is None and not team_planner
+            and not native_collaboration and not native_worker
             and bool(self.task_service.list_task_resources(task_list.id))
             and not any(item.task_list_id == task_list.id for item in self.task_service.list_team_runs())
         )
@@ -191,11 +196,11 @@ class WebAgentFactory:
             config=context_config,
             state=state,
             todo_store=todo_store,
-            task_state_provider=task_state if team_session is not None or not personal_plan else None,
+            task_state_provider=task_state if team_session is not None or not personal_plan or native_collaboration else None,
         )
         skill_loader = self._skill_loader()
         memory_store = self._memory_store(
-            always_read_only=team_session is not None or team_planner or read_only or plan_mode
+            always_read_only=team_session is not None or team_planner or read_only or plan_mode or native_worker
         )
         recovery = RecoveryRuntime(self.env.recovery_config)
         memory_manager = (
@@ -224,7 +229,7 @@ class WebAgentFactory:
                 ),
                 skill_loader=skill_loader,
                 memory_store=memory_store,
-                allow_memory_write=team_session is None and not team_planner and not plan_mode,
+                allow_memory_write=team_session is None and not team_planner and not plan_mode and not native_worker,
                 memory_max_items=self.env.memory_config.max_loaded_items,
                 workspace_guard=self.workspace_guard,
                 changed_files=changed_files,
@@ -353,8 +358,13 @@ class WebAgentFactory:
                 event_emitter.emit("cvm.diagnostic", {"reason": "team_contract_not_implemented",
                                                       "requested_mode": agent_config.cvm.contract, "effective_mode": "off"})
             agent_config = replace(agent_config, loop_guard=None,
-                                   cvm=replace(agent_config.cvm, contract="off", evidence="off"),
+                                   cvm=replace(agent_config.cvm, contract="off", evidence="off", verification="off"),
                                    parallel=replace(agent_config.parallel, enabled=False))
+        elif native_worker:
+            # A worker has a bounded objective, not the root's whole approved plan.
+            # Preserve ordinary loop guards and keep this config instance private.
+            agent_config = replace(agent_config,
+                cvm=replace(agent_config.cvm, contract="off", evidence="off", verification="off"))
         agent = Agent(
             client=client,
             tools=tools_for(),
@@ -531,11 +541,15 @@ class WebAgentFactory:
             agent.tools = gate.wrap(registry)
             agent.allow_subagents = False
             agent.subagent_environment_factory = None
+        if native_collaboration and team_session is None and root_mode is PromptMode.NORMAL:
+            from codeagent.multiagent.adapter import install
+            install(agent, self, event_emitter, cancellation, permission_broker,
+                    read_only=read_only or plan_mode, reasoning_effort=reasoning_effort)
         agent.permission_broker = permission_broker
         if agent.execution_activity is not None:
             permission_broker.execution_activity = agent.execution_activity
         if plan_mode:
-            from codeagent.plan_mode import (PLAN_REMINDER, InspectProjectTool, ProjectDiffTool,
+            from codeagent.plan_mode import (PLAN_REMINDER, NATIVE_PLAN_REMINDER, NATIVE_RESEARCH_REMINDER, InspectProjectTool, ProjectDiffTool,
                                             PlanTool, PlannedTeamSubmitTool, PlanModeGate)
             plan_tool = PlanTool(self.task_service, execution.conversation_id, execution.run_id,
                                  read_only=read_only, emitter=event_emitter)
@@ -551,11 +565,12 @@ class WebAgentFactory:
                 original = LeadTeamPlanTool(self.task_service, None, execution.conversation_id,
                     team.root_run_id if team is not None else execution.run_id, task_list.id, self.memory_access)
                 registry.register(PlannedTeamSubmitTool(original, plan_tool))
-            gate = PlanModeGate(self.task_service, execution.conversation_id, team=team_planner)
+            gate = PlanModeGate(self.task_service, execution.conversation_id, team=team_planner, native=native_collaboration)
             agent.tools = gate.wrap(gate.filter(registry))
             agent.tools.bind_runtime(agent._check_execution, lambda: 120.0)
             agent.hooks.register("PreToolUse", gate.guard, first=True)
-            agent._sync_runtime_reminder("plan_mode", PLAN_REMINDER, agent.messages)
+            reminder = NATIVE_RESEARCH_REMINDER if native_worker else NATIVE_PLAN_REMINDER if native_collaboration else PLAN_REMINDER
+            agent._sync_runtime_reminder("plan_mode", reminder, agent.messages)
             if agent.execution_activity is None:
                 agent.set_execution_activity(ExecutionActivity(cancellation,
                     response_timeout=self.env.team_model_response_timeout,
@@ -581,7 +596,7 @@ class WebAgentFactory:
         factory._retired_mcp_routers = self._retired_mcp_routers
         return factory
 
-    def for_team_workspace(
+    def for_execution_workspace(
         self, workspace: str | Path, *, project_workspace: str | Path
     ) -> "WebAgentFactory":
         """Bind tools to a Worktree while retaining the original project identity."""

@@ -1,8 +1,8 @@
-"""Local-only Git snapshots and process locks for managed Team integration.
+"""Local-only Git snapshots and process locks shared by managed executions.
 
 Snapshots use a temporary index: neither the user's HEAD nor staging choices
 are changed. No operation in this module contacts a remote.
-Approved Team startup may initialize a missing repository with an empty commit.
+An authorized execution may initialize a missing repository with an empty commit.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from codeagent.worktrees.manager import WorktreeError
+from codeagent.worktrees.errors import WorktreeError
 
 
 @contextmanager
@@ -118,7 +118,7 @@ class LocalGit:
             self.run("update-ref", branch, commit, "0" * len(commit))
             return self.text("rev-parse", "--verify", "HEAD^{commit}")
 
-    def tree(self, cwd: Path | None = None) -> str:
+    def tree(self, cwd: Path | None = None, *, artifact_paths=()) -> str:
         """Capture tracked changes and non-ignored untracked files, including deletions."""
         with tempfile.TemporaryDirectory(prefix="index-", dir=self.root) as directory:
             env = {"GIT_INDEX_FILE": str(Path(directory) / "index")}
@@ -132,6 +132,14 @@ class LocalGit:
             if paths:
                 self.run("add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul", cwd=cwd, env=env,
                          input=b"\0".join(paths) + b"\0")
+            if artifact_paths:
+                from codeagent.worktrees.scopes import path_is_allowed
+                untracked = self.run("ls-files", "--others", "--exclude-standard", "-z", cwd=cwd).stdout
+                tracked = set(self.run("ls-tree", "-r", "--name-only", "-z", "HEAD", cwd=cwd).stdout.split(b"\0"))
+                excluded = [os.fsdecode(name) for name in untracked.split(b"\0")
+                            if name and name not in tracked and path_is_allowed(os.fsdecode(name), artifact_paths)]
+                if excluded:
+                    self.run("--literal-pathspecs", "rm", "--cached", "--ignore-unmatch", "--", *excluded, cwd=cwd, env=env)
             return self.text("write-tree", cwd=cwd, env=env)
 
     def commit(self, tree: str, parents: list[str], message: str) -> str:

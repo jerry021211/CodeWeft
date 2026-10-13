@@ -11,6 +11,8 @@ import { processAnchors } from "@/lib/conversationProcess";
 import { conversationPlans } from "@/lib/conversationPlans";
 import { PlanMessage } from "@/components/PlanMessage";
 import { TeamConversation } from "@/components/TeamConversation";
+import { NativeCollaboration } from "@/features/multiagent/NativeCollaboration";
+import { rootProcessRun, type CollaborationSync } from "@/features/multiagent/presentation";
 import { isTeamActive, teamStatusLabel, teamExecutionState } from "@/lib/teamPresentation";
 import { ApprovalTimeline } from "@/components/ApprovalBanner";
 import { EmptyPanel, IconButton, Spinner, StatusDot } from "@/components/ui";
@@ -21,10 +23,12 @@ import { AttachmentPicker, type AttachmentPickerHandle } from "@/components/Atta
 import type { Attachment } from "@/types/api";
 
 type Props = {
+  collaborationSync?: CollaborationSync;
   teams?: TeamSnapshot[];
   team?: TeamSnapshot;
   teamBusy?: boolean;
   teamError?: string;
+  onTeamPlanDecision?: (revision: number, decision: "approve" | "reject", reason: string) => void;
   onPauseTeam?: () => void;
   onResumeTeam?: () => void;
   onResumeAttempt?: (id: string, reason: string, acknowledge: boolean) => void;
@@ -93,6 +97,7 @@ export function ChatWorkspace(props: Props) {
   const teamProgress = teamExecutionState(props.team);
   const canSend = Boolean(!busy && !teamPaused && !props.teamBusy && !attachmentsReading && (props.draft.trim() || props.attachments?.length));
   const runs = useMemo(() => ({ ...props.historyRuns, ...(props.run ? { [props.run.runId]: props.run } : {}) }), [props.historyRuns, props.run]);
+  const rootRuns = useMemo(() => Object.fromEntries(Object.entries(runs).map(([id, run]) => [id, rootProcessRun(run)])), [runs]);
   const plansByRun = useMemo(() => conversationPlans(props.planningSnapshot?.plans), [props.planningSnapshot?.plans]);
   const teamsByRun = useMemo(() => {
     const result: Record<string, TeamSnapshot[]> = {};
@@ -101,12 +106,14 @@ export function ChatWorkspace(props: Props) {
   }, [props.teams]);
   const anchors = useMemo(() => processAnchors(props.messages, [...new Set([...Object.keys(runs), ...Object.keys(plansByRun), ...Object.keys(teamsByRun)])]), [props.messages, runs, plansByRun, teamsByRun]);
   const process = (id: string) => <Fragment key={id}>
-    {runs[id] && <ThinkingProcess run={runs[id]} />}
+    {rootRuns[id] && <ThinkingProcess run={rootRuns[id]} />}
+    {runs[id] && <NativeCollaboration run={runs[id]} relatedRuns={runs} sync={props.collaborationSync} onContinue={text => { props.onDraft(text); inputRef.current?.focus(); }} />}
     {plansByRun[id]?.map(plan => <PlanMessage key={plan.id} plan={plan}
       current={plan.id === props.planningSnapshot?.state.active_plan_id} busy={busy || props.planBusy}
       error={props.planError} onDecision={props.onPlanDecision} />)}
     {teamsByRun[id]?.map(team => <TeamConversation key={team.team.id} team={team} busy={props.teamBusy}
       error={team.team.id === props.team?.team.id ? props.teamError : undefined}
+      onPlanDecision={team.team.id === props.team?.team.id ? props.onTeamPlanDecision : undefined}
       onPause={team.team.id === props.team?.team.id ? props.onPauseTeam : undefined}
       onResume={team.team.id === props.team?.team.id ? props.onResumeTeam : undefined}
       onResolveIntegration={team.team.id === props.team?.team.id ? props.onResolveIntegration : undefined}

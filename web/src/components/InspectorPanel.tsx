@@ -24,9 +24,11 @@ import { cx, formatDuration, formatNumber, formatTime, isRunActive, prettyJson, 
 import { EmptyPanel, IconButton, StatusDot } from "@/components/ui";
 import { TaskPlan } from "@/components/TaskPlan";
 import { PersonalTodoPanel } from "@/components/PersonalTodoPanel";
+import { personalTodoStatus } from "@/lib/personalTodoStatus";
 import { TeamPanel } from "@/components/TeamPanel";
 import { TokenUsagePanel, teamUsageForRun } from "@/components/TokenUsagePanel";
 import { ContextMetricsPanel, RunMetricsPanel } from "@/components/RunMetricsPanel";
+import { verificationStatus } from "@/lib/verificationStatus";
 
 type Props = {
   run?: RunViewState;
@@ -78,6 +80,7 @@ export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], pers
             {personalPlansLoading && <p className="text-xs text-ink-muted">正在加载任务进度…</p>}
             {personalPlansError && <p role="alert" className="text-xs text-danger">任务进度加载失败，请刷新重试。</p>}
             {plans.map(plan => <PersonalTodoPanel key={plan.owner_id} todos={plan.todos}
+              executionStatus={personalTodoStatus(plan, run, team)}
               title={plan.owner_id === "agent_root" ? "当前任务进度" : `${team?.agents.find(agent => agent.id === plan.agent_id)?.name ?? run?.agents[plan.agent_id]?.label ?? "子 Agent"} · 个人步骤`} />)}
             {!personalPlansLoading && !personalPlansError && !plans.length && !tasks.length && <p className="py-6 text-center text-xs text-ink-faint">多阶段工作开始后，这里会显示任务进度。</p>}
           </div>
@@ -115,6 +118,8 @@ function RunInspector({ run, runtime, team }: { run?: RunViewState; runtime?: Ru
         <RunMetricsPanel run={run} workspace={runtime?.workspace} />
       </Section>
 
+      <VerificationPanel run={run} />
+
       <Section title="上下文用量" icon={<Hash className="size-3.5" />}>
         <ContextMetricsPanel run={run} />
       </Section>
@@ -136,6 +141,29 @@ function RunInspector({ run, runtime, team }: { run?: RunViewState; runtime?: Ru
       </Section>
     </div>
   );
+}
+
+function VerificationPanel({ run }: { run: RunViewState }) {
+  const view = verificationStatus(run.events);
+  if (!view) return null;
+  const advice = view.advice?.payload;
+  const delivery = advice?.phase === "delivered" ? "建议已随模型请求发送，并收到响应。"
+    : advice?.phase === "candidate" ? "已生成建议，尚未确认送达模型。"
+      : advice?.phase === "followup" ? `后续检查：${advice.attempted ? "已执行" : "未执行"}；${advice.completed ? "已完成" : "未完成"}；${advice.passed ? "通过" : "未确认通过"}；${advice.current ? "对应检查完成时的版本" : "版本未确认"}。` : "";
+  return <Section title="验证状态" icon={<Check className="size-3.5" />}>
+    <div className="space-y-2 rounded-xl border border-line p-3 text-xs">
+      {view.checks.map((row, index) => <div key={String(row.definition_id || index)} className="space-y-1 break-all">
+        <div className={row.status === "passed" ? "text-ink" : "text-warning"}>{String(row.label ?? "范围或结果未知")}</div>
+        <code className="block text-[10px] text-ink-muted">{String(row.command ?? "")} · {String(row.cwd ?? ".")}</code>
+        <div className="text-[10px] text-ink-muted">范围：{Array.isArray(row.inputs) ? row.inputs.map(String).join("、") : "未知"}</div>
+        {row.status === "failed" && row.validity === "stale" && <div className="text-[10px] text-ink-muted">失败记录来自旧版本，当前修改还没有通过这项检查。</div>}
+        {row.observation_id ? <div className="text-[9px] text-ink-faint">结果引用：{String(row.observation_id)}</div> : null}
+      </div>)}
+      {view.status.payload.configuration_valid === false && <p className="text-warning">检查配置不可用或运行中发生变化，不能确认当前结果。</p>}
+      <p className="text-[10px] text-ink-muted">{String(view.status.payload.message ?? "")}</p>
+      {delivery && <p className="text-[10px] text-ink-muted">{delivery}详情见“调试”中的 cvm.verification_advice 事件。</p>}
+    </div>
+  </Section>;
 }
 
 function DebugInspector({ run, runtime }: { run?: RunViewState; runtime?: RuntimeConfig }) {

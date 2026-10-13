@@ -10,11 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from codeagent.teams.models import TaskAttemptRecord, WorktreeBindingRecord
+from codeagent.legacy.teams.models import TaskAttemptRecord, WorktreeBindingRecord
 
 
-class WorktreeError(RuntimeError):
-    """Raised when a Worktree cannot be created or its binding is invalid."""
+from codeagent.worktrees.errors import WorktreeError
 
 
 class DirtyWorkspaceConfirmationRequired(WorktreeError):
@@ -339,12 +338,22 @@ class WorktreeManager:
             paths.append((status, path.replace("\\", "/")))
         return tuple(dict.fromkeys(paths))
 
+    def source_status_entries(self, worktree_id: str):
+        from codeagent.legacy.teams.policy import collaborative, source_entries
+        binding = self.validate_binding(worktree_id)
+        entries = self.status_entries(worktree_id)
+        team = self.repository.get_team_run(binding.team_run_id)
+        if not collaborative(team.metadata):
+            return entries
+        contract = self.repository.get_attempt_contract(binding.attempt_id)
+        return source_entries(entries, contract.get("artifact_paths", []))
+
     def capture_candidate(
         self, worktree_id: str, *, candidate_id: str
     ) -> CandidateSnapshot:
         binding = self.validate_binding(worktree_id)
         path = Path(binding.path)
-        entries = self.status_entries(worktree_id)
+        entries = self.source_status_entries(worktree_id)
         if not entries:
             raise WorktreeError("Candidate has no repository changes")
         changed = tuple(item for status, item in entries if status != "??")
@@ -374,7 +383,7 @@ class WorktreeManager:
         expected_head: str,
     ) -> bool:
         binding = self.validate_binding(worktree_id)
-        entries = self.status_entries(worktree_id)
+        entries = self.source_status_entries(worktree_id)
         current_head = self._git(Path(binding.path), "rev-parse", "HEAD")
         return (
             current_head == expected_head
@@ -392,11 +401,12 @@ class WorktreeManager:
 
         binding = self.validate_binding(worktree_id)
         path = Path(binding.path)
-        current_paths = tuple(sorted(self.changed_paths(worktree_id)))
+        current_paths = tuple(sorted(p for _, p in self.source_status_entries(worktree_id)))
         if current_paths != tuple(sorted(expected_paths)):
             raise WorktreeError("Candidate paths changed before Runtime commit")
         self._git(path, "diff", "--check", "HEAD", allow_empty=True)
-        self._git(path, "add", "-A", "--", ".", allow_empty=True)
+        # Stage exactly the frozen source manifest; never sweep generated output.
+        self._git(path, "--literal-pathspecs", "add", "-A", "--", *current_paths, allow_empty=True)
         staged = tuple(
             item.decode("utf-8", errors="surrogateescape").replace("\\", "/")
             for item in self._git_bytes(

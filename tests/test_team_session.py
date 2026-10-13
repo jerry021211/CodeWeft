@@ -9,16 +9,16 @@ from unittest.mock import patch
 
 from codeagent import Agent, AgentConfig, ModelResponse, ToolRegistry
 from codeagent.context import ContextManager
-from codeagent.teams import (
+from codeagent.legacy.teams import (
     AgentSessionRunner,
     AgentSessionState,
     MessageBus,
     create_teammate_tools,
 )
 from codeagent.web.storage import SQLiteRepository, StorageConflictError, InvalidStateTransitionError
-from codeagent.teams.tools import TeamQuestionTool, TeamAnswerQuestionTool
+from codeagent.legacy.teams.tools import TeamQuestionTool, TeamAnswerQuestionTool
 from codeagent.runtime.cancellation import ModelCallTimeout
-from codeagent.teams.session import _message_context
+from codeagent.legacy.teams.session import _message_context
 
 
 class _EndTurnClient:

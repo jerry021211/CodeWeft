@@ -26,9 +26,11 @@ export function TaskPlan(props: Props) {
     const blocked = (item: TaskResource) => isTaskBlocked(item, completedIds);
     return [
       { key: "active", label: "进行中", items: props.tasks.filter((item) => item.task.status === "in_progress") },
-      { key: "ready", label: "Ready", items: props.tasks.filter((item) => item.task.status === "pending" && !blocked(item)) },
-      { key: "blocked", label: "Blocked", items: props.tasks.filter(blocked) },
+      { key: "ready", label: "待执行", items: props.tasks.filter((item) => item.task.status === "pending" && !blocked(item)) },
+      { key: "blocked", label: "等待前置任务", items: props.tasks.filter(blocked) },
+      { key: "failed", label: "需要处理", items: props.tasks.filter((item) => item.task.status === "failed") },
       { key: "completed", label: "已完成", items: props.tasks.filter((item) => item.task.status === "completed") },
+      { key: "cancelled", label: "已取消", items: props.tasks.filter((item) => item.task.status === "cancelled") },
     ];
   }, [props.tasks]);
 
@@ -113,7 +115,7 @@ function TaskPlanHeader({
     <div className="flex items-center justify-between gap-3">
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-semibold text-ink">{taskList?.name || "当前任务列表"}</div>
-        <div className="mt-1 text-[10px] text-ink-faint">{taskCount} 个任务 · 当前会话直接执行</div>
+        <div className="mt-1 text-[10px] text-ink-faint">{taskCount} 个任务 · 当前会话任务列表</div>
       </div>
       <button
         type="button"
@@ -203,12 +205,13 @@ function TaskCard({
             {task.subject}
           </div>
           <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-ink-muted">{task.description}</p>
+          {task.activeForm && <p className="mt-1 text-[10px] text-ink-muted">{task.activeForm}</p>}
           {task.blockedBy.length > 0 && (
             <div className="mt-1 text-[9px] text-ink-faint">依赖：{task.blockedBy.map((id) => `#${id}`).join("、")}</div>
           )}
           {task.owner && <div className="mt-1 truncate text-[9px] text-ink-faint" title={task.owner}>owner: {task.owner}</div>}
         </div>
-        {!done && !blocked && (
+        {!done && !blocked && task.status !== "cancelled" && (
           <button
             type="button"
             disabled={disabled}

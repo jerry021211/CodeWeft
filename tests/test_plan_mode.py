@@ -16,11 +16,11 @@ from codeagent.permissions import WaitingPermissionBroker
 from codeagent.plan_mode import PlanTool, PlannedTeamSubmitTool, PlanModeGate, InspectProjectTool
 from codeagent.prompts import PromptMode
 from codeagent.runtime import CancellationToken
-from codeagent.teams.lead import LeadTeamPlanTool
+from codeagent.legacy.teams.lead import LeadTeamPlanTool
 from codeagent.web.factory import WebAgentFactory
 from codeagent.web.scheduler import RunScheduler
 from codeagent.web.storage import SQLiteRepository, StorageConflictError
-from codeagent.worktrees import WorktreeManagerRegistry
+from codeagent.legacy.teams.worktrees import WorktreeManagerRegistry
 
 BODY = '# Implementation\n\nRead the existing modules, implement the requested feature in src, and verify with unit tests.\n'
 

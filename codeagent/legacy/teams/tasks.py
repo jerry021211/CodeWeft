@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from codeagent.teams.scopes import normalize_scopes
+from codeagent.worktrees.scopes import normalize_scopes
 
 
 def validate_task_execution(
@@ -12,6 +12,8 @@ def validate_task_execution(
     """Validate declared capabilities, not the meaning of a natural-language task."""
     if not isinstance(metadata, Mapping):
         raise ValueError("Team Task metadata must be an object")
+    from codeagent.legacy.teams.policy import validate_contract
+    validate_contract(metadata)
     kind = metadata.get("kind", "analysis")
     if kind not in ("analysis", "code"):
         raise ValueError(f"Unsupported Team Task kind: {kind}")
