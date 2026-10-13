@@ -24,6 +24,7 @@ from codeagent.context import ContextManager, HistoryObserver
 from codeagent.cvm import CvmConfig
 from codeagent.cvm.contract import ApprovedPlan, ContractUpdate
 from codeagent.cvm.state import CvmRuntime
+from codeagent.cvm.integration import CvmHooks, CvmToolRecorder
 from codeagent.context.budget import BoundModelClient
 from codeagent.context.observation import emit_request_observation, fingerprint, observe_request
 from codeagent.prompts.models import PromptTraceItem
@@ -140,6 +141,7 @@ class Agent:
     cvm_input_source: str = "user"
     cvm_task_refs: tuple[str, ...] = ()
     _cvm: CvmRuntime = field(init=False, repr=False)
+    _cvm_tools: CvmToolRecorder = field(init=False, repr=False)
     _cvm_update: ContractUpdate | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -175,6 +177,15 @@ class Agent:
             self.prompt_runtime = PromptRuntime(workspace=Path.cwd())
         self._cvm = CvmRuntime(self.config.cvm, self.prompt_runtime.workspace,
                                source_kind=self.cvm_input_source, task_refs=self.cvm_task_refs)
+        self._cvm_tools = CvmToolRecorder(
+            self._cvm, tools=lambda: self.tools, workspace=lambda: self.prompt_runtime.workspace,
+            identity=lambda: (self._round_budget.scope_id, self.event_emitter.context.agent_id or 'root'),
+        )
+        CvmHooks(self._cvm, self._cvm_tools,
+                 emit=lambda *args: self.event_emitter.emit(*args),
+                 can_advise=lambda: not self.read_only and not self.plan_mode
+                 and self._prompt_mode() is PromptMode.NORMAL
+                 and not self.event_emitter.context.parent_agent_id).install(self.hooks)
         if self.recovery_runtime is None:
             self.recovery_runtime = RecoveryRuntime()
         if self.allow_subagents and SUBAGENT_TOOL_NAME not in self.tools:
@@ -265,20 +276,30 @@ class Agent:
             raise ValueError("A task update requires its original user message")
         self._cvm_update = task_update
         result = None
+        primary: BaseException | None = None
         usage_before = self.usage_tracker.snapshot()
         try:
             with permission_execution(self.execution_activity, self.cancellation, self.event_emitter.context.agent_id):
                 result = self._guarded_run(prompt, allow_yield=self.plan_mode, execution_id=execution_id)
                 return result
+        except BaseException as error:
+            primary = error
+            raise
         finally:
             self._cvm_update = None
-            self._cvm.refresh_evidence()
-            if self._subagent_runtime is not None:
-                runtime, self._subagent_runtime = self._subagent_runtime, None
-                runtime.close()
-            self.tools.close_workspace_tools()
-            if result is not None:
-                result.usage = self.usage_tracker.snapshot().delta(usage_before)
+            try:
+                self.hooks.notify('RunFinished')
+            except Exception as error:
+                if primary is None:
+                    raise
+                primary.add_note(f"RunFinished observer failed: {type(error).__name__}: {error}")
+            finally:
+                if self._subagent_runtime is not None:
+                    runtime, self._subagent_runtime = self._subagent_runtime, None
+                    runtime.close()
+                self.tools.close_workspace_tools()
+                if result is not None:
+                    result.usage = self.usage_tracker.snapshot().delta(usage_before)
 
     def run_until_yield(self, prompt: str | None = None) -> AgentResult:
         """Run a Team Agent until completion or a requested safe-boundary yield."""
@@ -360,6 +381,9 @@ class Agent:
 
         self._check_cancelled()
         validate_tool_history(self.messages)
+        # Each invocation must reconcile the saved plan with the new input,
+        # even when the snapshot is unchanged from the interrupted invocation.
+        self.context.state.runtime_reminders.get("personal_todos", {}).pop("message_hash", None)
         # Team task assignments and answers arrive through durable mailbox messages,
         # with run(None). They continue the same task, not a new chat turn.
         if prompt is None and self.context.state.current_turn_start < 0:
@@ -381,17 +405,16 @@ class Agent:
             prompt_content = prompt
             prompt = extract_text(prompt_content)
             self.context.begin_turn(len(self.messages))
-            self.hooks.trigger("UserPromptSubmit", prompt) #打印日志
+            self.hooks.notify("UserPromptSubmit", prompt)
+            self.hooks.decide("UserPromptSubmit", prompt)
             self.context.record_user_prompt(prompt)
-            self._cvm.receive(prompt, run_id=self._round_budget.scope_id,
+            self.hooks.notify('UserInputAccepted', prompt, run_id=self._round_budget.scope_id,
                               reference=f"user:{self._round_budget.scope_id}:{len(self.messages)}",
                               update=self._cvm_update)
             self._sync_permission_reminder(self.messages)
             self.add_user_message(prompt_content)
 
-        cvm_goal = self._cvm.user_goal()
-        if cvm_goal is not None:
-            self.context.state.user_goal = cvm_goal
+        self.hooks.notify('RunInputReady', self.context.state)
 
         with trace_run(
             "agent.run",
@@ -465,12 +488,13 @@ class Agent:
                     return result
                 self._round_budget.admit()
                 iterations += 1
+                self.hooks.notify("BeforeModelCall", self.messages)
                 if self.read_only or self.plan_mode:
                     reminder = None
                     if self._loop_guard is not None:
                         self._loop_guard.before_model(self.messages)
                 else:
-                    reminder = self.hooks.trigger("BeforeModelCall", self.messages)
+                    reminder = self.hooks.decide("BeforeModelCall", self.messages)
                 if isinstance(reminder, HookDecision):
                     if reminder.action == "finalize":
                         raise ExecutionStopped(reminder.reason)
@@ -527,7 +551,8 @@ class Agent:
                     )
                     return result
 
-                response_decision = self.hooks.trigger("AfterModelCall", call_result.response)
+                self.hooks.notify("AfterModelCall", call_result.response)
+                response_decision = self.hooks.decide("AfterModelCall", call_result.response)
                 if isinstance(response_decision, HookDecision) and response_decision.action == "finalize":
                     raise ExecutionStopped(response_decision.reason)
                 self.context.reset_reactive_retries()
@@ -573,7 +598,8 @@ class Agent:
                 if not tool_uses:
                     if self._collect_subagents(wait=True):
                         continue
-                    force_continue = self.hooks.trigger("Stop", self.messages)
+                    self.hooks.notify("Stop", self.messages)
+                    force_continue = self.hooks.decide("Stop", self.messages)
                     if force_continue:
                         self.add_user_message(force_continue, source="runtime")
                         continue
@@ -617,9 +643,16 @@ class Agent:
             kwargs["system"] = prompt_assembly.system_prompt
         validate_tool_history(kwargs["messages"])
         canonical = kwargs["messages"]
-        cvm_reminder = self._cvm.reminder()
-        if self._cvm.active:
-            self._sync_runtime_reminder("cvm_contract", cvm_reminder, canonical)
+        reminders: dict[str, str] = {}
+        self.hooks.notify('CollectRuntimeReminders', reminders)
+        store = self.context.todo_store
+        reminders["personal_todos"] = (
+            store.model_context()
+            if store is not None and "todo_write" in self.tools and not self.read_only and not self.plan_mode
+            else ""
+        )
+        for key, content in reminders.items():
+            self._sync_runtime_reminder(key, content, canonical)
         self._sync_permission_reminder(canonical)
         round_reminder = self._round_budget.reminder()
         self._sync_runtime_reminder('round_budget', round_reminder, canonical)
@@ -643,9 +676,9 @@ class Agent:
         # A compaction in preflight may have folded a previously sent reminder.
         # Append it at the safe tail and recheck the complete request budget.
         reinjected = self._sync_permission_reminder(canonical, effective=kwargs["messages"])
-        if self._cvm.active:
-            reinjected = self._sync_runtime_reminder("cvm_contract", cvm_reminder, canonical,
-                                                     effective=kwargs["messages"]) or reinjected
+        for key, content in reminders.items():
+            reinjected = self._sync_runtime_reminder(key, content, canonical,
+                                                      effective=kwargs["messages"]) or reinjected
         reinjected = self._sync_runtime_reminder('round_budget', round_reminder, canonical,
                                                 effective=kwargs['messages']) or reinjected
         if self._loop_guard is not None:
@@ -702,6 +735,7 @@ class Agent:
             response = self._loop_guard.budget.invoke(self.client, **kwargs)
         else:
             response = self.client.create_message(**kwargs)
+        self.hooks.notify('ModelRequestCompleted', kwargs['messages'])
         usage = getattr(response, "usage", None)
         if usage is not None and usage.available:
             state = self.context.state
@@ -757,8 +791,12 @@ class Agent:
         if kind == "date" and previous.get("system_value_hash") == value_hash:
             return False
         validate_tool_history(canonical)
-        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "date": "当前日期", 'round_budget': '收尾提醒', 'plan_mode': '规划模式', 'cvm_contract': '任务契约'}
+        labels = {"loop_guard": "执行纠偏", "plan": "计划状态", "personal_todos": "个人清单", "date": "当前日期", 'round_budget': '收尾提醒', 'plan_mode': '规划模式', 'cvm_contract': '任务契约', 'cvm_verification': '验证状态'}
         text = value or "此前的运行时执行纠偏已解除；继续遵循当前用户目标和权限。"
+        if kind == "personal_todos" and not value:
+            text = "当前没有可执行的个人清单；此前的清单快照和更新提醒不再适用。遵循最新用户目标和当前可用工具，不要自行恢复旧任务。"
+        if kind == 'cvm_verification' and not value:
+            text = '此前的验证建议仅针对当时的代码和检查记录，不是持续执行命令的要求；以当前任务和权限为准。'
         if kind == 'round_budget' and not value:
             text = '本次是新的逻辑执行，轮数重新计数；上一执行的收尾提醒不再适用。'
         content = text if kind == "permission" else f"[运行时提醒：{labels[kind]}；不改变用户目标或权限]\n{text}"
@@ -801,7 +839,10 @@ class Agent:
         finally:
             # No cancellation checks here: cleanup must finish before checkpointing.
             cleanup_errors: list[BaseException] = []
-            self._commit_cvm_tools(tool_uses, results, executions)
+            try:
+                self.hooks.notify('ToolBatchFinished', tool_uses, results, executions)
+            except Exception as exc:
+                cleanup_errors.append(exc)
             try:
                 outputs = self.context.finalize_tool_results(tool_uses, [item["content"] for item in results])
                 if len(outputs) != len(results):
@@ -851,7 +892,8 @@ class Agent:
 
     def _pre_tool(self, tool):
         with permission_tool(tool.id):
-            return self.hooks.trigger("PreToolUse", tool)
+            self.hooks.notify("PreToolUse", tool)
+            return self.hooks.decide("PreToolUse", tool)
 
     def _dispatch_tools(self, calls, results, executions):
         for kind, indices in batches(calls, self._parallel_kind, self.config.parallel.max_tools):
@@ -902,7 +944,7 @@ class Agent:
                 execution["status"] = "unknown"
                 result["content"] = "执行结果未知：调用过程中被中断，未收到完整结果。操作可能已产生副作用，请先核实实际状态，不要自动重复执行。"
                 try:
-                    output = self._execute_tool_with_retry(tool, evidence_packets=execution.setdefault('cvm_packets', []))
+                    output = self._execute_tool_with_retry(tool, observation_packets=execution.setdefault('observation_packets', []))
                 except BaseException as exc:
                     captured = getattr(exc, 'tool_output', None)
                     if captured is not None:
@@ -927,7 +969,8 @@ class Agent:
                                  process_running=output.process_running)
                 # Record returned facts before a deadline check can end this operation.
                 self.context.record_tool_result(tool, output)
-                self.hooks.trigger("PostToolUse", tool, output)
+                self.hooks.notify("PostToolUse", tool, output)
+                self.hooks.decide("PostToolUse", tool, output)
         result["content"] = with_read_feedback(output, getattr(output, "context_feedback", ""), getattr(output, "guard_feedback", ""))
         if status == "success":
             result.pop("is_error", None)
@@ -952,7 +995,8 @@ class Agent:
                          process_running=output.process_running)
         if ran:
             self.context.record_tool_result(tool, output)
-            self.hooks.trigger("PostToolUse", tool, output)
+            self.hooks.notify("PostToolUse", tool, output)
+            self.hooks.decide("PostToolUse", tool, output)
         result["content"] = with_read_feedback(output, getattr(output, "context_feedback", ""), getattr(output, "guard_feedback", ""))
         self._emit_tool_outcome(tool, result, execution)
 
@@ -964,7 +1008,7 @@ class Agent:
         batch_cancel = CancellationToken(parent=self.cancellation)
         executor = ThreadPoolExecutor(max_workers=self.config.parallel.max_tools,
                                       thread_name_prefix="codeagent-tool") if kind == "tools" else None
-        def execute_reader(tool, started, evidence_packets):
+        def execute_reader(tool, started, observation_packets):
             budget = self._loop_guard.budget if self._loop_guard else None
             with budget.running() if budget else nullcontext():
                 def check():
@@ -975,7 +1019,7 @@ class Agent:
                     started.set()
                     self.event_emitter.emit("tool.started", {"tool_use_id": tool.id, "name": tool.name,
                         "input": _public_tool_input(tool.name, tool.input)})
-                    return self._execute_tool_with_retry(tool, bind_runtime=False, evidence_packets=evidence_packets)
+                    return self._execute_tool_with_retry(tool, bind_runtime=False, observation_packets=observation_packets)
         try:
             for index in indices:
                 tool, result, execution = calls[index], results[index], executions[index]
@@ -1023,7 +1067,7 @@ class Agent:
                         futures[record.future] = index
                 else:
                     started = Event()
-                    future = submit(executor, execute_reader, tool, started, execution.setdefault('cvm_packets', []))
+                    future = submit(executor, execute_reader, tool, started, execution.setdefault('observation_packets', []))
                     futures[future] = index
                     started_signals[future] = started
         except BaseException as exc:
@@ -1064,7 +1108,8 @@ class Agent:
                 try:
                     output = returned[index]
                     self.context.record_tool_result(calls[index], output)
-                    self.hooks.trigger("PostToolUse", calls[index], output)
+                    self.hooks.notify("PostToolUse", calls[index], output)
+                    self.hooks.decide("PostToolUse", calls[index], output)
                     results[index]["content"] = with_read_feedback(output, getattr(output, "context_feedback", ""), getattr(output, "guard_feedback", ""))
                 except BaseException as exc:
                     if error is None:
@@ -1111,7 +1156,7 @@ class Agent:
         return True
 
     def _execute_tool_with_retry(self, tool: ToolUse, *, bind_runtime: bool = True,
-                                 evidence_packets=None) -> ToolOutput:
+                                 observation_packets=None) -> ToolOutput:
         """Only an explicit safe transient result can request a bounded retry."""
         guard = self._loop_guard
         if guard is not None and bind_runtime:
@@ -1119,24 +1164,10 @@ class Agent:
         retries = guard.config.tool_max_retries if guard is not None else 0
         for attempt in range(retries + 1):
             self._check_execution()
-            prepared = None
-            if self._cvm.recording and evidence_packets is not None:
-                try:
-                    cwd, trusted = self.tools.verification_context(tool.name, self.prompt_runtime.workspace)
-                    prepared = self._cvm.evidence.prepare(tool, cwd=cwd, trusted_process=trusted,
-                                  task_id=self._cvm.current.task_id if self._cvm.current else '',
-                                  task_revision=self._cvm.current.revision if self._cvm.current else None)
-                except Exception:
-                    evidence_packets.append({'error': 'evidence_prepare_failed'})
-            try:
-                output = normalize_tool_output(self.tools.execute(tool.name, tool.input))
-            except BaseException as exc:
-                if prepared is not None:
-                    self._capture_cvm_packet(evidence_packets, tool, getattr(exc, 'tool_output', None),
-                                             prepared, attempt + 1, cancelled=True)
-                raise
-            if prepared is not None:
-                self._capture_cvm_packet(evidence_packets, tool, output, prepared, attempt + 1)
+            output = self._cvm_tools.execute(
+                tool, lambda: normalize_tool_output(self.tools.execute(tool.name, tool.input)),
+                packets=observation_packets, attempt=attempt + 1,
+            )
             if not (output.outcome == "transient" and output.retryable and output.retry_safe
                     and attempt < retries):
                 return output
@@ -1151,40 +1182,6 @@ class Agent:
             self._check_execution()
             guard.budget.reserve("tool")
         raise AssertionError("unreachable")
-
-    def _capture_cvm_packet(self, packets, tool, output, prepared, attempt, *, cancelled=False,
-                            executed=True, missing_status='unknown'):
-        try:
-            packets.append(self._cvm.evidence.packet(tool, output, prepared,
-                           run_id=self._round_budget.scope_id,
-                           agent_id=self.event_emitter.context.agent_id or 'root', attempt=attempt,
-                           executed=executed, cancelled=cancelled, missing_status=missing_status))
-        except Exception:
-            packets.append({'error': 'evidence_capture_failed'})
-
-    def _commit_cvm_tools(self, tools, results, executions):
-        """Parent-only, request/attempt order, before any context output projection."""
-        if not self._cvm.recording:
-            return
-        for tool, result, execution in zip(tools, results, executions):
-            try:
-                packets = execution.get('cvm_packets', [])
-                if not packets:
-                    # Pre-hook denial, unstarted calls and subagent reports have no process attestation.
-                    prepared = self._cvm.evidence.prepare(tool, cwd=self.prompt_runtime.workspace,
-                                  trusted_process=False, task_id=self._cvm.current.task_id if self._cvm.current else '',
-                                  task_revision=self._cvm.current.revision if self._cvm.current else None)
-                    output = result['content'] if isinstance(result['content'], ToolOutput) else None
-                    self._capture_cvm_packet(packets, tool, output, prepared, 0,
-                                             executed=execution['status'] in {'success', 'error'},
-                                             missing_status=execution['status'])
-                for packet in packets:
-                    if 'error' in packet:
-                        self._cvm.evidence.fail(packet['error'])
-                    else:
-                        self._cvm.evidence.commit(packet)
-            except Exception:
-                self._cvm.evidence.fail('evidence_commit_failed')
 
     def _emit_tool_outcome(self, tool: ToolUse, result: dict[str, Any], execution: dict[str, Any]) -> None:
         status = execution["status"]

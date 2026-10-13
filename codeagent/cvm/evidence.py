@@ -23,6 +23,9 @@ class EvidenceLedger:
         self.diagnostics = []
         self.degraded = False
         self._seen = set()
+        # Runtime selection only: historical project declarations stay restorable,
+        # but a reloaded project file may retire them for future executions.
+        self.active_project_definitions = None
 
     def fail(self, reason):
         self.degraded = True
@@ -57,17 +60,25 @@ class EvidenceLedger:
                 if 'invalid_user_verification_definition' not in self.diagnostics:
                     self.diagnostics.append('invalid_user_verification_definition')
 
-    def prepare(self, tool, *, cwd, trusted_process, task_id, task_revision=None):
-        command = tool.input.get('command', '') if tool.name == 'bash' else ''
-        check = simple_check(command) if command else None
+    def prepare(self, tool, *, cwd, trusted_process, task_id, task_revision=None,
+                host_command=None, host_result_reader=None):
+        command = host_command or (tool.input.get('command', '') if tool.name == 'bash' else '')
+        check = ({'runner': 'structured', 'scope': []} if host_command and host_result_reader
+                 else simple_check(command) if command else None)
         definition_id, definition = '', None
         if check:
             for key, item in self.definitions.items():
+                if (item['source_kind'] == 'project_config' and self.active_project_definitions is not None
+                        and key not in self.active_project_definitions):
+                    continue
+                if host_command and item['source_kind'] != 'host':
+                    continue
                 expected = os.path.normcase(str((Path(self.workspace) / item['cwd']).resolve()))
                 if item['command'] == command and expected == os.path.normcase(str(Path(cwd).resolve())) and item['task_id'] == task_id:
                     definition_id, definition = key, deepcopy(item)
         before = capture(self.workspace, definition['inputs'], cwd=cwd) if definition else None
         return {'cwd': str(cwd), 'command': command, 'check': check, 'definition_id': definition_id,
+                'host_result_reader': host_result_reader,
                 'definition': definition, 'before': before, 'trusted_process': trusted_process,
                 'task_id': task_id, 'task_revision': task_revision}
 
@@ -105,6 +116,15 @@ class EvidenceLedger:
             result, summary = ('cancelled' if cancelled else 'unknown', {})
             if check and prepared['trusted_process'] and output is not None:
                 result, summary = test_result(output, check['runner'], executed=executed, cancelled=cancelled)
+            if prepared.get('host_result_reader') and output is not None:
+                if cancelled:
+                    result, summary = 'cancelled', {}
+                elif not executed or output.status == 'blocked':
+                    result, summary = 'blocked', {}
+                else:
+                    result, summary = prepared['host_result_reader'](output)
+                    if result not in {'passed', 'failed', 'blocked', 'cancelled', 'timeout', 'running', 'unknown'} or not isinstance(summary, dict):
+                        raise ValueError('Invalid structured check result')
             definition = prepared['definition']
             after = capture(self.workspace, definition['inputs'], cwd=prepared['cwd']) if definition else None
             before = prepared['before']
@@ -140,8 +160,8 @@ class EvidenceLedger:
                         old['superseded_by'] = record['observation_id']
             self.verifications.append(record)
 
-    def refresh(self):
-        cache = {}
+    def refresh(self, cache=None):
+        cache = {} if cache is None else cache
         for record in self.verifications:
             if record['validity'] != 'fresh':
                 continue
@@ -149,7 +169,7 @@ class EvidenceLedger:
             if definition is None or self.degraded:
                 record['validity'] = 'unknown'
                 continue
-            key = (record['cwd'], tuple(definition['inputs']))
+            key = (os.path.normcase(str(Path(record['cwd']).resolve())), tuple(definition['inputs']))
             if key not in cache:
                 cache[key] = capture(self.workspace, definition['inputs'], cwd=record['cwd'])
             current = cache[key]

@@ -10,7 +10,7 @@ CvmMode = Literal["off", "shadow", "active"]
 
 @dataclass(frozen=True, slots=True)
 class CvmConfig:
-    """Contract modes and passive stage-2 evidence; other components are reserved.
+    """Contract, passive evidence, and optional verification advice.
 
     Rejecting unsupported modes prevents a configured-but-inoperative gate.
     Later stages must add behavior and dependency validation before enabling
@@ -19,6 +19,7 @@ class CvmConfig:
 
     contract: CvmMode = "off"
     evidence: CvmMode = "off"
+    verification: CvmMode = "off"
     completion: CvmMode = "off"
     signals: CvmMode = "off"
     progress: CvmMode = "off"
@@ -33,6 +34,9 @@ class CvmConfig:
                     raise ValueError('CVM evidence supports off or shadow only in stage 2')
                 if mode == 'shadow' and self.contract == 'off':
                     raise ValueError('CVM evidence=shadow requires contract=shadow or active')
+            elif item.name == 'verification':
+                if mode != 'off' and self.evidence != 'shadow':
+                    raise ValueError('CVM verification supports off only without evidence=shadow')
             elif item.name != "contract" and mode != "off":
                 raise ValueError(f"CVM {item.name}={mode} is not implemented; this component supports off only")
 

@@ -8249,7 +8249,9 @@ class SQLiteRepository(TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage
         with self._lock:
             self._ensure_open()
             rows = self._connection.execute(
-                "SELECT * FROM personal_todos WHERE conversation_id = ? ORDER BY updated_at, owner_id",
+                """SELECT p.*, r.status AS run_status FROM personal_todos p
+                   JOIN runs r ON r.id = p.run_id
+                   WHERE p.conversation_id = ? ORDER BY p.updated_at, p.owner_id""",
                 (conversation_id,),
             ).fetchall()
         return [

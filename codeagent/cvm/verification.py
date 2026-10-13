@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from collections.abc import Callable
 import re
 import shlex
 
@@ -52,7 +53,8 @@ class VerificationDefinition:
     task_id: str = ''
 
     def __post_init__(self):
-        if (not simple_check(self.command) or not self.inputs or isinstance(self.inputs, str)
+        host_check = self.source_kind == 'host' and re.fullmatch(r'host:[a-z_]+:[a-z_]+', self.command)
+        if ((not simple_check(self.command) and not host_check) or not self.inputs or isinstance(self.inputs, str)
                 or any(not isinstance(p, str) or not p.strip() for p in self.inputs)
                 or any(any(mark in p for mark in '*?[]') for p in self.inputs)
                 or self.source_kind not in {'user', 'approved_plan', 'project_config', 'host'}
@@ -63,6 +65,18 @@ class VerificationDefinition:
     @property
     def id(self):
         return digest(asdict(self))
+
+
+@dataclass(frozen=True)
+class TrustedVerificationAdapter:
+    """Host-only binding to a registered handler, never selected by tool output text."""
+    definitions: tuple[VerificationDefinition, ...]
+    select: Callable[[dict], str]
+    read_result: Callable
+
+    def __post_init__(self):
+        if not self.definitions or any(d.source_kind != 'host' for d in self.definitions):
+            raise ValueError('Structured checks require trusted host definitions')
 
 
 def test_result(output, runner, *, executed=True, cancelled=False):

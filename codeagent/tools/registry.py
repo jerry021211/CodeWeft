@@ -22,6 +22,7 @@ class _RegisteredTool:
     definition: ToolDefinition
     handler: ToolHandler
     input_state: Callable[[dict[str, Any]], ToolInputState] | None = None
+    verification: object | None = None
 
 
 class ToolRegistry:
@@ -42,10 +43,22 @@ class ToolRegistry:
     def register_handler(
         self, definition: ToolDefinition, handler: ToolHandler,
         input_state: Callable[[dict[str, Any]], ToolInputState] | None = None,
+        *, verification=None,
     ) -> None:
         if definition.name in self._tools:
             raise ValueError(f"Tool already registered: {definition.name}")
-        self._tools[definition.name] = _RegisteredTool(definition, handler, input_state)
+        if verification is not None:
+            from codeagent.cvm.verification import TrustedVerificationAdapter
+            if not isinstance(verification, TrustedVerificationAdapter):
+                raise TypeError('Expected trusted host verification adapter')
+        self._tools[definition.name] = _RegisteredTool(definition, handler, input_state, verification)
+
+    def verification_adapter(self, name):
+        registered = self._tools.get(name)
+        return registered.verification if registered and self._execution_wrapper is None else None
+
+    def verification_adapters(self):
+        return [r.verification for r in self._tools.values() if r.verification is not None] if self._execution_wrapper is None else []
 
     def bind_runtime(
         self, cancellation_check: Callable[[], None], remaining_seconds: Callable[[], float],
@@ -118,7 +131,7 @@ class ToolRegistry:
             if callable(clone):
                 registry.register(clone())
             else:
-                registry.register_handler(registered.definition, registered.handler, registered.input_state)
+                registry.register_handler(registered.definition, registered.handler, registered.input_state, verification=registered.verification)
         return registry
 
     def close_workspace_tools(self):
@@ -169,7 +182,7 @@ class ToolRegistry:
         for name, registered in self._tools.items():
             if name in excluded:
                 continue
-            registry.register_handler(registered.definition, registered.handler, registered.input_state)
+            registry.register_handler(registered.definition, registered.handler, registered.input_state, verification=registered.verification)
         return registry
 
     def with_execution_wrapper(
@@ -180,7 +193,7 @@ class ToolRegistry:
 
         registry = ToolRegistry(wrapper)
         for registered in self._tools.values():
-            registry.register_handler(registered.definition, registered.handler, registered.input_state)
+            registry.register_handler(registered.definition, registered.handler, registered.input_state, verification=registered.verification)
         return registry
 
     def __contains__(self, name: str) -> bool:

@@ -68,6 +68,7 @@ class CvmRuntime:
         self._approved_prompt = None
         self.evidence = EvidenceLedger(self.workspace)
         self._saved_evidence = None
+        self.supervision = {}
 
     @property
     def recording(self):
@@ -153,6 +154,7 @@ class CvmRuntime:
         return json.loads(json.dumps({"schema_version": 2 if evidence is not None else 1, "policy_version": 1, "workspace": self.workspace,
                 "config": self.config.snapshot(), "current": asdict(self.current) if self.current else None,
                 "archived": [asdict(item) for item in self.archived], "diagnostics": list(self.diagnostics),
+                **({'supervision': self.supervision} if self.supervision else {}),
                 **({'evidence': evidence} if evidence is not None else {})}, ensure_ascii=False))
 
     def restore(self, payload, *, messages=()):
@@ -162,6 +164,7 @@ class CvmRuntime:
         self._approved_prompt = None
         self.evidence = EvidenceLedger(self.workspace)
         self._saved_evidence = None
+        self.supervision = {}
         if payload is None:
             if self.observing:
                 self._restore_legacy(messages)
@@ -185,6 +188,9 @@ class CvmRuntime:
                 raise ValueError("invalid_diagnostics")
             self.current, self.archived = current, archived
             self.diagnostics = list(payload["diagnostics"])
+            if 'supervision' in payload:
+                from codeagent.cvm.supervision import restore_supervision
+                self.supervision = restore_supervision(payload['supervision'])
             if payload['schema_version'] == 2:
                 if self.recording:
                     self.evidence.restore(payload['evidence'])

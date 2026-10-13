@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,14 +14,23 @@ from codeagent.memory import MemoryConfig
 from codeagent.permissions import WaitingPermissionBroker
 from codeagent.prompts import PromptMode
 from codeagent.runtime import CancellationToken
+from codeagent.runtime.cancellation import CancelledError
 from codeagent.tools import TodoStore, TodoWriteTool, create_default_registry
 from codeagent.web.factory import WebAgentFactory
 from codeagent.web.storage import SQLiteRepository
 
 
 class Client:
+    def __init__(self, responses=()):
+        self.calls = []
+        self.responses = iter(responses)
+
     def create_message(self, **kwargs):
-        return ModelResponse("end_turn", [{"type": "text", "text": "done"}])
+        self.calls.append(deepcopy(kwargs["messages"]))
+        result = next(self.responses, ModelResponse("end_turn", [{"type": "text", "text": "done"}]))
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class PersonalTodoTests(unittest.TestCase):
@@ -41,12 +51,12 @@ class PersonalTodoTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def agent(self, *, conversation=None, run=None, session=None, attempt=None, checkpoint=None,
-              planner=False):
+              planner=False, client=None):
         emitter = EventEmitter(RecordingEventSink(self.repo), context=ExecutionContext(
             conversation_id=(conversation or self.conv).id, run_id=(run or self.run).id,
             agent_id=session.agent_id if session else "agent_root",
             parent_agent_id="lead" if session else None))
-        with patch.object(EnvironmentConfig, "create_model_client", return_value=Client()):
+        with patch.object(EnvironmentConfig, "create_model_client", return_value=client or Client()):
             return self.factory.create(event_emitter=emitter, cancellation=CancellationToken(),
                 permission_broker=WaitingPermissionBroker(), checkpoint=checkpoint,
                 team_session=session, team_attempt=attempt,
@@ -79,6 +89,65 @@ class PersonalTodoTests(unittest.TestCase):
         checkpoint = SimpleNamespace(messages=[], context={}, todos=[{"content": "Old", "status": "pending"}], metadata={})
         self.assertEqual(self.agent(checkpoint=checkpoint).context.todo_store.todos, [])
         self.assertEqual(self.repo.get_personal_todos(self.conv.id, "agent_root")["revision"], 2)
+
+    def test_cancel_then_continue_sends_saved_plan_in_first_request_without_waiting_for_reminder(self):
+        initial = Client([
+            ModelResponse("tool_use", [{"type": "tool_use", "id": "plan", "name": "todo_write",
+                "input": {"todos": [{"content": "验证边界用例", "status": "in_progress"}]}}]),
+            CancelledError("user stopped"),
+        ])
+        with self.assertRaises(CancelledError):
+            self.agent(client=initial).run("执行任务")
+        self.repo.update_run_status(self.run.id, "cancelled")
+        saved = self.repo.get_personal_todos(self.conv.id, "agent_root")
+        self.assertEqual(saved["run_status"], "cancelled")
+        self.assertEqual(saved["todos"][0]["status"], "in_progress")
+        next_run = self.repo.create_run(self.conv.id, status="running")
+        resumed = Client([ModelResponse("tool_use", [{"type": "tool_use", "id": "updated", "name": "todo_write",
+            "input": {"todos": [{"content": "验证边界用例", "status": "completed"}]}}])])
+        self.agent(run=next_run, client=resumed).run("继续刚才的任务")
+        first = str(resumed.calls[0])
+        self.assertIn("验证边界用例", first)
+        self.assertIn("先核实中断前的实际结果", first)
+        self.assertLess(first.index("继续刚才的任务"), first.index("当前个人清单的最新快照"))
+        latest = self.repo.get_personal_todos(self.conv.id, "agent_root")
+        self.assertEqual(latest["run_id"], next_run.id)
+        self.assertEqual(latest["todos"][0]["status"], "completed")
+
+    def test_new_goal_can_clear_plan_and_reused_agent_rechecks_unchanged_plan_each_turn(self):
+        client = Client()
+        agent = self.agent(client=client)
+        self.write(agent, "旧任务")
+        agent.run("现在只是问一下进度")
+        agent.run("继续旧任务")
+        self.assertEqual(str(client.calls[1]).count("当前个人清单的最新快照"), 2)
+        self.assertIn("用户仅询问进度或原因时，只回答问题", str(client.calls[0]))
+        switched = Client([ModelResponse("tool_use", [{"type": "tool_use", "id": "clear", "name": "todo_write",
+            "input": {"todos": []}}])])
+        self.agent(client=switched).run("放弃旧任务，只回答一加一")
+        self.assertIn("若用户改换任务，按新目标替换清单", str(switched.calls[0]))
+        self.assertIn("此前的清单快照和更新提醒不再适用", str(switched.calls[1]))
+        self.assertEqual(self.repo.get_personal_todos(self.conv.id, "agent_root")["todos"], [])
+
+    def test_current_snapshot_does_not_repeat_on_unchanged_model_requests(self):
+        client = Client([
+            ModelResponse("tool_use", [{"type": "tool_use", "id": "same-plan", "name": "todo_write",
+                "input": {"todos": [{"content": "Check", "status": "in_progress"}]}}]),
+        ])
+        agent = self.agent(client=client)
+        self.write(agent, "Check")
+        agent.run("继续核查")
+        self.assertEqual(str(client.calls[0]).count("当前个人清单的最新快照"), 1)
+        self.assertEqual(str(client.calls[1]).count("当前个人清单的最新快照"), 1)
+
+    def test_read_only_turn_does_not_receive_actionable_todo_restoration(self):
+        client = Client()
+        agent = self.agent(client=client)
+        self.write(agent, "Old work")
+        agent.run("进度如何")
+        agent.read_only = True
+        agent.run("只读检查")
+        self.assertIn("当前没有可执行的个人清单", str(client.calls[-1][-1]))
 
     def test_conversations_with_same_root_id_are_isolated(self):
         first = self.agent()
