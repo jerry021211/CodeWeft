@@ -72,6 +72,7 @@ from codeagent.web.models import (
 from codeagent.legacy.teams.observation import install_observation, read_changes
 from codeagent.legacy.teams.integration_storage import INTEGRATION_SCHEMA, TeamIntegrationStorage
 from codeagent.web.plan_storage import PLAN_SCHEMA, PlanStorage
+from codeagent.web.schedule_storage import SCHEDULE_SCHEMA, ScheduleStorage
 from codeagent.legacy.teams.lifecycle import TeamLifecycleStorage
 from codeagent.legacy.teams.coordination import COORDINATION_SCHEMA, TeamCoordinationStorage
 from codeagent.legacy.teams.policy import authorized_path, collaborative
@@ -192,7 +193,7 @@ class Repository(Protocol):
     ) -> JsonObject: ...
 
 
-class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage):
+class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegrationStorage, PlanStorage, ScheduleStorage):
     """A single-process, thread-safe SQLite repository.
 
     One connection is protected by a re-entrant lock.  This deliberately
@@ -232,6 +233,8 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
         if recover_incomplete:
             self.mark_incomplete_runs_interrupted()
             self.recover_incomplete_team_runtime()
+            from codeagent.multiagent.executions import ExecutionRepository
+            ExecutionRepository(self).recover_interrupted()
 
     @classmethod
     def for_workspace(
@@ -503,6 +506,18 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
         );
         CREATE TABLE IF NOT EXISTS agent_root_recovery (
             run TEXT PRIMARY KEY, conversation TEXT NOT NULL, data TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS native_recovery_conversation_delete
+        AFTER DELETE ON conversations BEGIN
+            DELETE FROM agent_root_recovery WHERE conversation = OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS native_recovery_run_delete
+        AFTER DELETE ON runs BEGIN
+            DELETE FROM agent_root_recovery WHERE run = OLD.id;
+        END;
+        DELETE FROM agent_root_recovery WHERE NOT EXISTS (
+            SELECT 1 FROM runs WHERE runs.id = agent_root_recovery.run
+              AND runs.conversation_id = agent_root_recovery.conversation
         );
 
         CREATE TABLE IF NOT EXISTS team_runs (
@@ -850,6 +865,7 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
             self._connection.executescript(schema)
             self._connection.executescript(INTEGRATION_SCHEMA)
             self._connection.executescript(PLAN_SCHEMA)
+            self._connection.executescript(SCHEDULE_SCHEMA)
             self._connection.executescript(COORDINATION_SCHEMA)
             for table, additions in {
                 "team_runs": (("integration_mode", "TEXT NOT NULL DEFAULT 'manual'"),
@@ -1186,6 +1202,13 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
                 raise StorageConflictError("会话中有未结束的任务，请先停止任务再删除。")
             if self.get_active_team_run_for_conversation(conversation_id) is not None:
                 raise StorageConflictError("会话中有未结束的团队任务，请先停止团队再删除。")
+            native_active = connection.execute(
+                "SELECT 1 FROM agent_executions WHERE conversation=? "
+                "AND json_extract(data, '$.status') IN ('running','verifying','delivering') LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+            if native_active is not None:
+                raise StorageConflictError('协作成员或交付仍在运行，请先停止执行再删除会话。')
             pending_worker = connection.execute(
                 "SELECT 1 FROM task_attempts WHERE team_run_id IN "
                 "(SELECT id FROM team_runs WHERE conversation_id = ?) "
@@ -8819,9 +8842,13 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
         conversation_id: str | None = None,
         team_run_id: str | None = None,
         include_breakdown: bool = True,
+        agent_ids: Sequence[str] | None = None,
     ) -> JsonObject:
         conditions: list[str] = []
         parameters: list[Any] = []
+        if agent_ids is not None:
+            conditions.append('agent_id IN (' + ','.join('?' for _ in agent_ids) + ')' if agent_ids else '0')
+            parameters.extend(agent_ids)
         if run_id is not None:
             conditions.append("run_id = ?")
             parameters.append(run_id)

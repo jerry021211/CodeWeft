@@ -1,4 +1,7 @@
 import type {
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduleOccurrence,
   PlanDocument,
   PersonalTodoPlan,
   PlanningSnapshot,
@@ -61,11 +64,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listSchedules() {
+    return request<ScheduledTask[]>("/schedules");
+  },
+  saveSchedule(input: ScheduledTaskInput, id?: string) {
+    return request<ScheduledTask>(id ? `/schedules/${encodeURIComponent(id)}` : "/schedules", {
+      method: id ? "PUT" : "POST", body: JSON.stringify(input),
+    });
+  },
+  setScheduleEnabled(id: string, enabled: boolean) {
+    return request<ScheduledTask>(`/schedules/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify({ enabled }),
+    });
+  },
+  deleteSchedule(id: string) {
+    return request<void>(`/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+  scheduleHistory(id: string) {
+    return request<ScheduleOccurrence[]>(`/schedules/${encodeURIComponent(id)}/history`);
+  },
   collaborationStatuses(conversationId: string, signal?: AbortSignal) {
     return request<Record<string, unknown>[]>(`/conversations/${encodeURIComponent(conversationId)}/collaborations`, {signal});
   },
   collaborationDetails(conversationId: string, executionId: string, taskId: string, signal?: AbortSignal) {
     return request<Record<string, unknown>>(`/conversations/${encodeURIComponent(conversationId)}/collaborations/${encodeURIComponent(executionId)}/members/${encodeURIComponent(taskId)}`, {signal});
+  },
+  collaborationResources(conversationId: string, executionId: string, archive = false, retentionDays = 30) {
+    const base = `/conversations/${encodeURIComponent(conversationId)}/collaborations/${encodeURIComponent(executionId)}/resources`;
+    return request<Record<string, unknown>>(archive ? `${base}/archive?retention_days=${retentionDays}` : base, {method: archive ? 'POST' : 'GET'});
   },
   getPlans(conversationId: string) {
     return request<PlanningSnapshot>(`/conversations/${encodeURIComponent(conversationId)}/plans`);

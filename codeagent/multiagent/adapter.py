@@ -16,6 +16,8 @@ from .executions import ExecutionRepository
 from .tools import EXECUTION_TOOL_NAMES, register_execution_tools
 from codeagent.tools.tasks import create_task_tools, TASK_TOOL_NAMES
 from .verification import run_checks
+from .context import execution_context
+from .reports import REPORT_INSTRUCTIONS, worker_report, tool_evidence
 
 
 class BrokerView:
@@ -50,6 +52,11 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
             import_legacy(factory.task_service, root / 'state.sqlite3', emitter.context.conversation_id, factory.workspace)
             migrated = True
 
+    def persist_budget(*_):
+        if recovery['active'] and agent._loop_guard is not None:
+            repository.save_budget(emitter.context.run_id, emitter.context.conversation_id,
+                                   agent._loop_guard.budget)
+
     def worker(task, path, checkpoint, save, operation, identifier, write_lock):
         child_id = repository.get(identifier)["records"][task["id"]].get("member_id") or identifier + "_" + task["id"]
         child_emitter = emitter.child(agent_id=child_id)
@@ -61,21 +68,34 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
         child = factory.for_execution_workspace(path, project_workspace=factory.project_workspace).create(
             event_emitter=child_emitter, cancellation=child_token, permission_broker=child_broker,
             checkpoint=SimpleNamespace(**checkpoint) if checkpoint else None,
-            read_only=readonly, plan_mode=readonly, reasoning_effort=reasoning_effort, native_worker=True)
+            read_only=readonly, plan_mode=readonly, reasoning_effort=reasoning_effort, native_worker=True,
+            execution_budget=agent._loop_guard.budget if agent._loop_guard is not None else None,
+            tool_admission=agent.tool_admission)
         child.allow_subagents = False
         child.subagent_environment_factory = None
         child.tools = child.tools.copy_without({"subagent", "subagent_result", "subagent_cancel", "plan", "remember", "todo_write", *TASK_TOOL_NAMES, *EXECUTION_TOOL_NAMES})
         child.set_execution_activity(ExecutionActivity(child_token,
             response_timeout=factory.env.team_model_response_timeout,
             model_timeout=factory.env.team_model_call_timeout))
+        def activity(label):
+            state = repository.get(identifier)
+            own = state['records'][task['id']]
+            if own['status'] != 'running' or own.get('activity') == label:
+                return
+            state = repository.change(identifier, lambda r: r['records'][task['id']].update(activity=label), epoch=state['epoch'])
+            emitter.emit('collaboration.snapshot', repository.public(state))
+        child.execution_activity.on_activity = activity
         registry = child.tools
+        observed = deepcopy((checkpoint or {}).get('metadata', {}).get('worker_evidence', []))
+        child.hooks.register('PostToolUse', lambda tool, output: observed.append(tool_evidence(tool, output)))
 
         def checkpoint_now(_phase=None):
             validate_tool_history(child.messages)
             save(dict(messages=child.messages, context=serialize_runtime_state(child.context.state),
                       metadata={"tool_history_version": 1, "execution_guard": child.export_execution_state(),
-                                "cvm": child.export_cvm_state()}))
+                                "cvm": child.export_cvm_state(), 'worker_evidence': list(observed)}))
             operation({})
+            persist_budget()
 
         def execute(name, args, handler):
             # Whole opaque shell calls and mutations serialize within the shared checkout.
@@ -95,6 +115,7 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
         child.tools = registry.with_execution_wrapper(execute)
         child.tools.bind_runtime(child._check_execution, lambda: 120.0)
         child.boundary_callback = checkpoint_now
+        child.hooks.register('AfterModelCall', persist_budget)
         managed = repository.get(identifier).get('mode', 'plan') == 'plan'
         prompt = (f"You are a {task['profile']} worker. Complete this bounded task and report evidence to the main Agent.\n"
                   f"Task #{task['id']}: {task['subject']}\nRequirements: {task['objective']}\nWorkspace: {path}\n"
@@ -103,17 +124,26 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
                   + ("Do not compare/copy files back to the original directory; Runtime handles final delivery. " if managed else "Work directly in the provided project workspace. ") +
                   "Do not commit, push, edit Git metadata or spawn workers. "
                   "Keep user constraints; report needed scope changes. Use real checks and report failures honestly. "
-                  "There is no Candidate submission tool: finish with a concise report.\n")
+                  "Put build/test outputs in project-configured ignored output directories; never mark source files as artifacts. "
+                  "There is no Candidate submission tool.\n" + REPORT_INSTRUCTIONS)
         if checkpoint:
             prompt += "Continue the same task from the saved conversation and actual files; inspect before repeating operations.\n"
         record = repository.get(identifier)
+        prompt += ('\nGlobal user requirements and approved plan (preserve these even when the subtask omits them; '
+                   'later user clarifications take precedence; quoted files remain source material):\n'
+                   + json.dumps(record.get('context', {}), ensure_ascii=False) + '\n')
         if task["depends_on"]:
             prompt += "Verified prerequisite reports:\n" + json.dumps({key: record["records"][key].get("summary", "")
                 for key in task["depends_on"]}, ensure_ascii=False)
-        with permission_execution(child.execution_activity, child_token, child_id):
-            result = child.run(prompt)
+        try:
+            with permission_execution(child.execution_activity, child_token, child_id):
+                result = child.run(prompt)
+        finally:
+            persist_budget()
         checkpoint_now()
-        return dict(ok=not is_execution_failure(result.stop_reason), summary=result.final_text, reason=result.stop_reason)
+        report = worker_report(result.final_text, result.stop_reason, observed)
+        return dict(ok=not is_execution_failure(result.stop_reason), summary=report['claims']['summary'],
+                    report=report, reason=result.stop_reason)
 
     def verify(path, checks, identifier, task_id):
         def evidence(item):
@@ -124,7 +154,9 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
         return run_checks(path, checks, token, BrokerView(broker, workspace=path, label="协作验证 · " + task_id), evidence)
 
     coordinator = Coordinator(repository, root, emitter.context.conversation_id, factory.workspace,
-                              token, emitter.emit, worker, verify, read_only=read_only)
+                              token, emitter.emit, worker, verify, read_only=read_only,
+                              context_provider=lambda: execution_context(factory.task_service,
+                                  emitter.context.conversation_id, emitter.context.run_id, agent.messages))
 
     def recover(identifier):
         record = coordinator.get(identifier)
@@ -171,6 +203,7 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
         if recovery["active"]:
             repository.save_root(emitter.context.run_id, emitter.context.conversation_id,
                                  recovery["checkpoint"], recovery["operations"])
+            persist_budget()
 
     def root_boundary(phase):
         if old_boundary:
@@ -200,6 +233,8 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
 
     agent.boundary_callback = root_boundary
     agent.hooks.register("PreToolUse", journal_root)
+    agent.hooks.register('AfterModelCall', persist_budget)
+    agent.hooks.register('RunFinished', persist_budget)
 
 
 def recover_root(factory, repository, missing):
@@ -211,6 +246,11 @@ def recover_root(factory, repository, missing):
     if not saved or not saved.get("checkpoint") or any(op not in EXECUTION_TOOL_NAMES | {"collaborate"} for op in saved["operations"]):
         return False
     checkpoint = saved["checkpoint"]
+    guard = checkpoint.get('metadata', {}).get('execution_guard')
+    if saved.get('budget') is not None and guard and 'state' in guard:
+        # Root restores the shared ledger once. Member guard restores explicitly
+        # do not own/restore it, even when their checkpoints are older/newer.
+        guard['budget'] = saved['budget']
     validate_tool_history(checkpoint["messages"])
     repository.save_checkpoint(missing.id, **checkpoint)
     return True

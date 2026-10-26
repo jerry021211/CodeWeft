@@ -1,4 +1,6 @@
 import json
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import sys
 import tempfile
@@ -9,7 +11,7 @@ from unittest.mock import patch
 
 from codeagent import ModelResponse
 from codeagent.config import EnvironmentConfig
-from codeagent.events import EventEmitter, ExecutionContext, CallbackEventSink
+from codeagent.events import EventEmitter, ExecutionContext, CallbackEventSink, TokenUsage
 from codeagent.memory import MemoryConfig
 from codeagent.permissions import WaitingPermissionBroker
 from codeagent.runtime import CancellationToken
@@ -111,6 +113,75 @@ class NativeAdapterTests(unittest.TestCase):
         self.assertTrue(all(call['system'] == root.calls[0]['system'] for call in root.calls))
         snapshots = [e.payload for e in self.sink.events if e.type == 'collaboration.snapshot']
         self.assertEqual(snapshots[-1]['status'], 'completed')
+
+    def test_worker_receives_original_constraints_not_just_task_description(self):
+        key = self.create_task()
+        root = Client(tool_response('delegate_task', {'taskId': key}), text_response())
+        child = Client(text_response('inspected'))
+        requirement = 'Only use Python standard library. Preserve public API. Report in Chinese.'
+        with patch.object(EnvironmentConfig, 'create_model_client', side_effect=[root, child]):
+            self.agent(native_collaboration=True).run(requirement)
+        request = json.dumps(child.calls[0]['messages'], ensure_ascii=False)
+        self.assertIn(requirement, request)
+        record = ExecutionRepository(self.repo).list(self.conv.id, self.source)[0]
+        self.assertEqual(record['context']['requests'][0]['text'], requirement)
+
+    def test_native_worker_shares_budget_and_root_recovery_keeps_latest_usage(self):
+        key = self.create_task()
+        root = Client(tool_response('delegate_task', {'taskId': key}), text_response('reported'))
+        child = Client(text_response('inspection complete'))
+        for response in [*root.responses, *child.responses]:
+            response.usage = TokenUsage(input_tokens=10, output_tokens=2)
+        with patch.object(EnvironmentConfig, 'create_model_client', side_effect=[root, child, Client()]):
+            agent = self.agent(native_collaboration=True)
+            agent.run('Investigate using a worker')
+            budget = agent._loop_guard.budget
+            self.assertEqual(budget.state.model_calls, 3)
+            self.assertEqual(budget.state.total_tokens, 36)
+            repo = ExecutionRepository(self.repo)
+            saved = repo.load_root(self.run.id, self.conv.id)
+            self.assertEqual(saved['budget']['total_tokens'], 36)
+            # The safe root message checkpoint can precede the latest child usage.
+            saved['checkpoint']['metadata']['execution_guard']['budget']['total_tokens'] = 0
+            repo.save_root(self.run.id, self.conv.id, saved['checkpoint'], ['delegate_task'])
+            self.assertTrue(recover_root(self.factory, self.repo, self.run))
+            checkpoint = self.repo.get_latest_checkpoint(self.conv.id)
+            self.assertEqual(checkpoint.metadata['execution_guard']['budget']['total_tokens'], 36)
+            restored = self.agent(native_collaboration=True, checkpoint=checkpoint)
+            self.assertEqual(restored._loop_guard.budget.state.total_tokens, 36)
+
+    def test_member_checkpoint_cannot_reset_shared_budget_or_tool_admission(self):
+        with patch.object(EnvironmentConfig, 'create_model_client', return_value=Client()):
+            root = self.agent(native_collaboration=True)
+            root._loop_guard.budget.reserve('model')
+            guard = deepcopy(root.export_execution_state())
+            guard['budget']['model_calls'] = 999
+            checkpoint = SimpleNamespace(messages=[], context={}, metadata={'execution_guard': guard})
+            child = self.agent(native_worker=True, checkpoint=checkpoint,
+                execution_budget=root._loop_guard.budget, tool_admission=root.tool_admission)
+        self.assertIs(child._loop_guard.budget, root._loop_guard.budget)
+        self.assertIs(child.tool_admission, root.tool_admission)
+        child._loop_guard.begin('another-worker-scope')
+        self.assertEqual(root._loop_guard.budget.state.model_calls, 1)
+
+    def test_child_tokens_stop_the_root_before_another_model_call(self):
+        self.factory.env = replace(self.env,
+            loop_guard_config=replace(self.env.loop_guard_config, max_total_tokens=100))
+        key = self.create_task()
+        root_response = tool_response('delegate_task', {'taskId': key})
+        root_response.usage = TokenUsage(input_tokens=60, output_tokens=0)
+        child_response = text_response('inspected')
+        child_response.usage = TokenUsage(input_tokens=60, output_tokens=0)
+        root, child = Client(root_response, text_response('must not run')), Client(child_response)
+        with patch.object(EnvironmentConfig, 'create_model_client', side_effect=[root, child]):
+            agent = self.agent(native_collaboration=True)
+            result = agent.run('Investigate')
+        self.assertEqual(result.stop_reason, 'budget_exceeded:tokens')
+        self.assertEqual(len(root.calls), 1)
+        self.assertEqual(len(child.calls), 1)
+        self.assertEqual(agent._loop_guard.budget.state.total_tokens, 120)
+        saved = ExecutionRepository(self.repo).load_root(self.run.id, self.conv.id)
+        self.assertEqual(saved['budget']['total_tokens'], 120)
 
     def test_plan_mode_tool_cannot_start_write_task(self):
         key = self.create_task('write', profile='implement')

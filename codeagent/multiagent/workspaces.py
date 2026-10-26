@@ -10,6 +10,8 @@ from uuid import uuid4
 from codeagent.worktrees.files import safe_path, file_state
 from codeagent.worktrees.snapshots import LocalGit, exclusive_file
 from codeagent.worktrees.errors import WorktreeError
+from .leases import project_access
+from .artifacts import cache_paths
 
 
 class Workspaces:
@@ -22,6 +24,12 @@ class Workspaces:
         self.repo, self.id, self.check = repository, identifier, check
 
     def prepare(self):
+        if self.repo.get(self.id)['workspaces'].get('shared'):
+            return self._prepare()  # Existing isolated work needs no source-project lease.
+        with project_access(self.git.source, self.check):
+            return self._prepare()
+
+    def _prepare(self):
         record = self.repo.get(self.id)
         if record["workspaces"].get("shared"):
             path = Path(record["workspaces"]["shared"])
@@ -30,7 +38,11 @@ class Workspaces:
             return path
         self.check()
         self.git.ensure_repository()
-        base = record["workspaces"].get("base") or self.git.snapshot()["commit"]
+        base = record["workspaces"].get("base")
+        if not base:
+            snapshot = self.git.snapshot()
+            base = snapshot['commit']
+            self.repo.change(self.id, lambda r: r.setdefault('owned_refs', {}).update({snapshot['snapshot_ref']: base}))
         path = self.root / "shared"
         # Persist intent before creating Git's checkout. A restart after creation
         # can adopt this exact clean checkout instead of colliding with its path.
@@ -45,11 +57,20 @@ class Workspaces:
 
     def freeze(self, path, *, parent=None):
         record = self.repo.get(self.id)
-        tree = self.git.tree(Path(path))
+        tree = self.source_tree(path)
         commit = self.git.commit(tree, [parent or record["workspaces"]["accepted"]], "CodeAgent collaboration checkpoint")
         # Keep unreferenced snapshots reachable across Git maintenance/restarts.
-        self.git.run("update-ref", "refs/codeagent/native/" + uuid4().hex, commit)
+        ref = 'refs/codeagent/native/' + self.id + '/' + uuid4().hex
+        self.git.run("update-ref", ref, commit)
+        self.repo.change(self.id, lambda r: r.setdefault('owned_refs', {}).update({ref: commit}))
         return commit
+
+    def source_tree(self, path):
+        base = self.repo.get(self.id)['workspaces']['base']
+        artifacts = cache_paths(self.git, Path(path), base)
+        if artifacts:
+            self.repo.change(self.id, lambda r: r.setdefault('artifacts', {}).update({str(path): artifacts}))
+        return self.git.tree(Path(path), artifact_paths=artifacts)
 
     def worker_path(self, task):
         shared = self.prepare()
@@ -106,10 +127,12 @@ class Workspaces:
 
     def deliver(self, verify):
         """Validation and publication are separate; Git HEAD/index never move."""
-        with exclusive_file(self.root.parent / "delivery.lock"):
+        with project_access(self.git.source, self.check), exclusive_file(self.root.parent / "delivery.lock"):
             record = self.repo.get(self.id)
-            if record.get("delivery"):
-                return self.apply_delivery(record["delivery"])
+            # On resume, merge the actual local tree again. It can contain a
+            # subset of the previous delivery plus new user edits. Reusing the
+            # old manifest would permanently reject even unrelated new files.
+            # Keep the old intent until its replacement has passed validation.
             self.check()
             head, index = self.git.text("rev-parse", "HEAD"), self.git.index_hash()
             before = self.manifest()
@@ -121,7 +144,7 @@ class Workspaces:
             view = self.root / ("delivery-" + uuid4().hex[:8])
             self.git.add_worktree(view, commit)
             verify(view)
-            if self.git.tree(view) != self.git.text("rev-parse", commit + "^{tree}"):
+            if self.source_tree(view) != self.git.text("rev-parse", commit + "^{tree}"):
                 raise WorktreeError("Verification changed deliverable source; inspect the retained preview")
             if before != self.manifest() or head != self.git.text("rev-parse", "HEAD") or index != self.git.index_hash():
                 raise WorktreeError("Local files changed during verification; retry delivery")
@@ -147,7 +170,12 @@ class Workspaces:
                         item[label + "_file"] = str(saved)
                 files.append(item)
             intent = dict(head=head, index=index, before=before, files=files)
-            self.repo.change(self.id, lambda r: r.update(delivery=intent, status="delivering"))
+            def publish_intent(r):
+                if r.get('delivery'):
+                    r.setdefault('delivery_history', []).append(dict(
+                        disposition='superseded_after_revalidation', intent=r['delivery']))
+                r.update(delivery=intent, status='delivering')
+            self.repo.change(self.id, publish_intent)
             self.apply_delivery(intent)
 
     def apply_delivery(self, intent):

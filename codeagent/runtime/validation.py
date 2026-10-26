@@ -120,11 +120,12 @@ def diagnose(status, output):
 class ValidationRunner:
     """Cancellable checks shared by native execution and legacy integrations."""
 
-    def __init__(self, *, timeout=600, stopped=lambda: False):
+    def __init__(self, *, timeout=600, stopped=lambda: False, environment=None):
         self.validation_timeout = max(1, int(timeout))
         self.stopped = stopped
         self.validation_interrupted = False
         self.validation_cleanup_unknown = False
+        self.environment = dict(environment) if environment is not None else None
 
     def run(
         self, cwd: Path, command: str | dict[str, Any]
@@ -187,6 +188,7 @@ class ValidationRunner:
                 argv,
                 cwd=str(cwd),
                 stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                env={**os.environ, **self.environment} if self.environment is not None else None,
                 **options,
             )
             timed_out = False

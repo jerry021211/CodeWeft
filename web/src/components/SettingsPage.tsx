@@ -1,15 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Archive, ArrowLeft, Bot, Check, ChevronRight, Monitor, Moon, Plug, Settings2, Sun } from "lucide-react";
+import { Archive, ArrowLeft, Bot, Check, ChevronRight, Clock, Monitor, Moon, Plug, Settings2, Sun } from "lucide-react";
 import { cx } from "@/lib/utils";
 import type { Conversation } from "@/types/api";
 import { ModelSettingsPage } from "@/components/ModelSettingsPage";
 import { ArchivedConversationsPanel } from "@/components/ArchivedConversationsPanel";
+import { SchedulesPanel } from "@/components/SchedulesPanel";
 
 const sections = [
   { id: "general", label: "通用", icon: Settings2, description: "调整工作台的外观和使用偏好。" },
   { id: "models", label: "模型与能力", icon: Bot, description: "配置对话模型、语音识别和向量检索。" },
   { id: "mcp", label: "MCP 插件", icon: Plug, description: "管理项目使用的外部工具与服务。" },
   { id: "archived", label: "归档会话", icon: Archive, description: "查看已归档的聊天记录，或将会话恢复到原项目。" },
+  { id: "schedules", label: "定时任务", icon: Clock, description: "安排项目任务，自动执行并查看运行结果。" },
 ] as const;
 export type SettingsSection = typeof sections[number]["id"];
 export function settingsSectionFromHash(hash: string): SettingsSection | undefined {
@@ -55,6 +57,7 @@ export function SettingsPage({ section, onClose, theme, onThemeChange, onSaved, 
         {(modelsVisited || section === "models") && <div hidden={section !== "models"}><ModelSettingsPage embedded onClose={onClose} onSaved={onSaved} /></div>}
         {section === "mcp" && mcpPanel}
         {section === "archived" && <ArchivedConversationsPanel onRestored={onRestored} onDelete={onDelete} />}
+        {section === "schedules" && <SchedulesPanel onOpen={conversation => onRestored(conversation, true)} />}
       </div>
     </main>
   </div>;

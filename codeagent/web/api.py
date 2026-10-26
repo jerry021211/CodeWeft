@@ -208,6 +208,10 @@ def create_app(
                 validation_permission_check=getattr(scheduler, "authorize_team_validation", None),
             )
 
+    from codeagent.web.timed_scheduler import TimedScheduler
+    from codeagent.web.schedule_api import schedule_router
+    timed_scheduler = TimedScheduler(repo, scheduler, workspace_catalog)
+
     @asynccontextmanager
     async def lifespan(application: Any) -> AsyncIterator[None]:
         application.state.repository = repo
@@ -222,9 +226,11 @@ def create_app(
             recover_plans()
         if team_supervisor is not None:
             team_supervisor.start()
+        timed_scheduler.start()
         try:
             yield
         finally:
+            timed_scheduler.stop()
             try:
                 if team_supervisor is not None:
                     team_supervisor.stop()
@@ -247,6 +253,8 @@ def create_app(
     # lifespan (useful for introspection); execution still starts in lifespan.
     app.state.repository = repo
     app.state.scheduler = scheduler
+    app.state.timed_scheduler = timed_scheduler
+    app.include_router(schedule_router(repo, workspace_catalog))
     app.state.workspace = workspace_path
     app.state.environment = runtime_env
     app.state.team_supervisor = team_supervisor
@@ -625,6 +633,7 @@ def create_app(
     @app.get("/api/conversations/{conversation_id}/collaborations/{execution_id}/members/{task_id}")
     def collaboration_details(conversation_id: str, execution_id: str, task_id: str) -> dict[str, Any]:
         from codeagent.multiagent.executions import ExecutionRepository
+        from codeagent.multiagent.presentation import enrich
         from codeagent.events.redaction import redact_structured_content
         conversation = _require_conversation(repo, conversation_id)
         value = ExecutionRepository(repo).get(execution_id, conversation=conversation_id, workspace=conversation.workspace)
@@ -632,8 +641,26 @@ def create_app(
         if task is None and task_id != '$result':
             raise RecordNotFoundError('Unknown execution task')
         return redact_structured_content(dict(id=execution_id, revision=value['revision'], task=task,
-            record=value['records'].get(task_id, {}),
+            record=enrich(value)['records'].get(task_id, {}),
+            usage=ExecutionRepository(repo).usage(value, task_id if task else None),
             checks=[check for check in value.get('checks', []) if task_id == '$result' or check.get('task_id') == task_id]))
+
+    def collaboration_resources(conversation_id: str, execution_id: str):
+        from codeagent.multiagent.executions import ExecutionRepository
+        from codeagent.multiagent.maintenance import ExecutionResources
+        conversation = _require_conversation(repo, conversation_id)
+        executions = ExecutionRepository(repo)
+        executions.get(execution_id, conversation=conversation_id, workspace=conversation.workspace)
+        return ExecutionResources(executions, data_paths.workspace_dir(conversation.workspace) / 'collaborations', execution_id)
+
+    @app.get("/api/conversations/{conversation_id}/collaborations/{execution_id}/resources")
+    def inspect_collaboration_resources(conversation_id: str, execution_id: str):
+        return collaboration_resources(conversation_id, execution_id).inspect()
+
+    @app.post("/api/conversations/{conversation_id}/collaborations/{execution_id}/resources/archive")
+    def archive_collaboration_resources(conversation_id: str, execution_id: str,
+                                       retention_days: int = Query(default=30, ge=0, le=36500)):
+        return collaboration_resources(conversation_id, execution_id).archive(retention_days=retention_days)
 
     @app.get("/api/runs/{run_id}/activity")
     def run_activity(

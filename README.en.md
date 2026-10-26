@@ -97,6 +97,8 @@ Adapt the requests to the code in your project:
 
 ## Other ways to use CodeWeft
 
+**Scheduled tasks.** Open **Settings → Scheduled tasks** to run a prompt once at a specified time or repeatedly at a fixed interval. Pause or edit schedules and open their result conversations. Schedules persist locally and trigger while the backend is running. See the [scheduled task guide (Chinese)](docs/scheduled-tasks.md).
+
 **Command line.** For CLI-only use, create and activate a virtual environment in the CodeWeft repository, then install the core package with `python -m pip install -e .`. Node.js and the frontend build are not required. Keep that environment active, enter your target project directory, and configure your model using [Model services](docs/model-services.md) before running:
 
 ```bash

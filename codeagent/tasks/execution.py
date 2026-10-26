@@ -7,6 +7,16 @@ import re
 PROFILES = {"research", "implement", "review", "verify"}
 
 
+def validate_mode(mode, tasks):
+    """Apply the same workspace contract at creation, edits and every resume."""
+    if mode not in {'single', 'batch', 'plan'}:
+        raise ValueError('Unknown execution mode')
+    if mode == 'single' and len(tasks) != 1 or mode == 'batch' and len(tasks) > 5:
+        raise ValueError('Task count exceeds the selected execution mode; use execute_plan for a larger plan')
+    if mode != 'plan' and any(t.get('isolation') == 'isolated' for t in tasks):
+        raise ValueError('Use execute_plan for explicitly isolated workspaces')
+
+
 def paths(values):
     if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
         raise ValueError("Paths must be an array of repository-relative strings")
@@ -102,6 +112,9 @@ def guard_task_update(connection, task_list_id, task_id, changes):
                 continue
             if run['status'] in {'running', 'verifying', 'delivering'} or record.get('inflight'):
                 raise ValueError('Task is executing; stop execution before changing its inputs')
+            if key == str(task_id) and 'execution' in changes.get('metadata', {}):
+                config = validate_execution_metadata(changes['metadata'])
+                validate_mode(run.get('mode', 'plan'), [config] + [{}] * (len(run['task_ids']) - 1))
             if record['status'] == 'accepted':
                 current = json.loads(connection.execute('SELECT metadata_json FROM tasks WHERE task_list_id=? AND id=?',
                                                         (task_list_id, key)).fetchone()[0])

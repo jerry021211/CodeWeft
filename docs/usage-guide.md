@@ -589,6 +589,9 @@ RECOVERY_SIDE_QUERY_MAX_RETRIES=2
 
 ## 按需能力：Skill Loading
 
+项目提供 12 个可安装的开发技能和遵循评测，见[技能库与评测](skills.md)。
+使用 `python -m codeagent.skills install` 安装到已配置的全局库，已有同名目录保持不变。
+
 默认启用两级 Skill Loading：
 
 - 所有项目、工作区及 Team Worktree 共用同一份全局技能库，不扫描项目内的 `.skills`。

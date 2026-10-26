@@ -3,9 +3,12 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from codeagent.multiagent.coordinator import Coordinator
 from codeagent.multiagent.executions import ExecutionRepository
@@ -96,6 +99,109 @@ class TaskDelegationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'completed', result)
         self.assertEqual((self.root / 'a.txt').read_text(), 'direct')
         self.assertFalse((self.root / '.git').exists())
+
+    def test_two_conversations_serialize_the_entire_direct_write(self):
+        other = self.db.create_conversation(workspace=self.root)
+        other_list = self.db.ensure_conversation_task_list(other.id)
+        second = self.db.create_task(other_list.id, subject='second', description='increment',
+            metadata={'execution': {'profile': 'implement', 'files': ['counter.txt']}}).task.id
+        first = self.task('first', profile='implement', files=['counter.txt'])
+        counter = self.root / 'counter.txt'
+        counter.write_text('0')
+        entered, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        def worker(t, path, *_):
+            value = int(counter.read_text())
+            if t['subject'] == 'first':
+                entered.set()
+                self.assertTrue(release.wait(5))
+            counter.write_text(str(value + 1))
+            return {'ok': True, 'summary': 'incremented'}
+        def emit(kind, value):
+            if (value.get('issue') or {}).get('owner') == 'runtime':
+                waiting.set()
+        c1 = self.runtime(worker)
+        c2 = Coordinator(self.repo, self.root / 'another-runtime', other.id, self.root,
+            CancellationToken(), emit, worker, lambda *a: None)
+        with ThreadPoolExecutor(2) as pool:
+            one = pool.submit(c1.start, 'g', [first], mode='single')
+            try:
+                self.assertTrue(entered.wait(5))
+                two = pool.submit(c2.start, 'g', [second], mode='single')
+                self.assertTrue(waiting.wait(5))
+                self.assertEqual(counter.read_text(), '0')
+            finally:
+                release.set()
+            self.assertEqual(one.result(5)['status'], 'completed')
+            self.assertEqual(two.result(5)['status'], 'completed')
+        self.assertEqual(counter.read_text(), '2')
+
+    def test_project_lease_wait_can_be_cancelled(self):
+        from codeagent.multiagent.leases import project_access
+        from codeagent.runtime.cancellation import CancelledError
+        token = CancellationToken()
+        with project_access(self.root, lambda: None):
+            with self.assertRaises(CancelledError):
+                with project_access(self.root, token.raise_if_cancelled, lambda: token.cancel('stop waiting')):
+                    self.fail('must not enter another live project lease')
+        with project_access(self.root, lambda: None):
+            pass
+
+    def test_project_lease_is_shared_across_processes_and_released_on_exit(self):
+        from codeagent.multiagent.leases import project_access
+        from codeagent.runtime.cancellation import CancelledError
+        script = '''
+import sys
+from codeagent.multiagent.leases import project_access
+with project_access(sys.argv[1], lambda: None):
+    print('owned', flush=True)
+    sys.stdin.read(1)
+'''
+        process = subprocess.Popen([sys.executable, '-c', script, str(self.root)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), 'owned')
+            token = CancellationToken()
+            with self.assertRaises(CancelledError):
+                with project_access(self.root, token.raise_if_cancelled, lambda: token.cancel('stop')):
+                    self.fail('another process still owns this project')
+            # Simulate service termination, including exit without a normal lease release.
+            process.terminate()
+            process.communicate(timeout=5)
+            with project_access(self.root, lambda: None):
+                pass
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+    def test_append_rechecks_mode_and_isolation_without_partial_changes(self):
+        first = self.task('first', profile='implement', files=['a.txt'])
+        isolated = self.task('isolated', profile='implement', files=['b.txt'], isolation='isolated')
+        value = self.repo.create(self.conv.id, self.root, 'goal', [first], mode='batch')
+        with self.assertRaisesRegex(ValueError, 'execute_plan'):
+            self.repo.append_tasks(value['id'], [isolated])
+        self.assertEqual(self.repo.get(value['id'])['task_ids'], [first])
+        extra = [self.task(str(i)) for i in range(5)]
+        with self.assertRaisesRegex(ValueError, 'Task count'):
+            self.repo.append_tasks(value['id'], extra)
+        self.assertEqual(self.repo.get(value['id'])['task_ids'], [first])
+        self.runtime(lambda *a: None).close(value['id'])
+        single = self.repo.create(self.conv.id, self.root, 'goal', [extra[0]], mode='single')
+        with self.assertRaisesRegex(ValueError, 'Task count'):
+            self.repo.append_tasks(single['id'], [extra[1]])
+
+    def test_task_edit_and_legacy_resume_cannot_drop_isolation(self):
+        key = self.task('first', profile='implement', files=['a.txt'])
+        value = self.repo.create(self.conv.id, self.root, 'goal', [key], mode='single')
+        metadata = {'execution': {'profile': 'implement', 'files': ['a.txt'], 'isolation': 'isolated'}}
+        with self.assertRaisesRegex(ValueError, 'execute_plan'):
+            self.db.update_task(self.tl.id, key, changes={'metadata': metadata})
+        # Simulate a record produced by an older runtime that lacked the edit gate.
+        with self.db._transaction(immediate=True) as connection:
+            connection.execute('UPDATE tasks SET metadata_json=? WHERE task_list_id=? AND id=?',
+                               (json.dumps(metadata), self.tl.id, key))
+        with self.assertRaisesRegex(ValueError, 'execute_plan'):
+            self.runtime(lambda *a: self.fail('must not run in original directory')).run(value['id'])
 
     def test_execution_owned_task_cannot_be_completed_by_a_worker_before_validation(self):
         key = self.task('A')

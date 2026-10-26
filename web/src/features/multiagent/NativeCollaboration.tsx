@@ -61,6 +61,7 @@ function CollaborationCard({run, relatedRuns, snapshot, onContinue, sync}: Props
   }, [selected, conversationId, snapshot.id, snapshot.revision, snapshot.details_available, detailAttempt]);
   const contentId = useId();
   const tasks = collaborationTasks(snapshot), records = asRecord(snapshot.records), issue = asRecord(snapshot.issue);
+  const recovery = asRecord(snapshot.recovery);
   const done = tasks.filter(task => ["accepted", "completed"].includes(String(asRecord(records[String(task.id)]).status))).length;
   const phase = phaseOf(run, snapshot);
   const mode = snapshot.mode === "single" ? "单任务委派" : snapshot.mode === "batch" ? "批量委派" : "计划执行";
@@ -87,13 +88,17 @@ function CollaborationCard({run, relatedRuns, snapshot, onContinue, sync}: Props
         <span>点击成员查看执行链路 · 与任务面板共用任务编号</span><span>按依赖分列，实际并行由调度决定</span>
       </div>
     </div>}
-    {asString(issue.reason) && <div className="m-3 rounded-xl bg-amber-500/10 p-3 text-xs text-ink"><strong>{issue.owner === "user" ? "等待继续" : isRunActive(run.status) ? "主 Agent 正在处理" : "需要主 Agent 继续处理"}</strong><p className="mt-1 whitespace-pre-wrap break-words">{asString(issue.reason)}</p></div>}
+    {asString(issue.reason) && <div className="m-3 rounded-xl bg-amber-500/10 p-3 text-xs text-ink"><strong>{issue.owner === "runtime" ? "等待项目写入" : issue.owner === "user" ? "等待继续" : isRunActive(run.status) ? "主 Agent 正在处理" : "需要主 Agent 继续处理"}</strong><p className="mt-1 whitespace-pre-wrap break-words">{asString(issue.reason)}</p></div>}
     {(phase === "unconfirmed" || sync?.error) && <div role="status" className="m-3 rounded-xl bg-surface-strong p-3 text-xs text-ink-muted">
       {sync?.error ? "状态同步失败，当前显示最后已知进度。" : sync?.syncing ? "正在核对后台执行状态…" : "尚未确认最新执行状态，不代表任务已暂停。"}
       {sync && <button type="button" onClick={sync.retry} className={cx("ml-2 rounded text-accent", focus)}>重新同步</button>}
     </div>}
-    {!isRunActive(run.status) && ["paused", "blocked"].includes(String(snapshot.status)) && onContinue && <button type="button" className={cx("mb-3 ml-4 rounded-full border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface-strong", focus)}
-      onClick={() => onContinue(`请使用 AgentRunStatus 检查执行 ${snapshot.id}，必要时用 TaskUpdate 修正未完成任务，再使用 AgentResumeRun 从保留进度继续，不要重复创建任务。`)}>继续这次协作</button>}
+    {!isRunActive(run.status) && ["paused", "blocked"].includes(String(snapshot.status)) && onContinue && <div className="px-4 pb-3">
+      {asString(recovery.reason) && <p className="mb-2 text-xs text-ink-muted">{asString(recovery.reason)}</p>}
+      <button type="button" className={cx("rounded-full border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface-strong", focus)}
+        onClick={() => onContinue(`请使用 AgentRunStatus 检查执行 ${snapshot.id}；如果有结果未知的操作，先使用 AgentRecoverRun 核对现场并完成恢复确认。必要时用 TaskUpdate 修正未完成任务，再使用 AgentResumeRun 从保留进度继续，不要重复创建任务。`)}>{recovery.required ? '检查现场并恢复' : '继续这次协作'}</button>
+    </div>}
+    {snapshot.status === "closed" && asString(snapshot.closure_note) && <p className="px-4 pb-3 pt-2 text-xs text-ink-muted">{asString(snapshot.closure_note)}</p>}
     {snapshot.status === "completed" && <p className="px-4 pb-3 pt-2 text-xs text-ink-muted">{snapshot.mode === "single" || snapshot.mode === "batch" ? "成员结果已返回，任务状态已更新；具体验证情况见报告。" : "计划执行已完成；如有代码成果，已回写本地并保留为未提交修改。"}</p>}
     {(canvas || selected) && <CollaborationDialog wide={canvas} title={canvas ? "协作任务图" : selected === "$result" ? "验证与交付" : "成员执行链路"}
       onClose={() => {setCanvas(false); setSelected(undefined);}}>
@@ -179,6 +184,9 @@ export function MemberExecutionPanel({run, runs = [run], snapshot, detail, taskI
   const [showAll, setShowAll] = useState(false);
   const task = detail?.task ? asRecord(detail.task) : collaborationTasks(snapshot).find(task => task.id === taskId);
   const record = detail?.record ? asRecord(detail.record) : asRecord(asRecord(snapshot.records)[taskId]);
+  const report = asRecord(record.report), claims = asRecord(report.claims);
+  const usage = asRecord(detail?.usage);
+  const toolEvidence = Array.isArray(report.tool_evidence) ? report.tool_evidence.map(asRecord) : [];
   const phase = task ? memberPhase(run, snapshot, taskId) : deliveryPhase(run, snapshot);
   const traces = useMemo(() => task ? runs.map(item => {
     const view = memberTrace(item, snapshot, taskId);
@@ -197,7 +205,23 @@ export function MemberExecutionPanel({run, runs = [run], snapshot, detail, taskI
       {task && dependencies(task).length > 0 && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-muted">前置任务：{dependencies(task).map(id => <button type="button" key={id} onClick={() => onSelect?.(id)} className={cx("rounded border border-line px-2 py-1 hover:text-accent", focus)}>#{id}</button>)}</div>}
     </div>
     {asString(record.reason) && <p className="rounded-xl bg-surface-strong p-3 text-xs leading-5 text-ink-muted">{asString(record.reason)}</p>}
-    {asString(record.summary) && <section><h4 className="mb-2 text-xs font-semibold text-ink">成员报告</h4><div className="markdown break-words rounded-xl border border-line p-3 text-sm"><ReactMarkdown remarkPlugins={[remarkGfm]}>{asString(record.summary)}</ReactMarkdown></div></section>}
+    {!task && <ExecutionResourcePanel key={String(snapshot.id)} conversationId={run.events.find(event => event.conversation_id)?.conversation_id} executionId={String(snapshot.id)} />}
+    {detail?.usage !== undefined && <section className="rounded-xl border border-line p-3 text-xs">
+      <h4 className="font-semibold text-ink">{task ? '当前成员累计用量' : '全部成员累计用量'}</h4>
+      <p className="mt-1 leading-5 text-ink-muted">包含恢复后的调用，不含主 Agent；按调用记录统计，刷新不重复累计。未配置价格，暂不估算金额。</p>
+      <dl className="mt-3 grid grid-cols-2 gap-2 text-ink-muted">
+        <dt>模型调用</dt><dd>{Number(usage.model_calls ?? 0).toLocaleString()}</dd>
+        <dt>已记录 Token</dt><dd>{Number(usage.available_calls ?? 0) ? Number(usage.total_tokens ?? 0).toLocaleString() : '暂无用量数据'}</dd>
+        <dt>缓存读取 Token</dt><dd>{Number(usage.available_calls ?? 0) ? Number(usage.cache_read_input_tokens ?? 0).toLocaleString() : '未知'}</dd>
+        <dt>输出 Token</dt><dd>{Number(usage.available_calls ?? 0) ? Number(usage.output_tokens ?? 0).toLocaleString() : '未知'}</dd>
+      </dl>
+      {Number(usage.unavailable_calls ?? 0) > 0 && <p className="mt-2 text-amber-600">{Number(usage.unavailable_calls)} 次调用未返回用量，以上 Token 并非完整总量。</p>}
+    </section>}
+    {asString(record.summary) && <section><h4 className="mb-2 text-xs font-semibold text-ink">成员报告 · 模型说明</h4><div className="markdown break-words rounded-xl border border-line p-3 text-sm"><ReactMarkdown remarkPlugins={[remarkGfm]}>{asString(record.summary)}</ReactMarkdown></div></section>}
+    {([['changes', '修改说明'], ['checks', '成员自述检查'], ['limitations', '未验证与待处理']] as const).map(([key, title]) => Array.isArray(claims[key]) && claims[key].length > 0 && <section key={key}>
+      <h4 className="mb-2 text-xs font-semibold text-ink">{title}</h4><ul className="list-inside list-disc space-y-1 text-xs text-ink-muted">{(claims[key] as unknown[]).map((item, i) => <li key={i}>{asString(item)}</li>)}</ul>
+    </section>)}
+    {Boolean(report.version) && <p className="rounded-xl bg-surface-strong p-3 text-xs leading-5 text-ink-muted">运行时记录 {toolEvidence.length} 次工具结果；成员自述不等于独立验证。{report.verification === 'passed' ? '已通过任务声明的阶段检查，记录见下方。' : '独立检查尚未通过或未声明，不能视为完整验收。'}</p>}
     {task && <section><h4 className="mb-3 text-xs font-semibold text-ink">执行链路 · {entries.length} 项活动</h4>
       {entries.length > 30 && <button type="button" className={cx("mb-3 rounded text-xs text-accent", focus)} onClick={() => setShowAll(value => !value)}>{showAll ? "仅显示最近 30 项" : `展开全部 ${entries.length} 项活动`}</button>}
       <ol className="process-trace space-y-4">{visible.map(({entry, active, key}) => <ProcessStep key={key} entry={{...entry, agentLabel: undefined}} active={active} />)}</ol>
@@ -212,4 +236,34 @@ export function MemberExecutionPanel({run, runs = [run], snapshot, detail, taskI
       </details>)}</div>
     </section>
   </div>;
+}
+
+export function ExecutionResourcePanel({conversationId, executionId}: {conversationId?: string; executionId: string}) {
+  const [resources, setResources] = useState<Record<string, unknown>>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [retentionDays, setRetentionDays] = useState(30);
+  async function load(archive = false) {
+    if (!conversationId || busy) return;
+    setBusy(true); setError('');
+    try { setResources(await api.collaborationResources(conversationId, executionId, archive, retentionDays)); }
+    catch (error) { setError(error instanceof Error ? error.message : '无法读取工作目录'); }
+    finally { setBusy(false); }
+  }
+  return <section className="rounded-xl border border-line p-3 text-xs leading-5 text-ink-muted">
+    <h4 className="font-semibold text-ink">协作工作目录</h4>
+    <p className="mt-1">仅清理已完成或已关闭的执行。先保存并校验归档，再释放工作目录；原项目和任务记录保留。归档仍占用磁盘，暂停和失败现场不会自动删除。</p>
+    <button type="button" disabled={busy || !conversationId} onClick={() => void load()} className={cx('mt-2 rounded border border-line px-3 py-1 disabled:opacity-50', focus)}>{busy ? '处理中…' : '查看工作目录占用'}</button>
+    {resources && <div className="mt-3 space-y-2">
+      <p>{(Number(resources.bytes ?? 0) / 1048576).toFixed(2)} MB · {Number(resources.files ?? 0)} 个文件 · {asString(resources.reason)}</p>
+      {Boolean(resources.archive) && <p className="break-all">归档：{asString(asRecord(resources.archive).path)}</p>}
+      {Boolean(resources.can_archive) && <>
+        <label className="flex items-center gap-2">保留期限<select value={retentionDays} onChange={event => setRetentionDays(Number(event.target.value))} className="rounded border border-line bg-surface p-1">
+          <option value={30}>结束满 30 天后可清理</option><option value={7}>结束满 7 天后可清理</option><option value={0}>立即归档清理</option>
+        </select></label>
+        <button type="button" disabled={busy} onClick={() => void load(true)} className={cx('rounded border border-line px-3 py-1 text-accent disabled:opacity-50', focus)}>归档并清理工作目录</button>
+      </>}
+    </div>}
+    {error && <p role="alert" className="mt-2 text-amber-600">{error}</p>}
+  </section>;
 }

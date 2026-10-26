@@ -35,6 +35,8 @@ from codeagent.memory import MemoryAccessController, MemoryWriteBlocked
 from codeagent.permissions import PermissionPolicy, WaitingPermissionBroker
 from codeagent.runtime import CancellationToken, RuntimeDataPaths
 from codeagent.runtime.activity import ExecutionActivity
+from codeagent.runtime.execution import RunBudget
+from codeagent.runtime.parallel import Admission
 from codeagent.tools import LoadContextHistoryTool, LoadToolOutputTool, TodoWriteTool, ToolRegistry, WorkspaceGuard
 from codeagent.web.questions import WebUserQuestions
 from codeagent.tools.search_code import SearchCodeTool
@@ -102,6 +104,8 @@ class WebAgentFactory:
         reasoning_effort: str | None = None,
         native_collaboration: bool = False,
         native_worker: bool = False,
+        execution_budget: RunBudget | None = None,
+        tool_admission: Admission | None = None,
     ) -> Agent:
         if team_attempt is not None and team_session is None:
             raise ValueError(
@@ -389,6 +393,8 @@ class WebAgentFactory:
             read_only=read_only,
             plan_mode=plan_mode,
             cvm_task_refs=(task_list.id,),
+            execution_budget=execution_budget,
+            tool_admission=tool_admission,
         )
         if checkpoint is not None and team_session is None and not team_planner:
             guard_state = getattr(checkpoint, "metadata", {}).get("execution_guard")

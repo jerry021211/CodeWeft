@@ -13,17 +13,20 @@
 | 委派子任务，执行依赖计划，查看验证与恢复结果 | [多 Agent 协作](collaboration.md) |
 | 了解只读保护与本地数据边界 | [只读权限](usage-guide.md#只读权限) |
 | 管理同时运行的会话 | [多会话并发](concurrent-sessions.md) |
+| 按指定时间或固定间隔自动执行项目任务 | [定时任务](scheduled-tasks.md) |
 
 ## 理解和扩展
 
 | 主题 | 文档 |
 | --- | --- |
 | 运行流程、模块职责与源码阅读顺序 | [项目架构](architecture.md) |
+| 修改代码后自动更新前端和重启后端 | [开发热更新](hot-reload.md) |
 | 关键词、符号、结构化代码和可选向量检索 | [代码检索](code-search.md) |
 | 工具结果分页、归档与原文回读 | [工具输出策略](tool-output-policy.md) |
 | 上下文预算、摘要和历史投影 | [上下文管理](context-management-porting.md) · [摘要提示词](context-summary-prompts.md) |
 | 读取并行与普通运行时的只读子 Agent | [普通 Agent 并行](parallel-execution.md) |
 | 长期记忆的保存和召回 | [记忆检索](memory-retrieval.md) |
+| 安装开发技能、测试触发与流程遵循 | [技能库与评测](skills.md) |
 | 防循环、取消、重试和执行预算 | [执行预算](loop-guard.md) |
 | 缓存组装与观测 | [缓存优化](cache-optimization.md) · [DeepSeek 前缀缓存](deepseek-prefix-cache.md) |
 | 原生协作、共享运行时和旧 Team 的代码边界 | [多 Agent 目录](multiagent-layout.md) |

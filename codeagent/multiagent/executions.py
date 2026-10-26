@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import ENGINE
-from codeagent.tasks.execution import task_input, validate_plan
+from codeagent.tasks.execution import task_input, validate_plan, validate_mode
 
 
 def fingerprint(task):
@@ -25,6 +25,30 @@ def code_fingerprint(task):
 class ExecutionRepository:
     def __init__(self, service):
         self.service = service
+
+    def recover_interrupted(self):
+        """Reconcile persisted native executions once at service startup.
+
+        Keep checkpoints and uncertain operations intact: restarting the service
+        grants neither permission to replay writes nor permission to auto-resume.
+        """
+        with self.service._transaction(immediate=True) as db:
+            rows = db.execute('SELECT id,data FROM agent_executions').fetchall()
+            for row in rows:
+                value = json.loads(row['data'])
+                if value['status'] not in {'pending', 'running', 'verifying', 'delivering'}:
+                    continue
+                before = deepcopy(value)
+                unknown = bool(value.get('runtime_unknown')) or any(
+                    r.get('inflight', {}).get('effect') == 'write' for r in value['records'].values())
+                value.update(status='blocked' if unknown else 'paused',
+                    epoch=value.get('epoch', 0) + 1, revision=value.get('revision', 0) + 1,
+                    updated_at=datetime.now(UTC).isoformat(),
+                    issue=dict(owner='user', reason=(
+                        '服务重启中断了协作；有写入结果尚未确认，请检查现场后恢复。' if unknown else
+                        '服务重启中断了协作，工作现场已保留；可继续执行。')))
+                self._project_progress(db, before, value)
+                db.execute('UPDATE agent_executions SET data=? WHERE id=?', (json.dumps(value), row['id']))
 
     def inputs(self, task_list_id, task_ids, *, read_only=False, validate=True):
         if not isinstance(task_ids, list) or not task_ids or len(set(task_ids)) != len(task_ids):
@@ -40,15 +64,10 @@ class ExecutionRepository:
         return validate_plan(tasks, read_only=read_only) if validate else tasks
 
     def create(self, conversation, workspace, objective, task_ids, *, read_only=False, mode="plan"):
-        if mode not in {'single', 'batch', 'plan'}:
-            raise ValueError('Unknown execution mode')
-        if mode == 'single' and len(task_ids) != 1 or mode == 'batch' and len(task_ids) > 5:
-            raise ValueError('Task count exceeds the selected execution mode')
         task_list = self.service.ensure_conversation_task_list(conversation)
         with self.service._transaction(immediate=True) as db:
             tasks = self.inputs(task_list.id, task_ids, read_only=read_only)
-            if mode != 'plan' and any(t['isolation'] == 'isolated' for t in tasks):
-                raise ValueError('Use execute_plan for explicitly isolated workspaces')
+            validate_mode(mode, tasks)
             if any(r['status'] not in {'completed', 'closed'} for r in self.list(conversation, workspace)):
                 raise ValueError("Continue or close the existing execution before starting another")
             for row in db.execute('SELECT data FROM agent_executions WHERE task_list_id=?', (task_list.id,)):
@@ -101,6 +120,7 @@ class ExecutionRepository:
             added = [key for key in task_ids if key not in value['task_ids']]
             all_ids = value['task_ids'] + added
             tasks = self.inputs(value['task_list_id'], all_ids, read_only=value['read_only'])
+            validate_mode(value.get('mode', 'plan'), tasks)
             for task in tasks:
                 if task['id'] not in added:
                     continue
@@ -167,13 +187,35 @@ class ExecutionRepository:
 
     @staticmethod
     def public(value):
+        from .presentation import enrich
+        value = enrich(value)
         return {key: value.get(key) for key in ('id', 'engine', 'objective', 'status', 'revision',
-                'task_list_id', 'mode', 'tasks', 'records', 'issue', 'checks', 'updated_at')}
+                'task_list_id', 'mode', 'tasks', 'records', 'issue', 'checks', 'updated_at', 'closure_note', 'recovery')}
+
+    def usage(self, value, task_id=None):
+        keys = [task_id] if task_id is not None else value['task_ids']
+        actors = [value['records'][key].get('member_id') or value['id'] + '_' + key for key in keys]
+        return self.service.aggregate_usage(conversation_id=value['conversation'], agent_ids=actors)
 
     def save_root(self, run, conversation, checkpoint, operations):
         with self.service._transaction(immediate=True) as db:
+            if not db.execute('SELECT 1 FROM runs WHERE id=? AND conversation_id=?', (run, conversation)).fetchone():
+                raise ValueError('Recovery owner no longer exists')
+            previous = self.load_root(run, conversation) or {}
             db.execute('INSERT OR REPLACE INTO agent_root_recovery VALUES (?,?,?)',
-                       (run, conversation, json.dumps(dict(checkpoint=checkpoint, operations=operations))))
+                       (run, conversation, json.dumps(dict(checkpoint=checkpoint, operations=operations,
+                                                           budget=previous.get('budget')))))
+
+    def save_budget(self, run, conversation, budget):
+        with self.service._transaction(immediate=True) as db:
+            value = self.load_root(run, conversation)
+            if value is None:
+                return
+            # Take the shared snapshot inside the transaction, so concurrent
+            # member checkpoints cannot persist an older ledger over a newer one.
+            value['budget'] = budget.snapshot()
+            db.execute('UPDATE agent_root_recovery SET data=? WHERE run=? AND conversation=?',
+                       (json.dumps(value), run, conversation))
 
     def load_root(self, run, conversation):
         with self.service._lock:

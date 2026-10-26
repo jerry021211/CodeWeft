@@ -156,6 +156,31 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(persisted.payload['status'], 'completed')
         self.assertEqual(persisted.payload['revision'], before_revision)
 
+    def test_resource_maintenance_is_scoped_terminal_only_and_explicit(self):
+        from codeagent.multiagent.executions import ExecutionRepository
+        conversation = self.repository.create_conversation(workspace=self.workspace)
+        other = self.repository.create_conversation(workspace=self.workspace)
+        tl = self.repository.ensure_conversation_task_list(conversation.id)
+        task = self.repository.create_task(tl.id, subject='a', description='a')
+        executions = ExecutionRepository(self.repository)
+        value = executions.create(conversation.id, self.workspace, 'goal', [task.task.id])
+        suffix = f"/collaborations/{value['id']}/resources"
+        url = f'/api/conversations/{conversation.id}{suffix}'
+        executions.change(value['id'], lambda r: (r.update(status='running'), r['records'][task.task.id].update(status='running', activity='permission_waiting')))
+        detail = self.client.get(f"/api/conversations/{conversation.id}/collaborations/{value['id']}/members/{task.task.id}").json()
+        self.assertIn('审批卡片', detail['record']['reason'])
+        self.assertFalse(self.client.get(url).json()['can_archive'])
+        self.assertNotEqual(self.client.post(url + '/archive?retention_days=0').status_code, 200)
+        self.assertNotEqual(self.client.get(f'/api/conversations/{other.id}{suffix}').status_code, 200)
+        self.assertNotEqual(self.client.post(f'/api/conversations/{other.id}{suffix}/archive?retention_days=0').status_code, 200)
+        executions.change(value['id'], lambda r: r.update(status='closed'))
+        self.assertTrue(self.client.get(url).json()['can_archive'])
+        self.assertNotEqual(self.client.post(url + '/archive').status_code, 200)  # Default retention: 30 days.
+        response = self.client.post(url + '/archive?retention_days=0')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(Path(response.json()['archive']['path']).exists())
+        self.assertEqual(self.client.post(url + '/archive?retention_days=0').json(), response.json())
+
     def test_personal_todo_snapshots_include_clears_and_are_conversation_scoped(self):
         conversation = self.repository.create_conversation(workspace=self.workspace)
         other = self.repository.create_conversation(workspace=self.workspace)

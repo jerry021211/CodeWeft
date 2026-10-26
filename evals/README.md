@@ -10,6 +10,8 @@
 
 | 套件 | 验证什么 | 无模型调用入口 | 说明 |
 | --- | --- | --- | --- |
+| `skills` | 技能选择、加载、关键步骤与修复产物 | `python -m evals.skills --mode offline` | [技能库与评测](../docs/skills.md)；17 例，离线不计模型成绩，live 使用有上限的真实调用 |
+| `web_concurrency` | Web 接收、排队、执行槽位、事件与会话隔离 | `python -m evals.web_concurrency` | [并发测试指南](../docs/concurrency-benchmark.md)；进程内 ASGI + 模拟 Agent，不代表真实模型容量 |
 | C01 最小任务 | 读取、编辑、独立验收与证据保存 | `python -m evals run --mode offline` | [本页 C01 说明](#c01-最小-agent-评测) |
 | `context_suite` | 固定历史续答、摘要与请求投影 | `python -m evals.context_suite run --mode offline` | [操作指南](../docs/context-evaluation-walkthrough.md) · [材料包](../docs/context-evaluation-kit.md) |
 | `context_journey` | 多轮需求变化、压缩后的连续任务保持 | `python -m evals.context_journey run --mode offline` | [连续任务指南](../docs/context-journey-walkthrough.md) |

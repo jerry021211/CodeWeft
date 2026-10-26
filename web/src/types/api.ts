@@ -547,3 +547,32 @@ export type PlanningSnapshot = {
   state: { mode: "off" | "planning"; target: "single" | "team"; active_plan_id?: string };
   plans: PlanDocument[];
 };
+export interface ScheduledTaskInput {
+  name: string;
+  workspace: string;
+  prompt: string;
+  kind: "once" | "interval";
+  run_at: string;
+  interval_seconds: number | null;
+  read_only: boolean;
+  enabled: boolean;
+}
+
+export interface ScheduledTask extends ScheduledTaskInput {
+  id: string;
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduleOccurrence {
+  id: string;
+  schedule_id: string;
+  scheduled_at: string;
+  claimed_at: string;
+  status: "dispatching" | "submitted" | "skipped" | "failed" | "interrupted";
+  run_status: string | null;
+  error: string | null;
+  conversation_id: string | null;
+  run_id: string | null;
+}

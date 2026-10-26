@@ -33,3 +33,6 @@ codeagent-web = "codeagent.web.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["codeagent*"]
+
+[tool.setuptools.package-data]
+"codeagent.skills" = ["library/*/SKILL.md"]

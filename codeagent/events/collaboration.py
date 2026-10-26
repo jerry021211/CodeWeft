@@ -11,7 +11,13 @@ def compact_snapshot(value):
     for key in ('id', 'engine', 'task_list_id', 'mode', 'status'):
         result[key] = text(value.get(key), 128)
     result['objective'] = text(value.get('objective'), 256)
+    if value.get('closure_note'):
+        result['closure_note'] = text(value['closure_note'], 256)
     result['details_available'] = True
+    if value.get('recovery'):
+        recovery = value['recovery']
+        result['recovery'] = dict(required=bool(recovery.get('required')), action=text(recovery.get('action'), 32),
+                                  reason=text(recovery.get('reason'), 256))
     result['tasks'], result['records'] = [], {}
     for task in tasks[:32]:
         key = text(task.get('id'), 64)

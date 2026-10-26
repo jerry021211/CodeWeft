@@ -21,6 +21,49 @@ const event = (revision, status) => ({id: `${revision}`, type: "collaboration.sn
   id: "c", revision, status, objective: "检查订单", tasks: [{id: "a", objective: "验证事务", profile: "verify"}],
   records: {a: {status: "running", attempts: 1}},
 }});
+test('member claims and observed checks stay distinct even when the model claims success', () => {
+  const snapshot = event(1, 'blocked').payload;
+  snapshot.records.a = {status: 'reported', attempts: 1, summary: '实现完成', report: {
+    version: 1, claims: {changes: ['module.py: 新增函数'], checks: ['模型声称全部通过'], limitations: ['未运行浏览器测试']},
+    verification: 'not_run', tool_evidence: [{tool: 'bash', status: 'error', exit_code: 1}],
+  }};
+  snapshot.checks = [{task_id: 'a', command: 'python test.py', status: 'failed', output: 'AssertionError'}];
+  const html = renderToStaticMarkup(createElement(MemberExecutionPanel, {
+    run: {status: 'completed', events: []}, snapshot, taskId: 'a',
+  }));
+  assert.match(html, /成员报告 · 模型说明/);
+  assert.match(html, /成员自述检查/);
+  assert.match(html, /未运行浏览器测试/);
+  assert.match(html, /成员自述不等于独立验证/);
+  assert.match(html, /AssertionError/);
+  assert.doesNotMatch(html, /已通过任务声明的阶段检查/);
+});
+test('unknown operation offers inspection while a normal pause offers continuation', () => {
+  const item = event(4, 'blocked');
+  item.payload.recovery = {required: true, action: 'inspect', reason: '结果未知，不会自动重放命令'};
+  const html = renderToStaticMarkup(createElement(NativeCollaboration, {
+    run: {status: 'interrupted', events: [item]}, onContinue() {},
+  }));
+  assert.match(html, /检查现场并恢复/);
+  assert.match(html, /不会自动重放命令/);
+  assert.doesNotMatch(html, /继续这次协作/);
+});
+
+test('member usage labels missing data and excludes root; resources only appear on delivery', () => {
+  const snapshot = event(4, 'completed').payload;
+  const props = {run: {status: 'completed', events: []}, snapshot,
+    detail: {usage: {model_calls: 3, available_calls: 2, unavailable_calls: 1, total_tokens: 123, cache_read_input_tokens: 50}}};
+  const member = renderToStaticMarkup(createElement(MemberExecutionPanel, {...props, taskId: 'a'}));
+  assert.match(member, /当前成员累计用量/);
+  assert.match(member, /不含主 Agent/);
+  assert.match(member, /并非完整总量/);
+  assert.doesNotMatch(member, /查看工作目录占用/);
+  const result = renderToStaticMarkup(createElement(MemberExecutionPanel, {...props, taskId: '$result'}));
+  assert.match(result, /全部成员累计用量/);
+  assert.match(result, /查看工作目录占用/);
+  assert.match(result, /暂停和失败现场不会自动删除/);
+  assert.doesNotMatch(result, /归档并清理工作目录/); // Requires an explicit resource fetch first.
+});
 test("replay takes newest persisted revision, including out of order duplicates", () => {
   const values = nativeSnapshots({events: [event(2, "completed"), event(1, "running"), event(2, "completed")]});
   assert.equal(values.length, 1);
@@ -74,6 +117,32 @@ test("failure displays evidence and main Agent ownership in the conversation", (
   assert.match(html, /主 Agent 正在处理/);
   assert.match(html, /测试命令返回 1/);
   assert.doesNotMatch(html, /继续这次协作/);
+});
+
+test("startup reconciliation enables continue and runtime leases are not presented as approvals", () => {
+  const stale = event(1, 'running');
+  const paused = {...stale.payload, revision: 2, status: 'paused', records: {a: {status: 'paused'}}};
+  const html = renderToStaticMarkup(createElement(NativeCollaboration, {
+    run: {status: 'interrupted', events: [stale]}, onContinue() {},
+    sync: {snapshots: [paused], error: false, syncing: false, retry() {}},
+  }));
+  assert.match(html, /继续这次协作/);
+  assert.doesNotMatch(html, /等待核对状态|animate-spin/);
+  const waiting = event(3, 'running');
+  waiting.payload.issue = {owner: 'runtime', reason: '同一项目有其他协作正在写入，等待其完成后继续。'};
+  const queued = renderToStaticMarkup(createElement(NativeCollaboration, {run: {status: 'running', events: [waiting]}}));
+  assert.match(queued, /等待项目写入/);
+  assert.doesNotMatch(queued, /主 Agent 正在处理|等待继续/);
+});
+
+test("abandoned delivery explains retained files without offering resume", () => {
+  const closed = event(4, 'closed');
+  closed.payload.closure_note = '已回写文件与用户修改均保留，剩余交付已停止。';
+  const html = renderToStaticMarkup(createElement(NativeCollaboration, {
+    run: {status: 'completed', events: [closed]}, onContinue() {},
+  }));
+  assert.match(html, /已回写文件与用户修改均保留/);
+  assert.doesNotMatch(html, /继续这次协作|计划执行已完成/);
 });
 
 test("delegation uses original Task identity and does not claim managed writeback", () => {

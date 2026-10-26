@@ -33,7 +33,7 @@ npm --prefix web ci
 第一个终端启动后端：
 
 ```bash
-python -m codeagent.web.cli --workspace . --port 8765
+python -m codeagent.web.cli --workspace . --port 8765 --reload
 ```
 
 第二个终端启动前端：
@@ -42,7 +42,9 @@ python -m codeagent.web.cli --workspace . --port 8765
 npm.cmd --prefix web run dev
 ```
 
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。开发服务器将 `/api` 代理到本机 `8765`；后端代码变更后需重启后端。macOS / Linux 将 `npm.cmd` 换成 `npm`。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。开发服务器将 `/api` 代理到本机 `8765`；React/样式保存后由 Vite 热更新，`codeagent/` 中的 Python 源码保存后自动重启后端。macOS / Linux 将 `npm.cmd` 换成 `npm`。
+
+`--reload` 仅用于开发，默认关闭；重启会中断运行中的 Agent 任务，记录按原有持久化和恢复规则处理，不保证无损续跑。监听范围是 CodeWeft 的 `codeagent/` 源码目录，不是 `--workspace` 指定的业务项目，也不监听日志、数据库、`web/dist/` 或 `.env`。详情见 [开发热更新](docs/hot-reload.md)。
 
 也可运行 `npm.cmd --prefix web run build`，由后端提供构建后的界面。该命令已包含 TypeScript 检查。
 

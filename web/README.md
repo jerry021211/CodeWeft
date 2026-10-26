@@ -10,7 +10,7 @@
 
 ```powershell
 python -m pip install -e ".[web]"
-python -m codeagent.web.cli --workspace . --port 8765
+python -m codeagent.web.cli --workspace . --port 8765 --reload
 ```
 
 另开一个终端，在仓库根目录安装前端依赖并启动 Vite：
@@ -21,6 +21,7 @@ npm.cmd --prefix web run dev
 ```
 
 打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。Vite 将 `/api` 代理到 `http://127.0.0.1:8765`，开发时无需先生成 `web/dist/`。
+保存 React/样式后由现有 Vite 热更新；`--reload` 使后端在 `codeagent/` 的 Python 源码变化后自动重启。后端重启会中断正在执行的任务；正常使用时去掉该开关。监听边界、配置与恢复说明见 [开发热更新](../docs/hot-reload.md)。
 macOS / Linux 使用 `npm`。代理目标和固定开发端口在 [`vite.config.ts`](vite.config.ts) 中配置。
 首次启动可以通过 **设置 → 模型与能力** 配置模型；设置表单将密钥提交给后端，读取配置时只返回密钥是否已保存，
 普通运行界面使用脱敏的 `/api/runtime-config`，不从前端环境变量加载模型凭据。
