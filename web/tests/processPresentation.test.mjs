@@ -154,3 +154,19 @@ test("unknown and cancelled model outcomes remain visible", () => {
   assert.equal(result.summary.unknownCount, 1);
   assert.equal(result.entries[0].error, "实际结果未知");
 });
+
+
+test("execution failure output is not replaced by an earlier approval reason", () => {
+  const failure = "Ref f3e10 not found in the current page snapshot";
+  const events = [
+    event(1, "approval.requested", { tool_use_id: "click", reason: "External MCP tool call" }),
+    event(2, "approval.allowed", { tool_use_id: "click" }),
+    event(3, "tool.started", { tool_use_id: "click" }),
+    event(4, "tool.failed", { tool_use_id: "click", output: { preview: failure, chars: failure.length, truncated: false } }),
+  ];
+  const result = buildProcessPresentation(run([action("click", "mcp__browser__browser_click", {}, { status: "failed", output: { preview: failure, chars: failure.length, truncated: false } })], events));
+  assert.equal(result.entries[0].error, failure);
+  const denied = buildProcessPresentation(run([action("click", "mcp__browser__browser_click", {}, { status: "blocked" })],
+    [event(1, "tool.blocked", { tool_use_id: "click", reason: "Permission denied by user" })]));
+  assert.equal(denied.entries[0].error, "Permission denied by user");
+});

@@ -12,6 +12,7 @@
 | 先调查、提交方案，再批准执行 | [规划模式](plan-mode.md) |
 | 委派子任务，执行依赖计划，查看验证与恢复结果 | [多 Agent 协作](collaboration.md) |
 | 了解只读保护与本地数据边界 | [只读权限](usage-guide.md#只读权限) |
+| 选择请求批准、自动审批或完全访问 | [工具审批模式](usage-guide.md#工具审批模式) |
 | 管理同时运行的会话 | [多会话并发](concurrent-sessions.md) |
 | 按指定时间或固定间隔自动执行项目任务 | [定时任务](scheduled-tasks.md) |
 

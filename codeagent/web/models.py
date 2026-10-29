@@ -30,6 +30,7 @@ class ConversationRecord(RecordMixin):
     updated_at: str
     archived_at: str | None = None
     active_task_list_id: str | None = None
+    approval_mode: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,5 @@
 export type Identifier = string;
+export type ApprovalMode = "ask" | "auto" | "full";
 
 export type Attachment = { name: string; media_type: string; data: string };
 
@@ -30,6 +31,7 @@ export type RunStatus =
   | "interrupted";
 
 export type Conversation = {
+  approval_mode?: ApprovalMode;
   id: Identifier;
   title: string;
   workspace: string;
@@ -387,6 +389,7 @@ export type McpServer = {
   error?: string | null;
   startup_timeout: number;
   call_timeout: number;
+  browser_session_supported?: boolean;
   lifecycle?: "shared" | "execution";
 };
 
@@ -578,3 +581,16 @@ export interface ScheduleOccurrence {
   conversation_id: string | null;
   run_id: string | null;
 }
+export type BrowserSession = {
+  id: string;
+  server: string;
+  control: "agent" | "pausing" | "human" | "resuming" | "error" | "closing" | "closed";
+  started: boolean;
+  busy: boolean;
+  headless: boolean;
+  title: string;
+  url: string;
+  updated_at: number | null;
+  error: string;
+  idle_timeout_seconds: number;
+};

@@ -182,7 +182,7 @@ export function buildProcessPresentation(run: RunViewState, options: { finalAnsw
       infos.set(key, {
         seq: Math.min(previous?.seq ?? event.seq, event.seq),
         type,
-        reason: stringFrom(payload, "reason", "error", "message") ?? previous?.reason,
+        reason: stringFrom(payload, "reason", "error", "message") ?? (type === "tool_failed" || type === "tool_completed" ? undefined : previous?.reason),
         callKind: stringFrom(payload, "call_kind") ?? previous?.callKind,
         stopReason: stringFrom(payload, "stop_reason") ?? previous?.stopReason,
         output: payload.output ?? payload.result ?? previous?.output,

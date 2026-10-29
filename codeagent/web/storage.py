@@ -276,7 +276,8 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             archived_at TEXT,
-            active_task_list_id TEXT
+            active_task_list_id TEXT,
+            approval_mode TEXT NOT NULL DEFAULT 'auto'
         );
 
         CREATE TABLE IF NOT EXISTS runs (
@@ -912,6 +913,10 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
                 self._connection.execute(
                     "ALTER TABLE conversations ADD COLUMN active_task_list_id TEXT"
                 )
+            if "approval_mode" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE conversations ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'auto'"
+                )
             dependency_columns = {
                 str(row["name"])
                 for row in self._connection.execute(
@@ -1090,6 +1095,102 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
             ) from exc
         return self._require_conversation(identifier)
 
+    def fork_conversation(
+        self, conversation_id: str, message_id: str, *, regenerate: bool = False,
+    ) -> tuple[ConversationRecord, dict[str, Any] | None]:
+        """Copy a completed turn boundary, with independent IDs and recovery history.
+
+        Workspace files are shared. Live tasks, approvals and execution guards are
+        deliberately not inherited: a conversation branch is not a workspace rewind.
+        """
+        identifier, task_list_id = _new_id("conv"), _new_id("tasklist")
+        now = utc_now_iso()
+        retry = None
+        with self._transaction(immediate=True) as connection:
+            source = self._require_conversation(conversation_id)
+            rows = connection.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid",
+                (conversation_id,),
+            ).fetchall()
+            index = next((i for i, row in enumerate(rows) if row["id"] == message_id), None)
+            if index is None:
+                raise RecordNotFoundError("Message not found in this conversation")
+            target = rows[index]
+            run = self.get_run(target["run_id"]) if target["run_id"] else None
+            if target["role"] != "assistant" or run is None or run.status != "completed":
+                raise StorageConflictError("只能从已完成的回复创建分支，请等待当前轮次结束。")
+            if run.metadata.get("requested_mode") == "team":
+                raise StorageConflictError("团队回复暂不支持分支，请在普通会话中使用。")
+            if any(row["run_id"] == run.id for row in rows[index + 1:]):
+                raise StorageConflictError("请从这一轮的最后一条回复创建分支。")
+            cutoff = index + 1
+            if regenerate:
+                prompt_index = next((i for i, row in enumerate(rows[:index])
+                                     if row["run_id"] == run.id and row["role"] == "user"), None)
+                if prompt_index is None:
+                    raise StorageConflictError("找不到这一轮的用户消息，无法重新生成。")
+                prompt = rows[prompt_index]
+                if json.loads(prompt["metadata_json"]).get("attachments"):
+                    raise StorageConflictError("这条消息包含附件，请重新附加文件后发送，避免遗漏附件内容。")
+                if run.metadata.get("approved_plan_id"):
+                    raise StorageConflictError("方案执行回复不能直接重新生成，请在新消息中说明需要调整的内容。")
+                retry = {
+                    "content": json.loads(prompt["content_json"]),
+                    "readOnly": bool(run.metadata.get("read_only", False)),
+                    "webSearch": bool(run.metadata.get("web_search_enabled", False)),
+                    "reasoningEffort": run.metadata.get("reasoning_effort") or "default",
+                    "planMode": bool(run.metadata.get("plan_mode", False)),
+                    **({"approvalMode": run.metadata["approval_mode"]}
+                       if run.metadata.get("approval_mode") is not None else {}),
+                }
+                cutoff = prompt_index
+            retained = rows[:cutoff]
+            run_ids = list(dict.fromkeys(row["run_id"] for row in retained if row["run_id"]))
+            checkpoints = {old: self.get_checkpoint_for_run(old) for old in run_ids}
+            if run_ids and checkpoints[run_ids[-1]] is None:
+                raise StorageConflictError("这段历史缺少恢复快照，无法安全继承上下文。")
+            if retained and not run_ids:
+                raise StorageConflictError("这段历史没有可用的运行快照，无法创建分支。")
+            title = source.title[:190] + " · 分支"
+            connection.execute(
+                "INSERT INTO conversations(id, title, workspace, created_at, updated_at, active_task_list_id, approval_mode) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (identifier, title, source.workspace, now, now, task_list_id,
+                 (retry or {}).get("approvalMode") or "auto"),
+            )
+            connection.execute(
+                "INSERT INTO task_lists(id, workspace, name, scope, origin_conversation_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (task_list_id, source.workspace, f"{title} tasks", TaskListScope.CONVERSATION_PRIVATE.value, identifier, now, now),
+            )
+            mapping = {old: _new_id("run") for old in run_ids}
+            for old, new in mapping.items():
+                original = self._require_run(old)
+                if original.status not in TERMINAL_RUN_STATUSES:
+                    raise StorageConflictError("历史中仍有运行中的任务，请等待结束后再创建分支。")
+                metadata = {key: value for key, value in original.metadata.items() if key in (
+                    "read_only", "web_search_enabled", "reasoning_effort", "plan_mode", "requested_mode", "approved_plan_id", "approval_mode")}
+                metadata["forked_from_run_id"] = old
+                connection.execute(
+                    "INSERT INTO runs(id, conversation_id, status, created_at, updated_at, finished_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (new, identifier, original.status, original.created_at, now, now, _json_dumps(metadata)),
+                )
+                checkpoint = checkpoints[old]
+                if checkpoint is not None:
+                    self._upsert_checkpoint(
+                        connection, checkpoint_id=_new_id("checkpoint"), conversation_id=identifier,
+                        run_id=new, run_status=checkpoint.run_status, messages=checkpoint.messages,
+                        todos=[], context={**checkpoint.context, "runtime_reminders": {},
+                                           "prompt_snapshot": {}, "request_view": {}, "current_turn_start": -1},
+                        metadata={key: value for key, value in checkpoint.metadata.items()
+                                                       if key in ("tool_history_version", "native_collaboration", "native_tools_version")},
+                        created_at=checkpoint.created_at,
+                    )
+            for row in retained:
+                connection.execute(
+                    "INSERT INTO messages(id, conversation_id, run_id, role, content_json, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (_new_id("msg"), identifier, mapping.get(row["run_id"]), row["role"], row["content_json"], row["metadata_json"], row["created_at"]),
+                )
+        return self._require_conversation(identifier), retry
+
     def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
         with self._lock:
             self._ensure_open()
@@ -1143,6 +1244,7 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
         *,
         title: str | object = _UNSET,
         archived: bool | object = _UNSET,
+        approval_mode: str | object = _UNSET,
     ) -> ConversationRecord:
         assignments = ["updated_at = ?"]
         parameters: list[Any] = [utc_now_iso()]
@@ -1155,8 +1257,23 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
         if archived is not _UNSET:
             assignments.append("archived_at = ?")
             parameters.append(utc_now_iso() if bool(archived) else None)
+        if approval_mode is not _UNSET:
+            from codeagent.permissions.policy import APPROVAL_MODES
+            if approval_mode not in APPROVAL_MODES:
+                raise ValueError("Unknown approval mode")
+            assignments.append("approval_mode = ?")
+            parameters.append(approval_mode)
         parameters.append(conversation_id)
         with self._transaction(immediate=True) as connection:
+            if approval_mode is not _UNSET:
+                if (self.list_runs(conversation_id=conversation_id, statuses=ACTIVE_RUN_STATUSES)
+                        or self.get_active_team_run_for_conversation(conversation_id) is not None
+                        or connection.execute(
+                            "SELECT 1 FROM agent_executions WHERE conversation=? "
+                            "AND json_extract(data, '$.status') IN ('running','verifying','delivering') LIMIT 1",
+                            (conversation_id,),
+                        ).fetchone()):
+                    raise StorageConflictError("请先停止当前执行，再切换审批模式。")
             cursor = connection.execute(
                 f"UPDATE conversations SET {', '.join(assignments)} WHERE id = ?",
                 parameters,
@@ -9305,6 +9422,7 @@ def _row_to_conversation(row: sqlite3.Row) -> ConversationRecord:
         updated_at=str(row["updated_at"]),
         archived_at=row["archived_at"],
         active_task_list_id=row["active_task_list_id"],
+        approval_mode=str(row["approval_mode"]),
     )
 
 

@@ -1,9 +1,12 @@
+import { ApprovalModeMenu } from "@/components/ApprovalModeMenu";
+import type { ApprovalMode } from "@/types/api";
 import { ArrowUp, Brain, ChevronDown, FileText, Globe, Plus, Square, X } from "lucide-react";
 import { cx } from "@/lib/utils";
 import { Spinner } from "@/components/ui";
 import { ComposerModeMenu } from "@/components/ComposerModeMenu";
 
 type Props = {
+  approvalMode?: ApprovalMode; approvalSaving?: boolean; onApprovalModeChange?: (mode: ApprovalMode) => void;
   planMode?: boolean; planLocked?: boolean; onPlanModeChange?: (value: boolean) => void;
   busy: boolean; active: boolean; cancelling: boolean; sending?: boolean; canSend: boolean;
   readOnly?: boolean; useTeam?: boolean; teamEnabled?: boolean; teamLeadActive?: boolean;
@@ -26,6 +29,7 @@ export function ComposerToolbar(props: Props) {
       <ComposerModeMenu mode={mode} busy={props.busy} teamEnabled={props.teamEnabled} teamLeadActive={props.teamLeadActive} teamState={props.teamState}
         planMode={props.planMode} planLocked={props.planLocked} onPlanModeChange={props.onPlanModeChange}
         onModeChange={value => { props.onReadOnlyChange(value === "read"); props.onTeamChange?.(value === "team"); }} />
+      <ApprovalModeMenu value={props.approvalMode} disabled={props.busy || props.approvalSaving || props.teamLeadActive || props.planLocked} onChange={props.onApprovalModeChange} />
       {props.planMode && <span className="mx-1 inline-flex h-6 items-center gap-1.5 rounded-md bg-accent/10 px-2 text-[11px] font-medium text-accent">
         <FileText className="size-3" aria-hidden="true" />规划
         {props.useTeam ? <span className="text-[10px] font-normal opacity-70">自动</span> : <button type="button" aria-label="退出规划模式"

@@ -1,3 +1,4 @@
+import type { ApprovalMode } from "@/types/api";
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Sparkles, Sun, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -21,8 +22,13 @@ import { ComposerToolbar } from "@/components/ComposerToolbar";
 import { ComposerTeamStatus } from "@/components/ComposerTeamStatus";
 import { AttachmentPicker, type AttachmentPickerHandle } from "@/components/AttachmentPicker";
 import type { Attachment } from "@/types/api";
+import { MessageActions } from "@/components/MessageActions";
+import { quoteMessage } from "@/lib/messageActions";
 
 type Props = {
+  approvalMode?: ApprovalMode; approvalSaving?: boolean; onApprovalModeChange?: (mode: ApprovalMode) => void;
+  messageActionBusy?: boolean;
+  onForkMessage?: (message: Message, regenerate: boolean) => void;
   collaborationSync?: CollaborationSync;
   teams?: TeamSnapshot[];
   team?: TeamSnapshot;
@@ -91,7 +97,7 @@ export function ChatWorkspace(props: Props) {
   const [following, setFollowing] = useState(true);
   const [attachmentsReading, setAttachmentsReading] = useState(false);
   const active = isRunActive(props.run?.status);
-  const busy = Boolean(active || props.sending || props.loading);
+  const busy = Boolean(active || props.sending || props.loading || props.approvalSaving);
   const attachmentDisabled = Boolean(busy || props.useTeam || props.teamLeadActive);
   const teamPaused = ["pausing", "paused"].includes(props.team?.team.state ?? "");
   const teamProgress = teamExecutionState(props.team);
@@ -198,7 +204,9 @@ export function ChatWorkspace(props: Props) {
               {props.messages.map((message) => (
                 <Fragment key={message.id}>
                   {anchors.before[message.id]?.map(process)}
-                  <ChatMessage message={message} />
+                  <ChatMessage message={message} actionBusy={busy || props.messageActionBusy}
+                    onQuote={() => { props.onDraft(quoteMessage(props.draft, message.content)); inputRef.current?.focus(); }}
+                    onFork={props.onForkMessage && message.run_id ? regenerate => props.onForkMessage?.(message, regenerate) : undefined} />
                   {anchors.after[message.id]?.map(process)}
                 </Fragment>
               ))}
@@ -241,7 +249,7 @@ export function ChatWorkspace(props: Props) {
             aria-label="发送消息"
             className="scrollbar-thin min-h-[76px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
           />
-          <ComposerToolbar planMode={props.planMode} planLocked={props.planLocked} onPlanModeChange={props.onPlanModeChange} busy={busy} active={active} cancelling={Boolean(props.cancelling || props.run?.status === "cancelling")}
+          <ComposerToolbar approvalMode={props.approvalMode} approvalSaving={props.approvalSaving} onApprovalModeChange={props.onApprovalModeChange} planMode={props.planMode} planLocked={props.planLocked} onPlanModeChange={props.onPlanModeChange} busy={busy} active={active} cancelling={Boolean(props.cancelling || props.run?.status === "cancelling")}
             sending={props.sending} canSend={canSend} readOnly={props.readOnly} useTeam={props.useTeam} teamEnabled={props.teamEnabled} teamLeadActive={props.teamLeadActive} teamState={teamProgress.waitingRecovery ? "recovery_waiting" : props.team?.team.state}
             runtimeModel={props.runtimeModel} reasoningEffort={props.reasoningEffort} reasoningOptions={props.reasoningOptions} reasoningDefault={props.reasoningDefault}
             webSearch={props.webSearch} webSearchAvailable={props.webSearchAvailable} attachmentDisabled={attachmentDisabled} attachmentsReading={attachmentsReading}
@@ -256,9 +264,15 @@ export function ChatWorkspace(props: Props) {
   );
 }
 
-export const ChatMessage = memo(function ChatMessage({ message }: { message: Message }) {
+export const ChatMessage = memo(function ChatMessage({ message, onQuote, onFork, actionBusy }: {
+  message: Message; onQuote?: () => void; onFork?: (regenerate: boolean) => void; actionBusy?: boolean;
+}) {
   const user = message.role === "user";
   const attachments = Array.isArray(message.metadata?.attachments) ? message.metadata.attachments as { name: string }[] : [];
+  // Action callbacks change with the draft; do not reparse long replies on each keystroke.
+  const answer = useMemo(() => message.role === "assistant" ? (
+    <div className="markdown answer-markdown text-ink"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>{message.status === "streaming" && <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-middle motion-reduce:animate-none" />}</div>
+  ) : null, [message.role, message.content, message.status]);
   if (message.role === "system") return <div className="mx-auto max-w-lg rounded-full border border-line bg-surface-muted px-3 py-1 text-center text-[10px] text-ink-muted">{message.content}</div>;
   return (
     <article className={cx("flex gap-3", user && "justify-end")}>
@@ -267,10 +281,9 @@ export const ChatMessage = memo(function ChatMessage({ message }: { message: Mes
         {user ? (
           <><p className="whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>
             {attachments.length > 0 && <p className="mt-1 text-xs opacity-70">附件：{attachments.map(item => item.name).join("、")}</p>}</>
-        ) : (
-          <div className="markdown answer-markdown text-ink"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>{message.status === "streaming" && <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-accent align-middle motion-reduce:animate-none" />}</div>
-        )}
+        ) : answer}
         <div className={cx("mt-1 text-[9px]", user ? "text-user-bubble-ink/55" : "text-ink-faint")}>{formatTime(message.created_at)}</div>
+        {!user && message.content.trim() && message.status !== "streaming" && <MessageActions content={message.content} onQuote={onQuote} onFork={onFork} busy={actionBusy} />}
       </div>
     </article>
   );

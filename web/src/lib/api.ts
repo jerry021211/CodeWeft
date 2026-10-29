@@ -1,4 +1,6 @@
+import type { ApprovalMode } from "@/types/api";
 import type {
+  BrowserSession,
   ScheduledTask,
   ScheduledTaskInput,
   ScheduleOccurrence,
@@ -64,6 +66,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  browserSessions(conversationId: string) {
+    return request<BrowserSession[]>(`/conversations/${encodeURIComponent(conversationId)}/browsers`);
+  },
+  browserAction(conversationId: string, sessionId: string, action: "takeover" | "handback" | "close") {
+    return request<BrowserSession>(`/conversations/${encodeURIComponent(conversationId)}/browsers/${encodeURIComponent(sessionId)}/${action}`, { method: "POST" });
+  },
   listSchedules() {
     return request<ScheduledTask[]>("/schedules");
   },
@@ -187,6 +195,12 @@ export const api = {
     });
   },
 
+  forkConversation(conversationId: string, messageId: string, regenerate = false) {
+    return request<{ conversation: Conversation; retry: { content: string; readOnly: boolean; webSearch: boolean; reasoningEffort: string; planMode: boolean; approvalMode?: ApprovalMode | null } | null }>(`/conversations/${encodeURIComponent(conversationId)}/fork`, {
+      method: "POST", body: JSON.stringify({ message_id: messageId, regenerate }),
+    });
+  },
+
   listWorkspaces(path?: string, query?: string) {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
@@ -198,7 +212,7 @@ export const api = {
     return request<Conversation>(`/conversations/${encodeURIComponent(id)}`);
   },
 
-  updateConversation(id: string, patch: { title?: string; archived?: boolean }) {
+  updateConversation(id: string, patch: { title?: string; archived?: boolean; approval_mode?: ApprovalMode }) {
     return request<Conversation>(`/conversations/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
@@ -236,10 +250,10 @@ export const api = {
     });
   },
 
-  createRun(conversationId: string, content: string, useTeam = false, readOnly = false, webSearch = false, reasoningEffort?: string, attachments: Attachment[] = [], planMode?: boolean) {
+  createRun(conversationId: string, content: string, useTeam = false, readOnly = false, webSearch = false, reasoningEffort?: string, attachments: Attachment[] = [], planMode?: boolean, approvalMode?: ApprovalMode | null) {
     return request<CreateRunResponse>(`/conversations/${encodeURIComponent(conversationId)}/runs`, {
       method: "POST",
-      body: JSON.stringify({ content, useTeam, readOnly, webSearch, reasoningEffort, attachments, ...(planMode ? { planMode: true } : {}) }),
+      body: JSON.stringify({ content, useTeam, readOnly, webSearch, reasoningEffort, attachments, approvalMode, ...(planMode ? { planMode: true } : {}) }),
     });
   },
 

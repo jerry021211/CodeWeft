@@ -24,6 +24,7 @@ from codeagent.mcp.config import McpServerConfig, load_mcp_servers
 from codeagent.mcp.sessions import execution_lease
 from codeagent.mcp.trust import McpTrustStore, resolved_server, server_fingerprint
 from codeagent.runtime.cancellation import CancelledError
+from codeagent.runtime.execution import ExecutionStopped
 from codeagent.runtime.data_paths import RuntimeDataPaths
 from codeagent.tools import ToolDefinition, ToolRegistry
 from codeagent.tools.base import ToolOutput
@@ -78,16 +79,18 @@ class McpRouter:
     def __init__(self, config_path: str | Path = "mcp.json", *,
                  workspace_root: str | Path | None = None, force_workspace_cwd: bool = False,
                  session_workspace: str | Path | None = None,
+                 servers: list[McpServerConfig] | None = None,
                  trust_checker: Callable[[McpServerConfig], bool] | None = None) -> None:
         if force_workspace_cwd and workspace_root is None:
             raise ValueError("force_workspace_cwd requires workspace_root")
         self.workspace_root = Path(workspace_root or Path(config_path).resolve().parent).resolve()
         self.force_workspace_cwd = bool(force_workspace_cwd)
-        self.servers = [resolved_server(item) for item in load_mcp_servers(config_path)]
+        self.servers = [resolved_server(item) for item in (load_mcp_servers(config_path) if servers is None else servers)]
         self._leases = {server.name: execution_lease(Path(session_workspace or self.workspace_root), server.name)
                         for server in self.servers if server.lifecycle == 'execution'}
         self._invocations: dict[str, set[asyncio.Task]] = {}
         self._transport_closed: dict[str, bool] = {}
+        self._transport_closing: dict[str, bool] = {}
         store = McpTrustStore(RuntimeDataPaths.default().root / 'state' / 'mcp-trust.db')
         self._trust_checker = trust_checker or (lambda server: store.is_trusted(self.workspace_root, server))
         self._clients: dict[str, Client] = {}
@@ -117,6 +120,18 @@ class McpRouter:
         with self._lifecycle_lock:
             return {key: dict(value) for key, value in self._states.items()}
 
+    def read_only_approval(self, name: str, arguments: dict[str, Any]) -> bool:
+        from codeagent.mcp.approval import browser_read_allowed
+        with self._lifecycle_lock:
+            if self._retired or self._closed:
+                return False
+            tool = next((item for item in self._tools if item.definition.name == name), None)
+            if tool is None:
+                return False
+            server = next((item for item in self.servers if item.name == tool.server), None)
+            return bool(server and self._trust_checker(server)
+                        and browser_read_allowed(server, tool.remote_name, arguments))
+
     def start(self, *, cancellation_check: Callable[[], None] = lambda: None) -> None:
         cancellation_check()
         with self._lifecycle_lock:
@@ -142,12 +157,13 @@ class McpRouter:
         if self._startup_error is not None:
             raise RuntimeError(f"MCP startup failed: {self._startup_error}") from self._startup_error
 
-    def register_tools(self, registry: ToolRegistry, *, cancellation_check=lambda: None) -> None:
+    def register_tools(self, registry: ToolRegistry, *, cancellation_check=lambda: None, adapt=None) -> None:
         self.start(cancellation_check=cancellation_check)
         # Stable schemas and separate runtime bindings for every Agent/run.
         owner = object()
         for tool in sorted(self._tools, key=lambda item: item.definition.name):
-            registry.register(tool.isolated_copy(owner))
+            copied = tool.isolated_copy(owner)
+            registry.register(adapt(copied) if adapt else copied)
 
     def list_tools(self) -> list[str]:
         self.start()
@@ -174,7 +190,8 @@ class McpRouter:
                 return
             previous = self._tasks.get(server.name)
             if previous is not None:
-                previous.cancel()
+                if not self._transport_closing.get(server.name, False):
+                    previous.cancel()
                 await asyncio.gather(previous, return_exceptions=True)
             ready = asyncio.Event()
             self._tasks[server.name] = asyncio.create_task(self._serve(server, ready))
@@ -221,7 +238,7 @@ class McpRouter:
                 except FutureTimeout:
                     if future.done():
                         raise
-        except CancelledError as exc:
+        except (CancelledError, ExecutionStopped) as exc:
             if lease is not None:
                 lease.invalidate(owner, self)
             future.cancel()  # Cancels the SDK request task, without closing other calls/connections.
@@ -281,7 +298,8 @@ class McpRouter:
             await asyncio.gather(*calls, return_exceptions=True)
             task = self._tasks.get(server)
             if task is not None and not task.done():
-                task.cancel()
+                if not self._transport_closing.get(server, False):
+                    task.cancel()
                 await task
             elif task is None or self._transport_closed.get(server, False):
                 self._leases[server].released(self)
@@ -290,9 +308,11 @@ class McpRouter:
     async def _transport_scope(self, server):
         stack = AsyncExitStack()
         self._transport_closed[server] = False
+        self._transport_closing[server] = False
         try:
             yield stack
         finally:
+            self._transport_closing[server] = True
             await stack.aclose()
             self._transport_closed[server] = True
 
@@ -356,8 +376,12 @@ class McpRouter:
         finally:
             self._stop_event.set()
             tasks = list(self._tasks.values())
-            for task in tasks:
-                task.cancel()
+            for name, task in self._tasks.items():
+                # Setting stop_event may already have woken a server into its
+                # exit stack. A second cancellation would interrupt teardown
+                # and lose confirmation that the stdio process was closed.
+                if not self._transport_closing.get(name, False):
+                    task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             readiness.cancel()
             stopped.cancel()

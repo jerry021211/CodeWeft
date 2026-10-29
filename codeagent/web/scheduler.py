@@ -57,6 +57,7 @@ class AgentFactory(Protocol):
         root_prompt_mode: PromptMode | None = None,
         read_only: bool = False,
         plan_mode: bool = False,
+        approval_mode: str | None = None,
         web_search_enabled: bool = False,
         reasoning_effort: str | None = None,
     ) -> Any: ...
@@ -78,6 +79,7 @@ class _RunJob:
     agent: Any = None
     attachments: list[dict] | None = None
     plan_mode: bool = False
+    approval_mode: str | None = None
 
 
 class RunScheduler:
@@ -178,13 +180,14 @@ class RunScheduler:
         reasoning_effort: str | None = None,
         attachments: list[dict] | None = None,
         plan_mode: bool | None = None,
+        approval_mode: str | None = None,
     ) -> RunRecord:
         # Admission, queue order and shutdown share one short critical section.
         with self._lock:
             self.start()
             return self._submit(conversation_id, content, use_team=use_team, read_only=read_only,
                                 web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort, attachments=attachments,
-                                plan_mode=plan_mode)
+                                plan_mode=plan_mode, approval_mode=approval_mode)
 
     def _submit(
         self, conversation_id: str, content: str, *, use_team: bool,
@@ -193,8 +196,11 @@ class RunScheduler:
         reasoning_effort: str | None = None,
         attachments: list[dict] | None = None,
         plan_mode: bool | None = None,
+        approval_mode: str | None = None,
         approved_plan_id: str | None = None,
     ) -> RunRecord:
+        from codeagent.permissions.policy import validate_approval_mode
+        validate_approval_mode(approval_mode)
         active_team = self.repository.get_active_team_run_for_conversation(conversation_id)
         planning = self.repository.planning_state(conversation_id)
         if approved_plan_id:
@@ -259,6 +265,7 @@ class RunScheduler:
             **({'run_id': 'run_' + approved_plan_id} if approved_plan_id else {}),
             metadata={
                 "requested_mode": requested_mode,
+                "approval_mode": approval_mode,
                 "read_only": read_only,
                 **({'plan_mode': True} if plan_mode else {}),
                 **({'approved_plan_id': approved_plan_id} if approved_plan_id else {}),
@@ -276,7 +283,7 @@ class RunScheduler:
             role="user",
             content=prompt,
             run_id=run.id,
-            metadata={"status": "complete", "read_only": read_only, "web_search_enabled": web_search_enabled,
+            metadata={"status": "complete", "approval_mode": approval_mode, "read_only": read_only, "web_search_enabled": web_search_enabled,
                       "reasoning_effort": reasoning_effort or "default",
                       "attachments": [{"name": item["name"], "media_type": item["media_type"]} for item in attachments or []]},
         )
@@ -344,6 +351,7 @@ class RunScheduler:
             prompt=prompt,
             attachments=attachments,
             plan_mode=plan_mode,
+            approval_mode=approval_mode,
             use_team=bool(use_team),
             read_only=read_only,
             emitter=emitter,
@@ -370,6 +378,21 @@ class RunScheduler:
 
     def connect_mcp(self, workspace: str, name: str) -> None:
         self.agent_factory.connect_mcp(workspace, name)
+
+    def browser_states(self, conversation_id: str) -> list[dict]:
+        sessions = getattr(self.agent_factory, 'browser_sessions', None)
+        return sessions.list(conversation_id) if sessions else []
+
+    def browser_action(self, conversation_id: str, session_id: str, action: str) -> dict:
+        sessions = getattr(self.agent_factory, 'browser_sessions', None)
+        if sessions is None:
+            raise ValueError('当前运行环境不支持浏览器接管。')
+        return sessions.action(conversation_id, session_id, action)
+
+    def close_browser_conversation(self, conversation_id: str) -> None:
+        sessions = getattr(self.agent_factory, 'browser_sessions', None)
+        if sessions:
+            sessions.close_conversation(conversation_id)
 
     def decide_plan(self, plan_id, content_hash, decision):
         """UI-only authority; model tools cannot call this transition."""
@@ -467,6 +490,7 @@ class RunScheduler:
                 prompt = '执行用户已批准的方案（版本 ' + str(plan['revision']) + '）：\n\n' + plan['markdown']
                 self._submit(plan['conversation_id'], prompt, use_team=False, read_only=False,
                     plan_mode=False, approved_plan_id=plan['id'],
+                    approval_mode=source.metadata.get('approval_mode') if source else None,
                     web_search_enabled=bool(source and source.metadata.get('web_search_enabled')),
                     reasoning_effort=source.metadata.get('reasoning_effort') if source else None)
             return repo.update_plan_execution(plan['id'], status='started', execution_run_id=run_id)
@@ -502,6 +526,8 @@ class RunScheduler:
         # lock while interrupting it, and never close the shared HTTP client.
         for activity in activities:
             activity.interrupt_request()
+        if run.status in {*ACTIVE_RUN_STATUSES, 'cancelled'}:
+            self.close_browser_conversation(run.conversation_id)
         return self.repository.get_run(run_id) or run
 
     def is_run_pending(self, run_id: str) -> bool:
@@ -629,7 +655,9 @@ class RunScheduler:
         emitter = EventEmitter(RecordingEventSink(self.repository), context=ExecutionContext(
             conversation_id=team.conversation_id, run_id=team.root_run_id,
             turn_id=f"validation_{uuid4().hex}", agent_id=team.lead_agent_id))
+        root_run = self.repository.get_run(team.root_run_id)
         policy = PermissionPolicy(workspace=Path(cwd), cancellation=cancellation,
+            approval_mode=root_run.metadata.get("approval_mode") if root_run else None,
             broker=self._team_permission_broker(emitter, team_id, attempt_id), approval_timeout=self.approval_timeout)
         return policy.check("bash", permission_input(Path(cwd), command))
 
@@ -1057,6 +1085,8 @@ class RunScheduler:
             }
             if job.use_team:
                 create_kwargs["root_prompt_mode"] = profile
+            if job.approval_mode is not None:
+                create_kwargs["approval_mode"] = job.approval_mode
             if job.read_only:
                 create_kwargs["read_only"] = True
             if job.plan_mode:

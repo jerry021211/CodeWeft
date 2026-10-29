@@ -10,6 +10,16 @@ from typing import Any
 
 from codeagent.permissions.broker import PermissionBroker
 from codeagent.runtime import CancellationToken
+from codeagent.permissions.read_only import is_safe_read_only_command
+
+APPROVAL_MODES = frozenset({"ask", "auto", "full"})
+RISK_RULE_VERSION = 2
+
+
+def validate_approval_mode(mode: str | None) -> str | None:
+    if mode is not None and mode not in APPROVAL_MODES:
+        raise ValueError("Unknown approval mode")
+    return mode
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +48,13 @@ class PermissionPolicy:
     broker: PermissionBroker | None = None
     cancellation: CancellationToken | None = None
     approval_timeout: float | None = 600.0
+    # None preserves the legacy CLI/SDK and historical-run behavior.
+    approval_mode: str | None = None
+    mcp_read_only: Callable[[str, dict[str, Any]], bool] | None = None
+    on_decision: Callable[[dict[str, Any]], None] | None = None
+
+    def __post_init__(self) -> None:
+        validate_approval_mode(self.approval_mode)
 
     hard_deny_patterns: tuple[str, ...] = (
         # POSIX shell: destructive system operations.
@@ -95,30 +112,50 @@ class PermissionPolicy:
     write_tools: tuple[str, ...] = ("write_file", "edit_file")
 
     def check(self, tool_name: str, tool_input: dict[str, Any]) -> PermissionDecision:
-        if tool_name.startswith("mcp__"):
-            reason = "External MCP tool call"
-            decision = self._approval_decision(tool_name, tool_input, reason)
-            if not decision.allowed:
-                return decision
-
+        validate_approval_mode(self.approval_mode)
+        if self.cancellation is not None:
+            self.cancellation.raise_if_cancelled()
+        # Hard boundaries precede all approval modes, including full access.
         if tool_name == "bash":
             command = str(tool_input.get("command", ""))
             reason = self._hard_deny_reason(command)
             if reason:
-                return PermissionDecision(False, reason)
-
-            reason = self._destructive_command_reason(command)
-            if reason:
-                decision = self._approval_decision(tool_name, tool_input, reason)
-                if not decision.allowed:
-                    return decision
-
+                return self._record(tool_name, "deny", "hard_deny", PermissionDecision(False, reason))
         if tool_name in self.write_tools:
             reason = self._workspace_write_reason(tool_input)
             if reason:
-                return PermissionDecision(False, reason)
+                return self._record(tool_name, "deny", "workspace_boundary", PermissionDecision(False, reason))
 
-        return PermissionDecision(True)
+        reason, code = "", "ordinary_operation"
+        if tool_name.startswith("mcp__"):
+            reason, code = "External MCP tool call", "unknown_external_operation"
+            if self.approval_mode == "auto":
+                reason = "无法自动确认此 MCP 操作的影响，需要批准。"
+            if self.approval_mode == "auto" and self.mcp_read_only is not None:
+                if self.mcp_read_only(tool_name, tool_input):
+                    reason, code = "", "verified_browser_read"
+        elif tool_name == "bash":
+            reason = self._destructive_command_reason(command)
+            code = "destructive_command" if reason else "read_command"
+            if not reason and self.approval_mode in {"ask", "auto"} and not is_safe_read_only_command(command):
+                reason, code = "Command effects cannot be verified automatically", "unknown_command"
+        elif tool_name == "web_search" and self.approval_mode == "ask":
+            reason, code = "Internet search requires approval in this mode", "network_access"
+
+        if self.approval_mode == "full":
+            return self._record(tool_name, "allow", "full_access", PermissionDecision(True))
+        if reason:
+            self._record(tool_name, "ask", code, PermissionDecision(False, reason))
+            return self._approval_decision(tool_name, tool_input, reason)
+        return self._record(tool_name, "allow", code, PermissionDecision(True))
+
+    def _record(self, name, action, code, result):
+        if self.on_decision is not None:
+            # No arguments or content: credentials must not enter decision logs.
+            self.on_decision({"tool_name": name, "decision": action,
+                              "approval_mode": self.approval_mode, "reason_code": code,
+                              "rule_version": RISK_RULE_VERSION})
+        return result
 
     def _approval_decision(self, tool_name: str, tool_input: dict[str, Any], reason: str) -> PermissionDecision:
         detailed_request = getattr(self.broker, "request_result", None)

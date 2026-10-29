@@ -29,6 +29,7 @@ from codeagent import (
 from codeagent.context import RuntimeState
 from codeagent.events import EventEmitter, UsageTracker
 from codeagent.mcp import McpRouter
+from codeagent.mcp.browser import BrowserSessions
 from codeagent.mcp.trust import McpTrustStore
 from codeagent.messages import reconcile_tool_history
 from codeagent.memory import MemoryAccessController, MemoryWriteBlocked
@@ -86,6 +87,7 @@ class WebAgentFactory:
         self._mcp_routers: dict[tuple[Path, Path, bool], McpRouter] = {}
         self._mcp_lock = threading.RLock()
         self._retired_mcp_routers: WeakSet[McpRouter] = WeakSet()
+        self.browser_sessions = BrowserSessions()
 
     def create(
         self,
@@ -98,6 +100,7 @@ class WebAgentFactory:
         team_attempt: TaskAttemptRecord | None = None,
         worktree_manager: WorktreeManager | None = None,
         root_prompt_mode: PromptMode | None = None,
+        approval_mode: str | None = None,
         read_only: bool = False,
         plan_mode: bool = False,
         web_search_enabled: bool = False,
@@ -253,7 +256,8 @@ class WebAgentFactory:
             registry.register(LoadContextHistoryTool(context_config.transcript_dir))
             self._mcp_router(
                 force_workspace_cwd=team_session is not None
-            ).register_tools(registry, cancellation_check=cancellation.raise_if_cancelled)
+            ).register_tools(registry, cancellation_check=cancellation.raise_if_cancelled,
+                adapt=lambda tool: self.browser_sessions.adapt(tool, execution.conversation_id))
             if self.env.team_runtime_enabled and team_planner:
                 registry.register(
                     LeadTeamPlanTool(
@@ -286,7 +290,13 @@ class WebAgentFactory:
                 registry = registry.copy_without({"remember", "subagent"})
             return registry
 
+        if approval_mode is None and not native_worker:
+            mode_run = self.task_service.get_run(team.root_run_id if team is not None else execution.run_id)
+            approval_mode = mode_run.metadata.get("approval_mode") if mode_run else None
         policy = PermissionPolicy(
+            approval_mode=approval_mode,
+            mcp_read_only=self._mcp_router(force_workspace_cwd=team_session is not None).read_only_approval,
+            on_decision=lambda decision: event_emitter.emit("permission.decided", decision),
             workspace=self.workspace,
             broker=permission_broker,
             cancellation=cancellation,
@@ -550,7 +560,7 @@ class WebAgentFactory:
         if native_collaboration and team_session is None and root_mode is PromptMode.NORMAL:
             from codeagent.multiagent.adapter import install
             install(agent, self, event_emitter, cancellation, permission_broker,
-                    read_only=read_only or plan_mode, reasoning_effort=reasoning_effort)
+                    read_only=read_only or plan_mode, reasoning_effort=reasoning_effort, approval_mode=approval_mode)
         agent.permission_broker = permission_broker
         if agent.execution_activity is not None:
             permission_broker.execution_activity = agent.execution_activity
@@ -600,6 +610,7 @@ class WebAgentFactory:
         factory._mcp_routers = self._mcp_routers
         factory._mcp_lock = self._mcp_lock
         factory._retired_mcp_routers = self._retired_mcp_routers
+        factory.browser_sessions = self.browser_sessions
         return factory
 
     def for_execution_workspace(
@@ -618,10 +629,12 @@ class WebAgentFactory:
         factory._mcp_routers = self._mcp_routers
         factory._mcp_lock = self._mcp_lock
         factory._retired_mcp_routers = self._retired_mcp_routers
+        factory.browser_sessions = self.browser_sessions
         return factory
 
     def close(self) -> None:
         # Called only after root and Team workers have exited.
+        self.browser_sessions.close()
         with self._mcp_lock:
             routers = [*self._mcp_routers.values(), *self._retired_mcp_routers]
             self._mcp_routers.clear()
@@ -631,11 +644,15 @@ class WebAgentFactory:
 
     def reload_mcp(self, workspace: str | Path) -> None:
         config_path = self._mcp_config_path(Path(workspace).resolve())
+        retired = []
         with self._mcp_lock:
             for key in [item for item in self._mcp_routers if item[0] == config_path]:
                 router = self._mcp_routers.pop(key)
                 self._retired_mcp_routers.add(router)
                 router.retire()
+                retired.append(router)
+        for router in retired:
+            self.browser_sessions.retire(router)
 
     def _mcp_router(self, *, force_workspace_cwd: bool = False) -> McpRouter:
         config_path = self._mcp_config_path(self.workspace)

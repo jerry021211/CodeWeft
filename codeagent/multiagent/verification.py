@@ -11,13 +11,13 @@ class CheckFailed(RuntimeError):
         super().__init__(evidence["output"][-6000:])
 
 
-def run_checks(path, checks, token, broker, emit):
+def run_checks(path, checks, token, broker, emit, *, approval_mode=None):
     path = Path(path)
     # Native checks only: do not mutate the process-wide environment or ordinary
     # Agent commands. Other build outputs follow the project's ignore/config.
     runner = ValidationRunner(stopped=lambda: token.is_cancelled,
                               environment={'PYTHONDONTWRITEBYTECODE': '1'})
-    policy = PermissionPolicy(workspace=path, broker=broker, cancellation=token)
+    policy = PermissionPolicy(workspace=path, broker=broker, cancellation=token, approval_mode=approval_mode)
     evidence = []
     for command in checks:
         token.raise_if_cancelled()

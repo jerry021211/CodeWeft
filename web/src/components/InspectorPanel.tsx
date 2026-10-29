@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { BrowserPanel } from "@/components/BrowserPanel";
 import { api } from "@/lib/api";
 import type { AgentNode } from "@/types/api";
 import {
@@ -31,6 +32,7 @@ import { ContextMetricsPanel, RunMetricsPanel } from "@/components/RunMetricsPan
 import { verificationStatus } from "@/lib/verificationStatus";
 
 type Props = {
+  conversationId?: string;
   run?: RunViewState;
   runtime?: RuntimeConfig;
   mobile?: boolean;
@@ -58,24 +60,25 @@ type Props = {
   onCleanupWorktree?: (worktreeId: string) => void;
 };
 
-export function InspectorPanel({ run, runtime, mobile, onClose, tasks = [], personalPlans = [], personalPlansLoading, personalPlansError, tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onResolveIntegration, onCleanupWorktree }: Props) {
-  const [tab, setTab] = useState<"run" | "tasks" | "team" | "debug">("run");
+export function InspectorPanel({ conversationId, run, runtime, mobile, onClose, tasks = [], personalPlans = [], personalPlansLoading, personalPlansError, tasksLoading, taskBusy, taskList, onContinueTask, onCreateTask, teamEnabled = false, team, teamLoading, teamBusy, teamError, onTeamPlan, onCandidateApproval, onResumeAttempt, onCancelTeam, onVerifyIntegration, onResolveIntegration, onCleanupWorktree }: Props) {
+  const [tab, setTab] = useState<"run" | "tasks" | "team" | "debug" | "browser">("run");
   const plans = personalPlans.filter(plan => plan.todos.length > 0 && (
     plan.owner_id === "agent_root" || plan.run_id === run?.runId || plan.run_id === team?.team.root_run_id
   ));
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-line bg-surface">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-line px-4">
-        <div className="flex h-full items-end gap-5">
+        <div className="flex h-full items-end gap-3">
           <Tab active={tab === "run"} onClick={() => setTab("run")}>运行</Tab>
           <Tab active={tab === "tasks"} onClick={() => setTab("tasks")}>任务</Tab>
           {teamEnabled && <Tab active={tab === "team"} onClick={() => setTab("team")}>团队</Tab>}
+          <Tab active={tab === "browser"} onClick={() => setTab("browser")}>浏览器</Tab>
           <Tab active={tab === "debug"} onClick={() => setTab("debug")}>调试</Tab>
         </div>
         {mobile && onClose && <IconButton label="关闭运行面板" onClick={onClose}><X className="size-4" /></IconButton>}
       </header>
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {tab === "run" ? <RunInspector run={run} runtime={runtime} team={team} /> : tab === "tasks" ? <>
+        {tab === "browser" ? <BrowserPanel key={conversationId} conversationId={conversationId} /> : tab === "run" ? <RunInspector run={run} runtime={runtime} team={team} /> : tab === "tasks" ? <>
           <div className="space-y-3 px-4 py-5">
             {personalPlansLoading && <p className="text-xs text-ink-muted">正在加载任务进度…</p>}
             {personalPlansError && <p role="alert" className="text-xs text-danger">任务进度加载失败，请刷新重试。</p>}

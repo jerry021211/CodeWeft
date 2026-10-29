@@ -102,6 +102,27 @@ class WebApiTests(unittest.TestCase):
         self.repository.close()
         self.temp_dir.cleanup()
 
+    def test_fork_endpoint_preserves_source_and_returns_retry_options(self) -> None:
+        source = self.repository.create_conversation(workspace=self.workspace)
+        run = self.repository.create_run(source.id, status="completed", metadata={"read_only": True})
+        self.repository.create_message(source.id, role="user", content="question", run_id=run.id)
+        reply = self.repository.create_message(source.id, role="assistant", content="answer", run_id=run.id)
+        self.repository.save_checkpoint(run.id, messages=[{"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"}], todos=[], context={})
+        url = f"/api/conversations/{source.id}/fork"
+        response = self.client.post(url, json={"message_id": reply.id})
+        self.assertEqual(response.status_code, 201, response.text)
+        fork_id = response.json()["conversation"]["id"]
+        self.assertEqual(len(self.client.get(f"/api/conversations/{fork_id}/messages").json()), 2)
+        response = self.client.post(url, json={"message_id": reply.id, "regenerate": True})
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertTrue(response.json()["retry"]["readOnly"])
+        self.assertEqual(response.json()["retry"]["content"], "question")
+        self.assertEqual(self.scheduler.submissions, [])
+        self.assertEqual(len(self.repository.list_messages(source.id)), 2)
+        self.assertEqual(self.client.post(url, json={"message_id": "missing"}).status_code, 404)
+        self.assertEqual(self.client.post(url, json={"message_id": reply.id, "unexpected": True}).status_code, 422)
+
     def test_pending_cancellation_is_visible_in_run_activity_and_conversation(self) -> None:
         conversation = self.repository.create_conversation(workspace=self.workspace)
         run = self.repository.create_run(conversation.id)

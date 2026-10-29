@@ -8,6 +8,7 @@ from typing import Any, Callable
 from codeagent.hooks.manager import HookManager
 from codeagent.messages import ToolUse
 from codeagent.permissions import PermissionPolicy
+from codeagent.permissions.policy import RISK_RULE_VERSION
 from codeagent.planning import PlanningBackend
 from codeagent.tools import (
     TodoStore,
@@ -75,6 +76,8 @@ def _permission_hook(policy: PermissionPolicy):
         return decision.reason or "Permission denied."
 
     hook.permission_snapshot = lambda: {
+        "approval_mode": policy.approval_mode,
+        "risk_rule_version": RISK_RULE_VERSION,
         "workspace": str(policy.workspace), "hard_deny_patterns": policy.hard_deny_patterns,
         "destructive_command_patterns": policy.destructive_command_patterns,
         "write_tools": policy.write_tools,

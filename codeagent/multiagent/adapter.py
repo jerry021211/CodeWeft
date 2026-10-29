@@ -39,7 +39,7 @@ class BrokerView:
 
 
 
-def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effort=None):
+def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effort=None, approval_mode=None):
     from codeagent.web.factory import serialize_runtime_state
     root = factory.data_paths.workspace_dir(factory.project_workspace) / "collaborations"
     repository = ExecutionRepository(factory.task_service)
@@ -65,9 +65,11 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
         child_token = CancellationToken(parent=token)
         child_broker = BrokerView(broker, workspace=path, label=task["objective"])
         readonly = task["profile"] in {"research", "review"}
+        worker_mode = repository.get(identifier).get("context", {}).get("approval_mode")
         child = factory.for_execution_workspace(path, project_workspace=factory.project_workspace).create(
             event_emitter=child_emitter, cancellation=child_token, permission_broker=child_broker,
             checkpoint=SimpleNamespace(**checkpoint) if checkpoint else None,
+            approval_mode=worker_mode,
             read_only=readonly, plan_mode=readonly, reasoning_effort=reasoning_effort, native_worker=True,
             execution_budget=agent._loop_guard.budget if agent._loop_guard is not None else None,
             tool_admission=agent.tool_admission)
@@ -151,12 +153,14 @@ def install(agent, factory, emitter, token, broker, *, read_only, reasoning_effo
             if item.get("process_unknown"):
                 repository.change(identifier, lambda r: r.update(runtime_unknown=dict(workspace=str(path), **item)))
             emitter.emit("collaboration.check", dict(id=identifier, task_id=task_id, **item))
-        return run_checks(path, checks, token, BrokerView(broker, workspace=path, label="协作验证 · " + task_id), evidence)
+        return run_checks(path, checks, token, BrokerView(broker, workspace=path, label="协作验证 · " + task_id), evidence,
+                          approval_mode=repository.get(identifier).get("context", {}).get("approval_mode"))
 
     coordinator = Coordinator(repository, root, emitter.context.conversation_id, factory.workspace,
                               token, emitter.emit, worker, verify, read_only=read_only,
-                              context_provider=lambda: execution_context(factory.task_service,
-                                  emitter.context.conversation_id, emitter.context.run_id, agent.messages))
+                              context_provider=lambda: {**execution_context(factory.task_service,
+                                  emitter.context.conversation_id, emitter.context.run_id, agent.messages),
+                                  "approval_mode": approval_mode})
 
     def recover(identifier):
         record = coordinator.get(identifier)

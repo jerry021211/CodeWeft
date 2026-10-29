@@ -53,6 +53,10 @@ def merge_context(previous, current):
     for request in current.get('requests', []):
         requests.setdefault(request['id'], request)
     result = dict(previous, requests=list(requests.values()))
+    if "approval_mode" in previous or "approval_mode" in current:
+        # A later root turn may add instructions, but cannot widen an existing
+        # execution's permission snapshot. Old executions retain legacy behavior.
+        result["approval_mode"] = previous.get("approval_mode") if previous else current.get("approval_mode")
     answers = {a['id']: a for a in previous.get('answers', [])}
     for answer in current.get('answers', []):
         answers.setdefault(answer['id'], answer)

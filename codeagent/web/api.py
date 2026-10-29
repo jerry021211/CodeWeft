@@ -34,6 +34,7 @@ try:  # Keep the core/CLI package importable without optional web dependencies.
         CandidateUserApprovalRequest,
         ConversationResponse,
         CreateConversationRequest,
+        ForkConversationRequest,
         CreateRunRequest,
         PlanDecisionRequest,
         CreateRunResponse,
@@ -78,6 +79,7 @@ from codeagent.web.models import (
 )
 from codeagent.mcp import delete_mcp_server, load_mcp_document, save_mcp_server
 from codeagent.mcp.config import load_mcp_servers, parse_mcp_server
+from codeagent.mcp.approval import is_bundled_browser
 from codeagent.mcp.trust import McpTrustStore, server_fingerprint
 from codeagent.memory import MemoryAccessController
 from codeagent.web.storage import (
@@ -597,6 +599,8 @@ def create_app(
             changes["title"] = body.title.strip()
         if "archived" in body.model_fields_set and body.archived is not None:
             changes["archived"] = body.archived
+        if body.approval_mode is not None:
+            changes["approval_mode"] = body.approval_mode
         record = repo.update_conversation(conversation_id, **changes)
         return _conversation_response(repo, record)
 
@@ -608,7 +612,26 @@ def create_app(
     def delete_conversation(conversation_id: str) -> Response:
         if not repo.delete_conversation(conversation_id):
             raise RecordNotFoundError(f"Conversation not found: {conversation_id}")
+        close_browser = getattr(scheduler, 'close_browser_conversation', None)
+        if callable(close_browser):
+            close_browser(conversation_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get('/api/conversations/{conversation_id}/browsers')
+    def browser_states(conversation_id: str):
+        _require_conversation(repo, conversation_id)
+        states = getattr(scheduler, 'browser_states', None)
+        return states(conversation_id) if callable(states) else []
+
+    @app.post('/api/conversations/{conversation_id}/browsers/{session_id}/{action}')
+    def browser_action(conversation_id: str, session_id: str, action: str):
+        _require_conversation(repo, conversation_id)
+        if action not in {'takeover', 'handback', 'close'}:
+            raise HTTPException(status_code=400, detail='Unknown browser action')
+        control = getattr(scheduler, 'browser_action', None)
+        if not callable(control):
+            raise HTTPException(status_code=409, detail='当前运行环境不支持浏览器接管。')
+        return control(conversation_id, session_id, action)
 
     @app.get(
         "/api/conversations/{conversation_id}/messages",
@@ -617,6 +640,11 @@ def create_app(
     def list_messages(conversation_id: str) -> list[MessageResponse]:
         _require_conversation(repo, conversation_id)
         return [_message_response(item) for item in repo.list_messages(conversation_id)]
+
+    @app.post("/api/conversations/{conversation_id}/fork", status_code=status.HTTP_201_CREATED)
+    def fork_conversation(conversation_id: str, body: ForkConversationRequest) -> dict[str, Any]:
+        record, retry = repo.fork_conversation(conversation_id, body.message_id, regenerate=body.regenerate)
+        return {"conversation": _conversation_response(repo, record), "retry": retry}
 
     @app.get("/api/conversations/{conversation_id}/todos")
     def list_personal_todos(conversation_id: str) -> list[dict[str, Any]]:
@@ -933,6 +961,8 @@ def create_app(
             options["read_only"] = True
         if body.planMode is not None:
             options['plan_mode'] = body.planMode
+        if body.approvalMode is not None:
+            options['approval_mode'] = body.approvalMode
         run = scheduler.submit(conversation_id, content, **options)
         return CreateRunResponse(
             run_id=run.id,
@@ -2022,6 +2052,7 @@ def _mcp_config_response(
                 error=server.config_error or runtime.get('error'),
                 startup_timeout=server.startup_timeout, call_timeout=server.call_timeout,
                 lifecycle=server.lifecycle,
+                browser_session_supported=server.lifecycle == 'execution' and is_bundled_browser(server),
             )
         )
     return McpConfigResponse(

@@ -69,6 +69,12 @@ class CreateConversationRequest(ApiModel):
 class UpdateConversationRequest(ApiModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     archived: bool | None = None
+    approval_mode: Literal["ask", "auto", "full"] | None = None
+
+
+class ForkConversationRequest(ApiModel):
+    message_id: str = Field(min_length=1, max_length=200)
+    regenerate: bool = False
 
 
 class AttachmentRequest(ApiModel):
@@ -78,6 +84,7 @@ class AttachmentRequest(ApiModel):
 
 
 class CreateRunRequest(ApiModel):
+    approvalMode: Literal["ask", "auto", "full"] | None = None
     content: str = Field(default="", max_length=200_000)
     attachments: list[AttachmentRequest] = Field(default_factory=list, max_length=8)
     useTeam: bool = False
@@ -126,6 +133,7 @@ class UserQuestionResponse(ApiModel):
 
 
 class ConversationResponse(ApiModel):
+    approval_mode: Literal["ask", "auto", "full"] = "auto"
     id: str
     title: str
     workspace: str
@@ -322,6 +330,7 @@ class McpServerResponse(ApiModel):
     startup_timeout: float = 15
     call_timeout: float = 60
     lifecycle: Literal["shared", "execution"] = "shared"
+    browser_session_supported: bool = False
 
 
 class McpConfigResponse(ApiModel):
