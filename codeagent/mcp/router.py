@@ -7,10 +7,11 @@ import hashlib
 import json
 import math
 import re
+import shutil
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeout
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,6 +21,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from codeagent.mcp.config import McpServerConfig, load_mcp_servers
+from codeagent.mcp.sessions import execution_lease
 from codeagent.mcp.trust import McpTrustStore, resolved_server, server_fingerprint
 from codeagent.runtime.cancellation import CancelledError
 from codeagent.runtime.data_paths import RuntimeDataPaths
@@ -35,9 +37,10 @@ def _unknown_result(message: str) -> ToolOutput:
 class McpTool:
     """One execution-local adapter; connections may be shared, budgets may not."""
 
-    def __init__(self, router: "McpRouter", server: str, remote_tool: Any) -> None:
+    def __init__(self, router: "McpRouter", server: str, remote_tool: Any, owner=None) -> None:
         self.router, self.server, self.remote_tool = router, server, remote_tool
         self.remote_name = remote_tool.name
+        self._owner = owner if owner is not None else object()
         self._check: Callable[[], None] = lambda: None
         self._remaining: Callable[[], float] = lambda: float('inf')
         self.definition = ToolDefinition(
@@ -46,15 +49,21 @@ class McpTool:
             input_schema=remote_tool.input_schema,
         )
 
-    def isolated_copy(self) -> "McpTool":
-        return McpTool(self.router, self.server, self.remote_tool)
+    def isolated_copy(self, owner=None) -> "McpTool":
+        return McpTool(self.router, self.server, self.remote_tool, owner)
 
     def bind_runtime(self, *, cancellation_check, remaining_seconds) -> None:
         self._check, self._remaining = cancellation_check, remaining_seconds
+        # All tools bound to an Agent share its identity; forked Agents do not.
+        self._owner = getattr(cancellation_check, '__self__', None) or cancellation_check
+
+    def close(self) -> None:
+        self.router.release_execution(self.server, self._owner)
 
     def run(self, **kwargs: Any) -> ToolOutput:
         result = self.router.call_tool(self.server, self.remote_name, kwargs,
-                                      cancellation_check=self._check, remaining_seconds=self._remaining)
+                                      cancellation_check=self._check, remaining_seconds=self._remaining,
+                                      owner=self._owner)
         known = {('tavily', 'tavily-search'): 'web_search',
                  ('brave-search', 'brave_web_search'): 'web_search', ('fetch', 'fetch'): 'webpage'}
         result.output_policy = known.get((self.server, self.remote_name), 'default')
@@ -68,12 +77,17 @@ class McpRouter:
 
     def __init__(self, config_path: str | Path = "mcp.json", *,
                  workspace_root: str | Path | None = None, force_workspace_cwd: bool = False,
+                 session_workspace: str | Path | None = None,
                  trust_checker: Callable[[McpServerConfig], bool] | None = None) -> None:
         if force_workspace_cwd and workspace_root is None:
             raise ValueError("force_workspace_cwd requires workspace_root")
         self.workspace_root = Path(workspace_root or Path(config_path).resolve().parent).resolve()
         self.force_workspace_cwd = bool(force_workspace_cwd)
         self.servers = [resolved_server(item) for item in load_mcp_servers(config_path)]
+        self._leases = {server.name: execution_lease(Path(session_workspace or self.workspace_root), server.name)
+                        for server in self.servers if server.lifecycle == 'execution'}
+        self._invocations: dict[str, set[asyncio.Task]] = {}
+        self._transport_closed: dict[str, bool] = {}
         store = McpTrustStore(RuntimeDataPaths.default().root / 'state' / 'mcp-trust.db')
         self._trust_checker = trust_checker or (lambda server: store.is_trusted(self.workspace_root, server))
         self._clients: dict[str, Client] = {}
@@ -131,8 +145,9 @@ class McpRouter:
     def register_tools(self, registry: ToolRegistry, *, cancellation_check=lambda: None) -> None:
         self.start(cancellation_check=cancellation_check)
         # Stable schemas and separate runtime bindings for every Agent/run.
+        owner = object()
         for tool in sorted(self._tools, key=lambda item: item.definition.name):
-            registry.register(tool.isolated_copy())
+            registry.register(tool.isolated_copy(owner))
 
     def list_tools(self) -> list[str]:
         self.start()
@@ -166,7 +181,7 @@ class McpRouter:
             await ready.wait()
 
     def call_tool(self, server: str, name: str, arguments: dict[str, Any], *,
-                  cancellation_check=lambda: None, remaining_seconds=lambda: float('inf')) -> ToolOutput:
+                  cancellation_check=lambda: None, remaining_seconds=lambda: float('inf'), owner=None) -> ToolOutput:
         cancellation_check()
         config = next(item for item in self.servers if item.name == server)
         if not self._trust_checker(config):
@@ -179,8 +194,13 @@ class McpRouter:
         with self._lifecycle_lock:
             if self._retired:
                 return ToolOutput("MCP configuration changed; start a new turn to refresh tools", status='blocked')
-            if self._closed or self._loop is None or not self._loop.is_running() or server not in self._clients:
+            lease = self._leases.get(server)
+            if self._closed or self._loop is None or not self._loop.is_running() or (server not in self._clients and lease is None):
                 return ToolOutput("MCP server is disconnected", status='error')
+            if lease is not None:
+                blocked = lease.claim(owner, self)
+                if blocked:
+                    return ToolOutput(blocked, status='blocked', retryable=False)
             invocation = self._invoke(server, name, arguments, budget)
             try:
                 future = asyncio.run_coroutine_threadsafe(invocation, self._loop)
@@ -202,13 +222,19 @@ class McpRouter:
                     if future.done():
                         raise
         except CancelledError as exc:
+            if lease is not None:
+                lease.invalidate(owner, self)
             future.cancel()  # Cancels the SDK request task, without closing other calls/connections.
             exc.tool_output = _unknown_result('MCP call cancelled')
             raise
         except TimeoutError:
+            if lease is not None:
+                lease.invalidate(owner, self)
             future.cancel()
             return _unknown_result('MCP call timed out')
         except Exception:
+            if lease is not None:
+                lease.invalidate(owner, self)
             future.cancel()
             return _unknown_result('MCP connection or request failed')
         finally:
@@ -218,8 +244,57 @@ class McpRouter:
                     self._request_stop()
 
     async def _invoke(self, server, name, arguments, timeout):
-        async with asyncio.timeout(timeout):
-            return await self._clients[server].call_tool(name, arguments, read_timeout_seconds=timeout)
+        calls = self._invocations.setdefault(server, set())
+        task = asyncio.current_task()
+        calls.add(task)
+        try:
+            async with asyncio.timeout(timeout):
+                if server in self._leases and server not in self._clients:
+                    await self._reconnect(next(item for item in self.servers if item.name == server))
+                return await self._clients[server].call_tool(name, arguments, read_timeout_seconds=timeout)
+        finally:
+            calls.discard(task)
+
+    def release_execution(self, server: str, owner) -> None:
+        lease = self._leases.get(server)
+        if lease is None or not lease.begin_cleanup(owner, self):
+            return
+        with self._lifecycle_lock:
+            if self._loop is None or not self._loop.is_running():
+                return  # Fail closed unless transport teardown was confirmed.
+            future = asyncio.run_coroutine_threadsafe(self._dispose_execution(server), self._loop)
+        try:
+            future.result(timeout=6)
+        except FutureTimeout:
+            config = next(item for item in self.servers if item.name == server)
+            self._state(config, 'error', error='服务仍在清理，上一次任务的连接关闭后才能再次使用。')
+        except Exception:
+            config = next(item for item in self.servers if item.name == server)
+            self._state(config, 'error', error='服务清理失败，连接暂不可复用；请检查服务进程后重启工作台。')
+        # Cleanup continues on its owning loop. A deadline never releases a live process.
+
+    async def _dispose_execution(self, server):
+        async with self._connect_locks.setdefault(server, asyncio.Lock()):
+            calls = list(self._invocations.get(server, ()))
+            for call in calls:
+                call.cancel()
+            await asyncio.gather(*calls, return_exceptions=True)
+            task = self._tasks.get(server)
+            if task is not None and not task.done():
+                task.cancel()
+                await task
+            elif task is None or self._transport_closed.get(server, False):
+                self._leases[server].released(self)
+
+    @asynccontextmanager
+    async def _transport_scope(self, server):
+        stack = AsyncExitStack()
+        self._transport_closed[server] = False
+        try:
+            yield stack
+        finally:
+            await stack.aclose()
+            self._transport_closed[server] = True
 
     def retire(self) -> None:
         """Reject new calls, then release transports after admitted calls finish.
@@ -295,6 +370,7 @@ class McpRouter:
         # Entry and exit MUST stay in this same task: SDK transports own AnyIO cancel scopes.
         timer = None
         discovered = False
+        clean_exit = False
         try:
             if server.config_error:
                 self._state(server, 'error', error=server.config_error)
@@ -307,7 +383,7 @@ class McpRouter:
             self._state(server, 'connecting')
             task = asyncio.current_task()
             timer = self._loop.call_later(server.startup_timeout, task.cancel)
-            async with AsyncExitStack() as stack:
+            async with self._transport_scope(server.name) as stack:
                 client = await stack.enter_async_context(
                     Client(await self._transport(server, stack), read_timeout_seconds=server.startup_timeout))
                 tools, cursor, seen = [], None, set()
@@ -321,32 +397,48 @@ class McpRouter:
                         raise ValueError('MCP server repeated a pagination cursor')
                     seen.add(cursor)
                 names = {tool.definition.name for tool in tools}
-                if len(names) != len(tools) or names.intersection(tool.definition.name for tool in self._tools):
+                if len(names) != len(tools) or names.intersection(tool.definition.name for tool in self._tools if tool.server != server.name):
                     raise ValueError('Duplicate MCP tool names')
                 timer.cancel()
                 self._clients[server.name] = client
-                self._tools.extend(tools)
+                self._tools = [tool for tool in self._tools if tool.server != server.name] + tools
                 discovered = True
                 self._state(server, 'connected', tool_count=len(tools))
                 ready.set()
-                await self._stop_event.wait()
+                try:
+                    await self._stop_event.wait()
+                except asyncio.CancelledError:
+                    pass  # Exit the transport in this task before releasing ownership.
+            clean_exit = True
         except asyncio.CancelledError:
             self._state(server, 'disconnected' if self._closed else 'error',
                         error=None if self._closed else '连接或工具发现超时，请检查服务或调大启动时限。')
+        except FileNotFoundError:
+            self._state(server, 'error', error='未找到启动命令，请安装对应运行环境并检查 PATH（例如 npx 需要 Node.js）。')
         except Exception as exc:
             # Error strings may contain tokens/headers; expose only the class and an actionable hint.
-            self._state(server, 'error', error=f'连接或工具发现失败（{type(exc).__name__}），请检查命令、地址和凭据。')
+            hint = ('服务清理失败，连接暂不可复用，请检查服务进程后重启工作台。' if discovered else
+                    '连接或工具发现失败，请检查命令、地址和凭据。')
+            self._state(server, 'error', error=f'{hint}（{type(exc).__name__}）')
         finally:
             if timer is not None:
                 timer.cancel()
             self._clients.pop(server.name, None)
-            if discovered:
+            if discovered and server.lifecycle != 'execution':
                 self._tools = [tool for tool in self._tools if tool.server != server.name]
+            if server.lifecycle == 'execution' and self._transport_closed.get(server.name, False):
+                self._leases[server.name].released(self)
+                if clean_exit:
+                    self._state(server, 'disconnected', tool_count=len(tools))
             ready.set()
 
     async def _transport(self, server: McpServerConfig, stack: AsyncExitStack):
         if server.transport == "stdio":
             cwd = self.workspace_root if self.force_workspace_cwd else (server.cwd or self.workspace_root)
+            command = Path(server.command)
+            candidate = str(cwd / command) if not command.is_absolute() and command.parent != Path('.') else server.command
+            if not shutil.which(candidate, path=server.env.get('PATH')):
+                raise FileNotFoundError('MCP command not found')
             return stdio_client(StdioServerParameters(command=server.command, args=list(server.args),
                                                        env=server.env, cwd=str(cwd)))
         if server.transport in {"http", "streamable-http"}:

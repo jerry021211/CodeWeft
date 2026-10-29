@@ -79,6 +79,25 @@ class McpApiTests(unittest.TestCase):
                 'url': 'https://example.invalid/mcp', field: value})
             self.assertEqual(result.status_code, 422)
 
+    def test_execution_lifecycle_round_trips_and_legacy_edit_preserves_it(self):
+        draft = {'workspace': str(self.workspace), 'name': 'browser', 'transport': 'stdio',
+                 'command': 'npx', 'args': ['-y', '@playwright/mcp@0.0.83', '--isolated'],
+                 'lifecycle': 'execution'}
+        response = self.client.post('/api/mcp/servers', json=draft)
+        self.assertEqual(response.status_code, 201, response.text)
+        server = response.json()['servers'][0]
+        self.assertEqual(server['lifecycle'], 'execution')
+        self.assertFalse(server['trusted'])
+        draft.pop('lifecycle')
+        updated = self.client.post('/api/mcp/servers', json={**draft, 'fingerprint': server['fingerprint']})
+        self.assertEqual(updated.status_code, 201, updated.text)
+        self.assertEqual(updated.json()['servers'][0]['lifecycle'], 'execution')
+        for value in ['execution', 'unknown']:
+            response = self.client.post('/api/mcp/servers', json={
+                'workspace': str(self.workspace), 'name': 'remote', 'transport': 'http',
+                'url': 'https://example.invalid/mcp', 'lifecycle': value})
+            self.assertIn(response.status_code, [400, 422])
+
     def test_edit_keeps_hidden_credentials_unless_explicitly_cleared_and_invalidates_trust(self):
         server = self.add_server()
         self.client.post('/api/mcp/servers/docs/trust', json={

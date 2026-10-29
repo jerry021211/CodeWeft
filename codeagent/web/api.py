@@ -77,7 +77,7 @@ from codeagent.web.models import (
     RunRecord,
 )
 from codeagent.mcp import delete_mcp_server, load_mcp_document, save_mcp_server
-from codeagent.mcp.config import load_mcp_servers
+from codeagent.mcp.config import load_mcp_servers, parse_mcp_server
 from codeagent.mcp.trust import McpTrustStore, server_fingerprint
 from codeagent.memory import MemoryAccessController
 from codeagent.web.storage import (
@@ -508,6 +508,8 @@ def create_app(
             for key in ('env', 'headers'):
                 if key in server and server[key] is None:
                     server[key] = existing.get(key, {})
+            server['lifecycle'] = body.lifecycle if body.lifecycle is not None else existing.get('lifecycle', 'shared')
+            parse_mcp_server(body.name, server, config_path)
             mcp_trust.revoke(selected, body.name)
             save_mcp_server(config_path, body.name, server)
             reloaded = _reload_mcp_runtime(scheduler, selected)
@@ -2019,6 +2021,7 @@ def _mcp_config_response(
                 tool_count=runtime.get('tool_count', 0) if trusted else 0,
                 error=server.config_error or runtime.get('error'),
                 startup_timeout=server.startup_timeout, call_timeout=server.call_timeout,
+                lifecycle=server.lifecycle,
             )
         )
     return McpConfigResponse(

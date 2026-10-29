@@ -387,6 +387,7 @@ export type McpServer = {
   error?: string | null;
   startup_timeout: number;
   call_timeout: number;
+  lifecycle?: "shared" | "execution";
 };
 
 export type McpConfig = {
@@ -409,6 +410,7 @@ export type SaveMcpServer = {
   headers?: Record<string, string>;
   startup_timeout?: number;
   call_timeout?: number;
+  lifecycle?: "shared" | "execution";
 };
 
 export type WorkspaceEntry = {

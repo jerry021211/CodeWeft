@@ -48,3 +48,10 @@ test('loading and unavailable management actions are represented accessibly', ()
   assert.match(noActions, /disabled=""[^>]*>连接<\/button>/);
   assert.equal(render(h(McpConfigModal, { ...props, open: false })), '');
 });
+
+test('execution-scoped services explain that the connection closes with the task', () => {
+  const html = render(h(McpConfigModal, { ...props, config: { servers: [
+    { ...server('browser', 'connected'), transport: 'stdio', lifecycle: 'execution' },
+  ] } }));
+  assert.match(html, /任务独占 · 结束后关闭/);
+});

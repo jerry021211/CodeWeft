@@ -296,6 +296,7 @@ class SaveMcpServerRequest(ApiModel):
     fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     startup_timeout: float = Field(default=15, gt=0, le=300)
     call_timeout: float = Field(default=60, gt=0, le=3600)
+    lifecycle: Literal["shared", "execution"] | None = None
 
 
 class McpServerActionRequest(ApiModel):
@@ -320,6 +321,7 @@ class McpServerResponse(ApiModel):
     error: str | None = None
     startup_timeout: float = 15
     call_timeout: float = 60
+    lifecycle: Literal["shared", "execution"] = "shared"
 
 
 class McpConfigResponse(ApiModel):

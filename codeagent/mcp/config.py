@@ -23,6 +23,7 @@ class McpServerConfig:
     call_timeout: float = 60.0
     config_error: str = ""
     resolved: bool = False
+    lifecycle: str = "shared"
 
 
 def load_mcp_servers(path: str | Path) -> list[McpServerConfig]:
@@ -49,6 +50,11 @@ def parse_mcp_server(name: str, raw: Any, config_path: Path) -> McpServerConfig:
     transport = str(data.get("type") or ("http" if data.get("url") else "stdio"))
     if transport not in {"stdio", "http", "streamable-http"}:
         raise ValueError("Unsupported MCP transport")
+    lifecycle = data.get("lifecycle", "shared")
+    if lifecycle not in {"shared", "execution"}:
+        raise ValueError("Unsupported MCP lifecycle")
+    if lifecycle == "execution" and transport != "stdio":
+        raise ValueError("Execution lifecycle requires a local stdio process")
     if not isinstance(data.get("args", []), list):
         raise ValueError("MCP args must be an array")
     if transport == 'stdio' and not data.get('command'):
@@ -73,6 +79,7 @@ def parse_mcp_server(name: str, raw: Any, config_path: Path) -> McpServerConfig:
         headers={str(key): str(value) for key, value in data.get("headers", {}).items()},
         startup_timeout=startup_timeout,
         call_timeout=call_timeout,
+        lifecycle=lifecycle,
     )
 
 

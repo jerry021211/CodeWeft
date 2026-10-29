@@ -30,6 +30,9 @@ def resolved_server(server: McpServerConfig) -> McpServerConfig:
 def server_fingerprint(server: McpServerConfig) -> str:
     data = asdict(resolved_server(server))
     data.pop('resolved')
+    # Preserve existing approvals when the new optional behavior is not enabled.
+    if data['lifecycle'] == 'shared':
+        data.pop('lifecycle')
     data['cwd'] = str(server.cwd.resolve()) if server.cwd else None
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -88,6 +91,7 @@ def request_cli_trust(servers, store, workspace, broker, *, interactive: bool) -
                    'command': server.command, 'args': list(server.args),
                    'cwd': str(server.cwd or workspace), 'url': server.url,
                    'env_keys': sorted(server.env), 'header_keys': sorted(server.headers)}
+        details['lifecycle'] = server.lifecycle
         try:
             approved = broker.request('mcp_connect', details,
                                       'Trust this MCP configuration before starting its process or connection?')

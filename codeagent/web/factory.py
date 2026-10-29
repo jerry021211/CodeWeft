@@ -647,6 +647,7 @@ class WebAgentFactory:
                 router = McpRouter(
                     config_path,
                     workspace_root=self.workspace,
+                    session_workspace=self.project_workspace,
                     force_workspace_cwd=force_workspace_cwd,
                     trust_checker=lambda server: trust.is_trusted(self.project_workspace, server),
                 )
