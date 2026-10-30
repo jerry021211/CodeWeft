@@ -13,7 +13,7 @@ from codeagent.runtime import CancellationToken
 from codeagent.permissions.read_only import is_safe_read_only_command
 
 APPROVAL_MODES = frozenset({"ask", "auto", "full"})
-RISK_RULE_VERSION = 2
+RISK_RULE_VERSION = 3
 
 
 def validate_approval_mode(mode: str | None) -> str | None:
@@ -127,7 +127,12 @@ class PermissionPolicy:
                 return self._record(tool_name, "deny", "workspace_boundary", PermissionDecision(False, reason))
 
         reason, code = "", "ordinary_operation"
-        if tool_name.startswith("mcp__"):
+        from codeagent.browser.tools import NAMES as BROWSER_TOOLS, read_allowed
+        if tool_name in BROWSER_TOOLS:
+            reason, code = "Browser operation requires approval", "browser_interaction"
+            if self.approval_mode == "auto" and read_allowed(tool_name, tool_input):
+                reason, code = "", "verified_browser_read"
+        elif tool_name.startswith("mcp__"):
             reason, code = "External MCP tool call", "unknown_external_operation"
             if self.approval_mode == "auto":
                 reason = "无法自动确认此 MCP 操作的影响，需要批准。"

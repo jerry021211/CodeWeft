@@ -13,6 +13,7 @@
 | 委派子任务，执行依赖计划，查看验证与恢复结果 | [多 Agent 协作](collaboration.md) |
 | 了解只读保护与本地数据边界 | [只读权限](usage-guide.md#只读权限) |
 | 选择请求批准、自动审批或完全访问 | [工具审批模式](usage-guide.md#工具审批模式) |
+| 使用内置浏览器打开网页、交互及人工接管 | [内置浏览器](usage-guide.md#内置浏览器默认-web-入口) |
 | 管理同时运行的会话 | [多会话并发](concurrent-sessions.md) |
 | 按指定时间或固定间隔自动执行项目任务 | [定时任务](scheduled-tasks.md) |
 

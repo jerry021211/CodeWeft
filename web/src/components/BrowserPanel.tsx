@@ -50,7 +50,7 @@ export function BrowserPanel({ conversationId }: { conversationId?: string }) {
     <div className="flex items-center justify-between text-sm font-medium"><span className="inline-flex items-center gap-2"><Globe className="size-4" />当前会话浏览器</span><button type="button" aria-label="刷新浏览器状态" disabled={!conversationId || query.isFetching} onClick={() => void query.refetch()}><RefreshCw className="size-3.5" /></button></div>
     {(query.error || action.error) && <p role="alert" className="text-xs text-danger">{(action.error || query.error)?.message}</p>}
     {query.isLoading && conversationId && <p className="text-xs text-ink-muted">正在读取状态…</p>}
-    {!query.isLoading && !query.data?.length && <p className="text-xs leading-6 text-ink-muted">尚未启动会话浏览器。在 MCP 设置中启用并信任浏览器预设，再让 Agent 打开页面。</p>}
+    {!query.isLoading && !query.data?.length && <p className="text-xs leading-6 text-ink-muted">尚未启动会话浏览器。让 Agent 打开网页即可使用默认的内置浏览器，无需配置 MCP。</p>}
     {query.data?.map(session => <BrowserSessionCard key={session.id} session={session} busy={action.isPending}
       onAction={command => action.mutate({ id: session.id, command })} />)}
     <p className="text-xs leading-5 text-ink-faint">页面和临时登录状态在本会话的多轮对话间保留。闲置 30 分钟、取消执行或关闭后清理，后端重启不恢复。交还后若本轮已结束，发送消息让 Agent 继续。</p>

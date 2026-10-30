@@ -86,6 +86,9 @@ class EnvironmentConfig:
     data_dir: Path = field(default_factory=default_runtime_data_dir)
     planning_mode: PlanningBackend = PlanningBackend.AUTO
     mcp_config_path: Path = Path("mcp.json")
+    browser_backend: str = "builtin"
+    browser_channel: str = "chrome"
+    browser_headless: bool = False
     team_runtime_enabled: bool = False
     team_write_enabled: bool = False
     team_worktree_root: Path = Path(".codeagent-worktrees")
@@ -105,6 +108,10 @@ class EnvironmentConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, 'max_iterations', MAX_EXECUTION_ROUNDS)
+        if self.browser_backend not in {"builtin", "mcp"}:
+            raise ValueError("CODEAGENT_BROWSER_BACKEND must be builtin or mcp")
+        if self.browser_channel not in {"chrome", "msedge", "chromium"}:
+            raise ValueError("CODEAGENT_BROWSER_CHANNEL must be chrome, msedge or chromium")
         if self.model_protocol not in {"anthropic", "openai_chat", "openai_responses"}:
             raise ValueError("MODEL_PROTOCOL must be anthropic, openai_chat or openai_responses")
         if self.chat_token_parameter not in {"max_tokens", "max_completion_tokens"}:
@@ -266,6 +273,9 @@ class EnvironmentConfig:
                 os.getenv("CODEAGENT_PLANNING_MODE", "auto")
             ),
             mcp_config_path=Path(os.getenv("MCP_CONFIG", "mcp.json")),
+            browser_backend=os.getenv("CODEAGENT_BROWSER_BACKEND", "builtin"),
+            browser_channel=os.getenv("CODEAGENT_BROWSER_CHANNEL", "chrome"),
+            browser_headless=_bool_env("CODEAGENT_BROWSER_HEADLESS", False),
             team_runtime_enabled=_bool_env("TEAM_RUNTIME_ENABLED", False),
             team_write_enabled=_bool_env("TEAM_WRITE_ENABLED", False),
             web_max_concurrent_runs=_int_env("CODEAGENT_WEB_MAX_CONCURRENT_RUNS", 4),

@@ -123,7 +123,7 @@ class BrowserSessionTests(unittest.TestCase):
         from codeagent.web.storage import SQLiteRepository
         from tests.test_plan_mode import Client
         repo = SQLiteRepository(self.root / 'db', recover_incomplete=False)
-        env = EnvironmentConfig(model_id='test', enable_skills=False, data_dir=self.root / 'data',
+        env = EnvironmentConfig(model_id='test', browser_backend='mcp', enable_skills=False, data_dir=self.root / 'data',
                                 memory_config=MemoryConfig(enabled=False))
         factory = WebAgentFactory(env, self.root, repo)
         conv = repo.create_conversation(workspace=self.root)

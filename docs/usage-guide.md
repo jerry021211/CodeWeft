@@ -321,7 +321,11 @@ CODEAGENT_WEB_SEARCH_TIMEOUT=20
 | 自动审批 | 常规项目读写、已识别的只读命令以及受支持的浏览器读取自动执行；有风险或无法判断时询问。 |
 | 完全访问 | 取消工具逐次确认；只读、先出方案、工作区限制、硬拒绝和 MCP 服务信任仍有效。 |
 
-浏览器自动审批首版只匹配受信任的内置 Playwright 启动配置：`npx` / `npx.cmd`、
+内置浏览器的页面快照、标签页列表、只读等待和普通站点入口导航在自动模式下放行。
+点击、填写、按键、切换/关闭标签页和关闭浏览器继续审批；改为内置工具不会绕过权限。
+只读/规划模式仍保持原来不允许浏览器操作的边界。自动模式不承诺识别任意网站上的提交、付款等行为。
+
+使用旧 MCP 浏览器模式时，自动审批只匹配受信任的 Playwright 启动配置：`npx` / `npx.cmd`、
 `@playwright/mcp@0.0.83`、Chrome/Edge、`--isolated`，可加 `--headless`。
 额外启动参数、自定义命令路径、工作目录或环境变量不会自动匹配。支持无文件输出的
 页面快照（允许只读的 `target`、`depth`、`boxes` 参数）、等待、标签页列表，以及不含路径操作、查询参数、片段或凭据的 HTTP(S)
@@ -871,7 +875,52 @@ Web 工作台的「设置 → MCP 插件」以服务列表展示连接状态、�
 MCP_CONFIG=config/mcp.json
 ```
 
+### 内置浏览器（默认 Web 入口）
+
+Web Agent 默认通过内置 `browser_*` 工具直接调用 Playwright Python，不需要启动
+Playwright MCP 服务，也不需要配置或信任浏览器 MCP。使用已有 Chrome 打开独立窗口，
+不会接入个人日常浏览器资料。浏览器仍运行在后端所在的电脑上。
+
+新安装的 Web 扩展已包含 Python 依赖；旧环境可在项目目录运行一次：
+
+```bash
+python -m pip install ".[browser]"
+```
+
+默认使用已安装的 Chrome；可在 `.env` 保存以下配置，重启后端后生效，无需每轮设置：
+
+```dotenv
+CODEAGENT_BROWSER_BACKEND=builtin
+CODEAGENT_BROWSER_CHANNEL=chrome
+CODEAGENT_BROWSER_HEADLESS=false
+```
+
+频道支持 `chrome`、`msedge`、`chromium`。选择 Chromium 时先运行
+`python -m playwright install chromium` 安装运行依赖；工具不会在执行任务时偷偷下载浏览器。
+缺少依赖或浏览器时返回安装提示，不自动降级到外部 MCP。
+
+首版支持打开 HTTP(S) 网页、页面与 iframe 可访问性快照、点击、填写、按键、等待、
+标签页列表/切换/关闭和关闭浏览器。交互需要最近快照中的 `snapshot_id`、`frame_id`，
+以及精确的 role/name、label、text 或 test_id 定位条件；匹配不唯一时拒绝操作。
+导航、标签页变化和交互会使旧快照失效。动态页面仍需及时重新读取，不保证任意复杂网站都可操作。
+暂不提供上传/下载、任意脚本执行、截图视觉输入或侧栏网页画面。
+
+会话隔离、跨轮页面保留、接管/交还、闲置 30 分钟清理和取消清理复用第二期逻辑。
+人工接管用于阻止 Agent 同时操作，不会锁住独立窗口的鼠标键盘。
+关闭后下一轮会创建新的临时环境；重启后端不恢复页面或登录。
+
+迁移保留原 MCP 配置与信任记录：内置模式跳过受支持的旧 Playwright MCP 预设，
+避免注册重复浏览器工具；其他自定义 MCP 服务保持原行为。需要旧版完整工具集时，
+设置 `CODEAGENT_BROWSER_BACKEND=mcp` 并重启后端，按下方原流程使用。
+此默认入口仅接入 Web；CLI 保持原来的 MCP 装配。
+
+验证：`python -m unittest tests.test_builtin_browser tests.test_browser_sessions -q`。
+真实 Chrome 本地页面验收：设置 `CODEAGENT_BROWSER_SMOKE=1` 后运行
+`python -m unittest tests.test_builtin_browser_smoke -v`，不使用外部账号或模型服务。
+
 ### 浏览器操作（第一期）
+
+本节为旧 MCP 模式的配置方式；Web 默认内置模式见上节。
 
 在「设置 → MCP 插件 → 添加服务」选择「浏览器（可见）」，选择本机已安装的
 Chrome 或 Edge，保存后按现有流程「信任此配置 → 连接」。需要 Node.js 18+；首次
@@ -899,7 +948,7 @@ Chrome 或 Edge，保存后按现有流程「信任此配置 → 连接」。需
 
 ### 浏览器操作（第二期）
 
-Web 自动识别受支持的浏览器预设，无需每轮重新设置。页面、Cookie 和临时登录状态
+旧 MCP 模式下，Web 自动识别受支持的浏览器预设，无需每轮重新设置。页面、Cookie 和临时登录状态
 在同一会话的多轮对话间保留；新会话和分支使用独立环境，不复制登录状态。
 支持范围与上文自动审批的固定浏览器配置相同，并要求 `lifecycle: "execution"`。
 自定义参数的服务继续使用原生命周期；普通 MCP 和 CLI 行为不变。

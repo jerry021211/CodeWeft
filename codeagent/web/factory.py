@@ -30,6 +30,9 @@ from codeagent.context import RuntimeState
 from codeagent.events import EventEmitter, UsageTracker
 from codeagent.mcp import McpRouter
 from codeagent.mcp.browser import BrowserSessions
+from codeagent.browser.tools import BrowserSessions as BuiltinBrowserSessions
+from codeagent.mcp.approval import is_bundled_browser
+from codeagent.mcp.config import load_mcp_servers
 from codeagent.mcp.trust import McpTrustStore
 from codeagent.messages import reconcile_tool_history
 from codeagent.memory import MemoryAccessController, MemoryWriteBlocked
@@ -87,7 +90,8 @@ class WebAgentFactory:
         self._mcp_routers: dict[tuple[Path, Path, bool], McpRouter] = {}
         self._mcp_lock = threading.RLock()
         self._retired_mcp_routers: WeakSet[McpRouter] = WeakSet()
-        self.browser_sessions = BrowserSessions()
+        self.browser_sessions = (BuiltinBrowserSessions(channel=env.browser_channel, headless=env.browser_headless)
+                                 if env.browser_backend == 'builtin' else BrowserSessions())
 
     def create(
         self,
@@ -254,10 +258,13 @@ class WebAgentFactory:
                     event_metadata={"team_run_id": team_session.team_run_id} if team_session is not None else {}))
             registry.register(LoadToolOutputTool(context_config.tool_output_dir))
             registry.register(LoadContextHistoryTool(context_config.transcript_dir))
-            self._mcp_router(
-                force_workspace_cwd=team_session is not None
-            ).register_tools(registry, cancellation_check=cancellation.raise_if_cancelled,
-                adapt=lambda tool: self.browser_sessions.adapt(tool, execution.conversation_id))
+            router = self._mcp_router(force_workspace_cwd=team_session is not None)
+            if self.env.browser_backend == 'builtin':
+                router.register_tools(registry, cancellation_check=cancellation.raise_if_cancelled)
+                self.browser_sessions.register_tools(registry, execution.conversation_id, self.workspace)
+            else:
+                router.register_tools(registry, cancellation_check=cancellation.raise_if_cancelled,
+                    adapt=lambda tool: self.browser_sessions.adapt(tool, execution.conversation_id))
             if self.env.team_runtime_enabled and team_planner:
                 registry.register(
                     LeadTeamPlanTool(
@@ -663,6 +670,8 @@ class WebAgentFactory:
                 trust = McpTrustStore(self.data_paths.root / 'state' / 'mcp-trust.db')
                 router = McpRouter(
                     config_path,
+                    servers=([server for server in load_mcp_servers(config_path) if not is_bundled_browser(server)]
+                             if self.env.browser_backend == 'builtin' else None),
                     workspace_root=self.workspace,
                     session_workspace=self.project_workspace,
                     force_workspace_cwd=force_workspace_cwd,
@@ -679,6 +688,11 @@ class WebAgentFactory:
         return router.states() if router else {}
 
     def connect_mcp(self, workspace: str | Path, name: str) -> None:
+        if self.env.browser_backend == 'builtin' and any(
+            server.name == name and is_bundled_browser(server)
+            for server in load_mcp_servers(self._mcp_config_path(Path(workspace).resolve()))
+        ):
+            raise ValueError('已启用内置浏览器，直接在对话中要求打开网页即可，无需连接此旧 MCP 预设。')
         self.for_workspace(workspace)._mcp_router().connect_server(name)
 
     def _mcp_config_path(self, workspace: Path) -> Path:
