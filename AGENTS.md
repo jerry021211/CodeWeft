@@ -7,3 +7,9 @@
 - 不用叠加运行时提示词替代代码层面的根因修复。
 - 保留工作区已有改动；按实际影响范围运行回归测试，说明未验证的边界。
 - 必须扩大修改范围时，先说明根因、影响面及为什么局部修复不足。
+
+## Comments and GitHub sync
+
+- Write new or revised code comments and Git commit messages in English.
+- After each completed change, run the relevant checks and stage only the files or hunks that belong to the task.
+- Commit and push the change to the current branch on `origin` as part of the same task. Verify the remote commit and include its GitHub link in the completion message.
