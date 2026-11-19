@@ -1030,6 +1030,19 @@ class SQLiteRepository(TeamCoordinationStorage, TeamLifecycleStorage, TeamIntegr
     def _transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         with self._lock:
             self._ensure_open()
+            # Composed domain operations may call the existing task APIs. A
+            # savepoint keeps their writes inside the caller's atomic boundary.
+            if self._connection.in_transaction:
+                savepoint = "nested_" + uuid4().hex
+                self._connection.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    yield self._connection
+                except BaseException:
+                    self._connection.execute(f"ROLLBACK TO {savepoint}")
+                    raise
+                finally:
+                    self._connection.execute(f"RELEASE {savepoint}")
+                return
             self._connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             try:
                 yield self._connection

@@ -6,7 +6,9 @@ import { ModelSettingsPage } from "@/components/ModelSettingsPage";
 import { ArchivedConversationsPanel } from "@/components/ArchivedConversationsPanel";
 import { SchedulesPanel } from "@/components/SchedulesPanel";
 
+import { MobileLinkPanel } from "@/features/mobile/MobileLinkPanel";
 const sections = [
+  { id: "mobile", label: "连接手机", icon: Monitor, description: "在同一 Wi-Fi 下，用手机浏览电脑项目并继续对话。" },
   { id: "general", label: "通用", icon: Settings2, description: "调整工作台的外观和使用偏好。" },
   { id: "models", label: "模型与能力", icon: Bot, description: "配置对话模型、语音识别和向量检索。" },
   { id: "mcp", label: "MCP 插件", icon: Plug, description: "管理项目使用的外部工具与服务。" },
@@ -55,6 +57,7 @@ export function SettingsPage({ section, onClose, theme, onThemeChange, onSaved, 
           <p className="text-xs leading-6 text-ink-faint">外观设置自动保存在当前浏览器。聊天记录和项目配置保存在本机。</p>
         </div>}
         {(modelsVisited || section === "models") && <div hidden={section !== "models"}><ModelSettingsPage embedded onClose={onClose} onSaved={onSaved} /></div>}
+        {section === "mobile" && <MobileLinkPanel />}
         {section === "mcp" && mcpPanel}
         {section === "archived" && <ArchivedConversationsPanel onRestored={onRestored} onDelete={onDelete} />}
         {section === "schedules" && <SchedulesPanel onOpen={conversation => onRestored(conversation, true)} />}

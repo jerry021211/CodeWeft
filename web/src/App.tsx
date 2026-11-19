@@ -131,6 +131,9 @@ export default function App() {
     enabled: Boolean(selectedId),
   });
   const selectedConversation = conversations.find((item) => item.id === selectedId) ?? conversationQuery.data;
+  useEffect(() => {
+    if (selectedId) void queryClient.invalidateQueries({ queryKey: messagesKey(selectedId) });
+  }, [queryClient, selectedId, selectedConversation?.latest_run_id, selectedConversation?.run_status]);
   const approvalMode = selectedConversation?.approval_mode ?? "auto";
   const taskListId = selectedConversation?.active_task_list_id ?? undefined;
   const messagesQuery = useQuery({

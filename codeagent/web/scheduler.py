@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import queue
 import threading
 import time
@@ -181,13 +183,31 @@ class RunScheduler:
         attachments: list[dict] | None = None,
         plan_mode: bool | None = None,
         approval_mode: str | None = None,
+        admission_key: str | None = None,
     ) -> RunRecord:
         # Admission, queue order and shutdown share one short critical section.
         with self._lock:
             self.start()
+            submission_id = self.submission_run_id(admission_key) if admission_key is not None else None
+            digest = hashlib.sha256(json.dumps([
+                conversation_id, str(content).strip(), use_team, read_only, web_search_enabled,
+                reasoning_effort, attachments, plan_mode, approval_mode,
+            ], sort_keys=True, ensure_ascii=False).encode()).hexdigest() if admission_key is not None else None
+            previous = self.repository.get_run(submission_id) if submission_id else None
+            if previous is not None:
+                if previous.conversation_id != conversation_id or previous.metadata.get("admission_digest") != digest:
+                    raise StorageConflictError("Submission key was already used for a different request")
+                return previous
             return self._submit(conversation_id, content, use_team=use_team, read_only=read_only,
                                 web_search_enabled=web_search_enabled, reasoning_effort=reasoning_effort, attachments=attachments,
-                                plan_mode=plan_mode, approval_mode=approval_mode)
+                                plan_mode=plan_mode, approval_mode=approval_mode,
+                                submission_id=submission_id, admission_digest=digest)
+
+    @staticmethod
+    def submission_run_id(key: str) -> str:
+        if not isinstance(key, str) or not key or len(key) > 256:
+            raise ValueError("Invalid submission key")
+        return "run_external_" + hashlib.sha256(key.encode()).hexdigest()
 
     def _submit(
         self, conversation_id: str, content: str, *, use_team: bool,
@@ -198,6 +218,8 @@ class RunScheduler:
         plan_mode: bool | None = None,
         approval_mode: str | None = None,
         approved_plan_id: str | None = None,
+        submission_id: str | None = None,
+        admission_digest: str | None = None,
     ) -> RunRecord:
         from codeagent.permissions.policy import validate_approval_mode
         validate_approval_mode(approval_mode)
@@ -260,11 +282,17 @@ class RunScheduler:
         requested_mode = "team" if use_team else "single"
         if plan_mode:
             self.repository.set_planning_mode(conversation_id, 'planning', 'team' if use_team else 'single')
-        run = self.repository.create_run(
-            conversation_id,
-            **({'run_id': 'run_' + approved_plan_id} if approved_plan_id else {}),
-            metadata={
+        # Persist the accepted Run and its user message together. If the process
+        # stops before publishing the in-memory job, recovery marks it interrupted;
+        # the admission key still prevents a second execution.
+        with self.repository._transaction(immediate=True):
+            run = self.repository.create_run(
+                conversation_id,
+                **({'run_id': submission_id} if submission_id else
+                   {'run_id': 'run_' + approved_plan_id} if approved_plan_id else {}),
+                metadata={
                 "requested_mode": requested_mode,
+                **({"admission_digest": admission_digest} if submission_id else {}),
                 "approval_mode": approval_mode,
                 "read_only": read_only,
                 **({'plan_mode': True} if plan_mode else {}),
@@ -276,17 +304,17 @@ class RunScheduler:
                     if use_team
                     else PromptMode.NORMAL.value
                 ),
-            },
-        )
-        self.repository.create_message(
-            conversation_id,
-            role="user",
-            content=prompt,
-            run_id=run.id,
-            metadata={"status": "complete", "approval_mode": approval_mode, "read_only": read_only, "web_search_enabled": web_search_enabled,
-                      "reasoning_effort": reasoning_effort or "default",
-                      "attachments": [{"name": item["name"], "media_type": item["media_type"]} for item in attachments or []]},
-        )
+                },
+            )
+            self.repository.create_message(
+                conversation_id,
+                role="user",
+                content=prompt,
+                run_id=run.id,
+                metadata={"status": "complete", "approval_mode": approval_mode, "read_only": read_only, "web_search_enabled": web_search_enabled,
+                          "reasoning_effort": reasoning_effort or "default",
+                          "attachments": [{"name": item["name"], "media_type": item["media_type"]} for item in attachments or []]},
+            )
         emitter = EventEmitter(
             RecordingEventSink(self.repository),
             context=ExecutionContext(
@@ -361,9 +389,14 @@ class RunScheduler:
             reasoning_effort=reasoning_effort,
         )
         with self._lock:
-            self._controls[run.id] = job
-        emitter.emit("run.queued", {"status": "queued", "queue_position": run.queue_position})
-        self._jobs.put(job)
+            try:
+                emitter.emit("run.queued", {"status": "queued", "queue_position": run.queue_position})
+                self._controls[run.id] = job
+                self._jobs.put(job)
+            except Exception:
+                self._controls.pop(run.id, None)
+                self.repository.update_run_status(run.id, "failed", error="Run dispatch failed")
+                raise
         return self.repository.get_run(run.id) or run
 
     def reload_mcp(self, workspace: str) -> bool:

@@ -256,6 +256,8 @@ def create_app(
     app.state.repository = repo
     app.state.scheduler = scheduler
     app.state.timed_scheduler = timed_scheduler
+    from codeagent.web.mobile_link import MobileLink, mobile_router
+    app.include_router(mobile_router(MobileLink(repo, scheduler, workspace_catalog)))
     app.include_router(schedule_router(repo, workspace_catalog))
     app.state.workspace = workspace_path
     app.state.environment = runtime_env

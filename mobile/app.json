@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "name": "CodeWeft",
+    "slug": "codeweft-mobile",
+    "version": "0.1.0",
+    "platforms": ["ios"],
+    "orientation": "portrait",
+    "ios": { "bundleIdentifier": "app.codeweft.mobile" },
+    "plugins": ["expo-secure-store", "expo-sqlite"]
+  }
+}
