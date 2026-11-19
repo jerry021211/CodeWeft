@@ -30,6 +30,7 @@ class MobileLink:
         self.ticket = self.device = None
         self.deadline = 0
         self.seen = {}
+        self.workbench = None
 
     def invite(self):
         from nacl.secret import SecretBox
@@ -92,6 +93,8 @@ class MobileLink:
 
     def dispatch(self, data):
         action = data.get("action")
+        if action == "open_workbench" and self.workbench:
+            return self.workbench.launch(data.get("chat"))
         project = data.get("project")
         if action == "catalog":
             return [{"id": c.id, "project": c.workspace, "title": c.title}
@@ -110,6 +113,20 @@ class MobileLink:
         chat = self.repo.get_conversation(str(data.get("chat")))
         if not chat or chat.archived_at or chat.workspace != project:
             raise ValueError("会话已移除或不属于当前项目")
+        control = bool(self.workbench and self.workbench.enabled)
+        if action in {"cancel", "decision"}:
+            if not control:
+                raise ValueError("请先在电脑授权完整工作台")
+            run = self.repo.get_run(str(data.get("run")))
+            if not run or run.conversation_id != chat.id:
+                raise ValueError("任务不属于当前会话")
+            if action == "cancel":
+                return {"status": self.scheduler.cancel(run.id).status}
+            approval = self.repo.get_approval(str(data.get("approval")))
+            decision = data.get("decision")
+            if not approval or approval.run_id != run.id or decision not in ("allow", "deny"):
+                raise ValueError("审批请求无效")
+            return {"status": self.scheduler.resolve_approval(run.id, approval.id, decision).status}
         if action == "send":
             content = data.get("content")
             if not isinstance(content, str) or not 0 < len(content.strip()) <= 20000:
@@ -118,7 +135,12 @@ class MobileLink:
                 raise ValueError("请在电脑上完成当前方案，或新建对话")
             request_id = UUID(str(data.get("requestId")))
             # 网络超时后手机会换 nonce 重发；同一次提问复用 requestId，避免电脑再次执行。
-            run = self.scheduler.submit(chat.id, content, read_only=True, approval_mode="ask",
+            execute = data.get("execute") is True
+            if execute and not control:
+                raise ValueError("请先在电脑授权完整工作台")
+            if execute and self.repo.get_active_team_run_for_conversation(chat.id):
+                raise ValueError("请在完整工作台中继续团队任务")
+            run = self.scheduler.submit(chat.id, content, read_only=not execute, approval_mode="ask",
                                         admission_key=f"mobile:{chat.id}:{request_id}")
             return {"run": run.id}
         if action != "history":
@@ -138,7 +160,13 @@ class MobileLink:
             if isinstance(content, str) and content:
                 messages.append({"id": msg.id, "role": msg.role, "text": content})
         latest = self.repo.list_runs(conversation_id=chat.id, limit=1)
-        return {"messages": messages, "status": latest[0].status if latest else None,
+        active = self.repo.list_runs(conversation_id=chat.id, statuses=["running", "queued"], limit=1)
+        approvals = self.scheduler.list_pending_approvals(chat.id) if control else []
+        current = next(iter(active or latest), None)
+        return {"messages": messages, "status": current.status if current else None, "control": control,
+                "run": active[0].id if active else None,
+                "approvals": [{"id": a.id, "run": a.run_id, "tool": a.tool_name, "input": a.tool_input,
+                               "reason": a.reason} for a in approvals],
                 "next": offset + len(batch), "more": len(batch) == 100}
 
 
@@ -154,8 +182,10 @@ def mobile_router(link):
         return link.invite()
 
     @router.post("/api/mobile/revoke")
-    def revoke():
+    async def revoke():
         link.revoke()
+        if link.workbench:
+            await link.workbench.stop()
         return {"paired": False}
 
     @router.post("/mobile-link/exchange")

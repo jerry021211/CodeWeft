@@ -7,6 +7,9 @@ export type DesktopChat = { id: string; project: string; title: string };
 export type DesktopHistory = {
   messages: { id: string; role: 'user' | 'assistant'; text: string }[];
   status: string | null;
+  control?: boolean;
+  run?: string | null;
+  approvals?: {id: string; run: string; tool: string; reason: string; input: Record<string, unknown>}[];
   next: number;
   more: boolean;
 };

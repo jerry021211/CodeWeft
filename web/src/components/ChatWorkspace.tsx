@@ -148,7 +148,7 @@ export function ChatWorkspace(props: Props) {
   }, [props.draft]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !window.matchMedia("(pointer: coarse)").matches) {
       event.preventDefault();
       if (canSend) props.onSend();
     }
@@ -247,7 +247,7 @@ export function ChatWorkspace(props: Props) {
             disabled={busy}
             placeholder={props.team?.team.state === "pausing" ? "团队正在暂停，等待当前操作退出…" : teamPaused ? "团队已暂停，点击“继续执行”后可发送指令…" : props.cancelling || props.run?.status === "cancelling" ? "正在停止当前运行…" : active ? "Agent 正在工作…" : teamProgress.waitingRecovery ? "团队等待恢复，请先查看恢复事项；也可向 Lead 补充说明…" : props.team?.team.state === "running" ? "团队正在执行，可向 Lead 补充指令…" : props.teamLeadActive ? "向 Root / Lead 发送团队指令…" : props.useTeam ? "描述团队任务，Lead 将拆分任务并提交方案…" : "告诉 CodeWeft 你想做什么…"}
             aria-label="发送消息"
-            className="scrollbar-thin min-h-[76px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60"
+            className="scrollbar-thin min-h-[52px] w-full resize-none bg-transparent px-4 pb-2 pt-4 text-base leading-6 text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-[76px] sm:text-sm"
           />
           <ComposerToolbar approvalMode={props.approvalMode} approvalSaving={props.approvalSaving} onApprovalModeChange={props.onApprovalModeChange} planMode={props.planMode} planLocked={props.planLocked} onPlanModeChange={props.onPlanModeChange} busy={busy} active={active} cancelling={Boolean(props.cancelling || props.run?.status === "cancelling")}
             sending={props.sending} canSend={canSend} readOnly={props.readOnly} useTeam={props.useTeam} teamEnabled={props.teamEnabled} teamLeadActive={props.teamLeadActive} teamState={teamProgress.waitingRecovery ? "recovery_waiting" : props.team?.team.state}

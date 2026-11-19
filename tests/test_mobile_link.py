@@ -57,6 +57,23 @@ def test_pair_browse_resume_and_revoke(tmp_path):
         content = "继续"
         assert "result" in exchange(key, dict(target, action="send", content=content, requestId=str(uuid4())))[0]
         assert submissions[0]["read_only"] is True
+        assert "error" in exchange(key, dict(target, action="send", execute=True, content=content, requestId=str(uuid4())))[0]
+        link.workbench = SimpleNamespace(enabled=True)
+        assert "result" in exchange(key, dict(target, action="send", execute=True, content=content, requestId=str(uuid4())))[0]
+        assert submissions[-1]["read_only"] is False and submissions[-1]["approval_mode"] == "ask"
+        assert "error" in exchange(key, dict(target, action="cancel", run="missing"))[0]
+        run = repo.create_run(a.id)
+        approval = repo.create_approval(run.id, tool_name="write", tool_input={"path": "README.md"}, reason="test")
+        link.scheduler.list_pending_approvals = lambda chat: repo.list_approvals(conversation_id=chat, status="pending")
+        link.scheduler.cancel = repo.request_run_cancel
+        link.scheduler.resolve_approval = lambda run_id, id, decision: repo.resolve_approval(id, decision)
+        page = exchange(key, dict(target, action="history"))[0]["result"]
+        assert page["run"] == run.id and page["approvals"][0]["input"] == {"path": "README.md"}
+        decision = dict(action="decision", run=run.id, approval=approval.id, decision="deny")
+        assert "error" in exchange(key, dict(chat=b.id, project=str(second), **decision))[0]
+        assert exchange(key, dict(target, **decision))[0]["result"]["status"] == "denied"
+        assert "result" in exchange(key, dict(target, action="cancel", run=run.id))[0]
+        link.workbench = None
         reply, _ = exchange(key, dict(target, action="history"))
         assert reply["result"]["messages"][0]["text"] == content
         assert "error" in exchange(key, dict(target, action="history", project=str(second)))[0]

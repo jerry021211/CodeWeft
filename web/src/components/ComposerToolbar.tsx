@@ -1,4 +1,5 @@
 import { ApprovalModeMenu } from "@/components/ApprovalModeMenu";
+import { useState } from "react";
 import type { ApprovalMode } from "@/types/api";
 import { ArrowUp, Brain, ChevronDown, FileText, Globe, Plus, Square, X } from "lucide-react";
 import { cx } from "@/lib/utils";
@@ -21,11 +22,16 @@ const control = "inline-flex h-8 min-w-0 items-center gap-1.5 rounded-lg text-xs
 const iconButton = "relative inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-ink-muted transition hover:bg-surface-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-35";
 
 export function ComposerToolbar(props: Props) {
+  const [expanded, setExpanded] = useState(false);
   const mode = props.teamLeadActive || props.useTeam ? "team" : props.readOnly ? "read" : "agent";
   const reasoning = props.reasoningEffort ?? "default";
   const reasoningLabel = (value: string) => ({ default: `默认${props.reasoningDefault ? ` · ${props.reasoningDefault}` : ""}`, none: "关闭思考", low: "低", medium: "中", high: "高", max: "最高" } as Record<string, string>)[value] ?? value;
   return <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 px-2.5 pb-2.5 pt-1" aria-label="消息选项">
-    <div className="flex min-w-0 flex-wrap items-center gap-0.5">
+    <button type="button" className="inline-flex min-h-11 items-center gap-2 rounded-full bg-surface-muted px-3 text-sm text-ink sm:hidden"
+      aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      {mode === "team" ? "团队" : mode === "read" ? "只读" : "执行"} · 工具 <ChevronDown className="size-4" />
+    </button>
+    <div className={cx("min-w-0 flex-wrap items-center gap-1 sm:order-none sm:flex sm:w-auto", expanded ? "order-last flex w-full border-t border-line pt-2 sm:border-0 sm:pt-0" : "hidden")}>
       <ComposerModeMenu mode={mode} busy={props.busy} teamEnabled={props.teamEnabled} teamLeadActive={props.teamLeadActive} teamState={props.teamState}
         planMode={props.planMode} planLocked={props.planLocked} onPlanModeChange={props.onPlanModeChange}
         onModeChange={value => { props.onReadOnlyChange(value === "read"); props.onTeamChange?.(value === "team"); }} />
