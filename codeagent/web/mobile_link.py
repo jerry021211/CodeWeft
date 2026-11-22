@@ -1,4 +1,4 @@
-"""One paired handset per workbench process. Metro relays opaque secretbox packets."""
+"""One trusted handset per workbench data directory."""
 import json
 import secrets
 import socket
@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from codeagent.web.storage import StorageError
+from codeagent.web.mobile_pairing import PairingStore
 
 
 class Packet(BaseModel):
@@ -22,15 +23,19 @@ def encoded(data):
 
 
 class MobileLink:
-    def __init__(self, repo, scheduler, catalog):
+    def __init__(self, repo, scheduler, catalog, *, pairing_dir=None):
         self.repo = repo
         self.scheduler = scheduler
         self.catalog = catalog
         self.lock = RLock()
-        self.ticket = self.device = None
+        self.pairing = PairingStore(pairing_dir)
+        self.ticket = None
         self.deadline = 0
-        self.seen = {}
         self.workbench = None
+
+    @property
+    def device(self):
+        return self.pairing.read()
 
     def invite(self):
         from nacl.secret import SecretBox
@@ -41,8 +46,8 @@ class MobileLink:
 
     def revoke(self):
         with self.lock:
-            self.ticket = self.device = None
-            self.seen.clear()
+            self.pairing.replace(None)
+            self.ticket = None
 
     def exchange(self, packet):
         from nacl.exceptions import CryptoError
@@ -64,16 +69,14 @@ class MobileLink:
                     or not isinstance(data.get("time"), int) or abs(now - data["time"]) > 120):
                 raise HTTPException(400, "请检查手机和电脑的时间")
             nonce = encoded(wire[:SecretBox.NONCE_SIZE])
-            self.seen = {n: expiry for n, expiry in self.seen.items() if expiry >= now}
-            if nonce in self.seen:
+            if not packet.pairing and not self.pairing.accept(key, nonce, now):
                 raise HTTPException(409, "请求已接收")
-            # 两端时钟允许相差 120 秒。即使请求来自快钟，nonce 也要保留到整个有效窗口结束。
-            self.seen[nonce] = now + 241
             try:
                 if packet.pairing:
+                    device = secrets.token_bytes(SecretBox.KEY_SIZE)
+                    self.pairing.replace(device)
                     self.ticket = None
-                    self.device = secrets.token_bytes(SecretBox.KEY_SIZE)
-                    result = {"key": encoded(self.device), "computer": socket.gethostname()}
+                    result = {"key": encoded(device), "computer": socket.gethostname()}
                 else:
                     result = self.dispatch(data)
                 reply = {"result": result}

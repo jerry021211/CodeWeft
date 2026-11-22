@@ -25,6 +25,7 @@ browser = ["playwright>=1.49,<2"]
 web = [
     "PyNaCl>=1.5,<2",
     "cryptography>=42",
+    "pywin32>=306; sys_platform == 'win32'",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
     "httpx>=0.27,<1",

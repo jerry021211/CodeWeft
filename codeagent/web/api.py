@@ -233,6 +233,7 @@ def create_app(
             yield
         finally:
             await full_workbench.stop()
+            mobile_link.pairing.close()
             timed_scheduler.stop()
             try:
                 if team_supervisor is not None:
@@ -259,7 +260,7 @@ def create_app(
     app.state.timed_scheduler = timed_scheduler
     from codeagent.web.mobile_link import MobileLink, mobile_router
     from codeagent.web.mobile_workbench import FullWorkbench, workbench_router
-    mobile_link = MobileLink(repo, scheduler, workspace_catalog)
+    mobile_link = MobileLink(repo, scheduler, workspace_catalog, pairing_dir=data_paths.root / "mobile-link")
     full_workbench = FullWorkbench(mobile_link, app, data_paths.root, session_token)
     mobile_link.workbench = full_workbench
     app.include_router(mobile_router(mobile_link))

@@ -27,7 +27,7 @@ def test_authenticated_https_streams_and_mutations(tmp_path):
             return {"ok": True}
 
         link = MobileLink(SimpleNamespace(get_conversation=lambda _: True), None, None)
-        link.device = b"paired"
+        link.pairing.replace(b"paired")
         gate = FullWorkbench(link, app, tmp_path, "fixture", port=0)
         with patch("codeagent.web.mobile_workbench.lan_addresses", return_value=["127.0.0.1"]):
             await gate.start("127.0.0.1")

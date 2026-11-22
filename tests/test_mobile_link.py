@@ -27,10 +27,14 @@ def test_pair_browse_resume_and_revoke(tmp_path):
         second.mkdir()
         a = repo.create_conversation(title="A", workspace=project)
         b = repo.create_conversation(title="B", workspace=second)
-        app = FastAPI()
-        link = MobileLink(repo, SimpleNamespace(submit=submit), WorkspaceCatalog(project))
-        app.include_router(mobile_router(link))
-        client = TestClient(app)
+        def boot():
+            app = FastAPI()
+            link = MobileLink(repo, SimpleNamespace(submit=submit), WorkspaceCatalog(project),
+                              pairing_dir=tmp_path / "mobile-link")
+            app.include_router(mobile_router(link))
+            return link, TestClient(app)
+
+        link, client = boot()
         code = client.post("/api/mobile/invite").json()["code"]
 
         def exchange(key, body, *, pairing=False):
@@ -50,6 +54,13 @@ def test_pair_browse_resume_and_revoke(tmp_path):
         reply, packet = exchange(key, {"action": "catalog"})
         assert {item["id"] for item in reply["result"]} == {a.id, b.id}
         assert client.post("/mobile-link/exchange", json=packet).status_code == 409
+        outstanding = client.post("/api/mobile/invite").json()["code"]
+        link.pairing.close()
+        link, client = boot()
+        assert client.get("/api/mobile/status").json()["paired"]
+        assert client.post("/mobile-link/exchange", json=packet).status_code == 409
+        assert exchange(outstanding, {}, pairing=True)[0] == 401
+        assert "result" in exchange(key, {"action": "catalog"})[0]
         command = dict(action="create", project=project, requestId=str(uuid4()))
         created = exchange(key, command)[0]["result"]
         assert exchange(key, command)[0]["result"] == created
@@ -78,5 +89,15 @@ def test_pair_browse_resume_and_revoke(tmp_path):
         assert reply["result"]["messages"][0]["text"] == content
         assert "error" in exchange(key, dict(target, action="history", project=str(second)))[0]
         assert "error" in exchange(key, dict(command, project=str(tmp_path.parent)))[0]
-        client.post("/api/mobile/revoke")
+        invite = client.post("/api/mobile/invite").json()["code"]
+        replacement = exchange(invite, {}, pairing=True)[0]["result"]["key"]
+        link.pairing.close()
+        link, client = boot()
         assert exchange(key, {"action": "catalog"})[0] == 401
+        assert "result" in exchange(replacement, {"action": "catalog"})[0]
+        client.post("/api/mobile/revoke").raise_for_status()
+        link.pairing.close()
+        link, client = boot()
+        assert not client.get("/api/mobile/status").json()["paired"]
+        assert exchange(replacement, {"action": "catalog"})[0] == 401
+        link.pairing.close()
