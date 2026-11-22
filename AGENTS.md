@@ -11,5 +11,6 @@
 ## Comments and GitHub sync
 
 - Write new or revised code comments and Git commit messages in English.
+- Follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/). Start the title with a lowercase type and an optional component scope, for example `fix(mobile): keep paired devices connected after restart`. Use `feat` for new features, `fix` for bug fixes, and types such as `docs`, `refactor`, `perf`, or `test` for their respective changes. Mark breaking changes with `!` before the colon or a `BREAKING CHANGE:` footer.
 - After each completed change, run the relevant checks and stage only the files or hunks that belong to the task.
-- Commit and push the change to the current branch on `origin` as part of the same task. Verify the remote commit and include its GitHub link in the completion message.
+- Commit and push the change to the current branch on `origin` as part of the same task. Verify the remote commit and use its full tagged title as the GitHub link text in the sync summary.
