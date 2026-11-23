@@ -42,16 +42,12 @@ Start with the **web workbench**. You need **Python 3.11+, Git, Node.js 22.12+, 
 
 ### 1. Install and launch
 
-Windows PowerShell:
+On Windows, clone the repository and double-click `start.cmd` in its root to launch the web workbench. The launcher can reuse an existing Python web runtime and frontend build. On a fresh checkout it creates a virtual environment, installs dependencies, and builds the frontend for subsequent launches. After changing dependencies or frontend code, run `.\start.cmd --setup` in PowerShell to refresh it.
 
 ```powershell
 git clone https://github.com/jerry021211/CodeWeft.git
 cd CodeWeft
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[web]"
-npm.cmd --prefix web ci
-npm.cmd --prefix web run build
-.\.venv\Scripts\python.exe -m codeagent.web.cli --workspace . --port 8765
+.\start.cmd
 ```
 
 <details>

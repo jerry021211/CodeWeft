@@ -42,16 +42,12 @@
 
 ### 1. 安装并启动
 
-Windows PowerShell：
+Windows 用户克隆仓库后，双击根目录的 `start.cmd` 即可启动 Web 工作台。已有可用的 Python Web 环境和前端构建时会直接启动。全新检出首次运行会创建虚拟环境、安装依赖并构建前端，后续双击可复用。更新依赖或前端代码后，在 PowerShell 运行 `.\start.cmd --setup` 重新安装并构建。
 
 ```powershell
 git clone https://github.com/jerry021211/CodeWeft.git
 cd CodeWeft
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[web]"
-npm.cmd --prefix web ci
-npm.cmd --prefix web run build
-.\.venv\Scripts\python.exe -m codeagent.web.cli --workspace . --port 8765
+.\start.cmd
 ```
 
 <details>
