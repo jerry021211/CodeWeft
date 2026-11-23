@@ -1,7 +1,9 @@
 """Authenticated HTTPS entry point for the existing workbench UI and its SSE streams."""
 import asyncio
+import logging
 import secrets
 import socket
+import subprocess
 import time
 from contextlib import nullcontext
 
@@ -12,7 +14,7 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from .mobile_tls import identity, lan_addresses
+from .mobile_tls import identity, lan_addresses, windows_wifi_address
 
 COOKIE = "__Host-codeweft-mobile"
 LOGIN = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
@@ -65,6 +67,17 @@ class FullWorkbench:
         self.chat = chat if isinstance(chat, str) and self.link.repo.get_conversation(chat) else None
         self.ticket_until = time.monotonic() + 60
         return {"url": self.address + "/open#" + self.ticket}
+
+    async def start_on_wifi(self):
+        """Restore access for the paired phone at desktop startup."""
+        if self.link.device is None:
+            return
+        try:
+            ip = await asyncio.to_thread(windows_wifi_address)
+            if ip is not None:
+                await self.start(ip)
+        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logging.getLogger(__name__).warning("Unable to start mobile Wi-Fi workbench: %s", exc)
 
     async def start(self, ip):
         async with self.lock:

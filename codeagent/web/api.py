@@ -230,6 +230,7 @@ def create_app(
             team_supervisor.start()
         timed_scheduler.start()
         try:
+            await full_workbench.start_on_wifi()
             yield
         finally:
             await full_workbench.stop()

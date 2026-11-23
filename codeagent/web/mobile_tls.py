@@ -2,6 +2,7 @@
 import ipaddress
 import os
 import socket
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,6 +16,24 @@ def lan_addresses():
     networks = [ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
     addresses = {item[4][0] for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
     return sorted(addr for addr in addresses if any(ipaddress.ip_address(addr) in net for net in networks))
+
+
+def windows_wifi_address():
+    """Select an unambiguous private IPv4 address on a connected wireless adapter."""
+    if os.name != "nt":
+        return None
+    command = (
+        "[System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | "
+        "Where-Object { $_.OperationalStatus -eq 'Up' -and "
+        "$_.NetworkInterfaceType -eq 'Wireless80211' } | ForEach-Object { "
+        "$_.GetIPProperties().UnicastAddresses | ForEach-Object { $_.Address.ToString() } }"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, check=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    candidates = set(result.stdout.decode("ascii", errors="ignore").splitlines()) & set(lan_addresses())
+    return candidates.pop() if len(candidates) == 1 else None
 
 
 def identity(root: Path, address: str):

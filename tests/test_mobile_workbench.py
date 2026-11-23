@@ -1,15 +1,50 @@
 import asyncio
+import os
 import ssl
 from types import SimpleNamespace
 from urllib.parse import urlsplit
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from codeagent.web.mobile_workbench import FullWorkbench
 from codeagent.web.mobile_link import MobileLink
+from codeagent.web.mobile_tls import windows_wifi_address
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows adapter discovery")
+def test_wifi_selection_excludes_other_adapters_and_ambiguous_addresses():
+    lan = ["172.16.0.1", "192.168.1.10", "192.168.2.10"]
+    with patch("codeagent.web.mobile_tls.lan_addresses", return_value=lan), \
+         patch("codeagent.web.mobile_tls.subprocess.run") as discover:
+        discover.return_value.stdout = b"fe80::1\r\n192.168.1.10\r\n"
+        assert windows_wifi_address() == "192.168.1.10"
+        discover.return_value.stdout += b"192.168.2.10\r\n"
+        assert windows_wifi_address() is None
+        discover.return_value.stdout = b""
+        assert windows_wifi_address() is None
+
+
+def test_startup_requires_pairing_and_wifi_and_tolerates_bind_failure(tmp_path):
+    async def check():
+        link = SimpleNamespace(device=None)
+        gate = FullWorkbench(link, None, tmp_path, "fixture")
+        with patch("codeagent.web.mobile_workbench.windows_wifi_address") as discover, \
+             patch.object(gate, "start", new_callable=AsyncMock) as start:
+            await gate.start_on_wifi()
+            discover.assert_not_called()
+            link.device = b"paired"
+            discover.return_value = None
+            await gate.start_on_wifi()
+            start.assert_not_awaited()
+            discover.return_value = "192.168.1.10"
+            start.side_effect = OSError("port in use")
+            await gate.start_on_wifi()
+            start.assert_awaited_once_with("192.168.1.10")
+    asyncio.run(check())
 
 
 def test_authenticated_https_streams_and_mutations(tmp_path):
