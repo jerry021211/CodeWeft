@@ -3,7 +3,7 @@ import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, CircleStop, Menu, Monitor, Moon, PanelRight, Plug, Sparkles, Sun, Wifi, WifiOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Approval, ApprovalDecision, Message, PlanDocument, PlanningSnapshot, TeamSnapshot } from "@/types/api";
+import type { Approval, ApprovalDecision, Message, PlanDocument, PlanningSnapshot, RunEvent, TeamSnapshot } from "@/types/api";
 import type { RunViewState } from "@/store/runStore";
 import { cx, formatTime, isRunActive, statusLabel } from "@/lib/utils";
 import { getRunAnswer } from "@/lib/runAnswer";
@@ -90,6 +90,25 @@ type Props = {
   onToggleTheme: () => void;
 };
 
+const compactionReasons: Record<string, string> = {
+  auto_compact: "达到压缩阈值",
+  hard_limit: "请求超出窗口预算",
+  reactive_compact: "模型上下文超限",
+  manual_compact: "Agent 请求压缩",
+};
+
+function CompactionNotice({ event }: { event: RunEvent }) {
+  const reason = event.payload.reason ?? event.payload.generation_reason;
+  const label = typeof reason === "string" ? compactionReasons[reason] : undefined;
+  const folded = event.payload.folded_messages;
+  return <p className="flex flex-wrap items-baseline justify-center gap-x-2 text-xs text-ink-muted">
+    <time dateTime={event.occurred_at}>{formatTime(event.occurred_at)}</time>
+    <span className="font-medium">上下文已压缩</span>
+    {label && <span>· {label}</span>}
+    {typeof folded === "number" && <span>· 折叠 {folded} 条消息</span>}
+  </p>;
+}
+
 export function ChatWorkspace(props: Props) {
   const attachmentRef = useRef<AttachmentPickerHandle>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -103,6 +122,7 @@ export function ChatWorkspace(props: Props) {
   const teamProgress = teamExecutionState(props.team);
   const canSend = Boolean(!busy && !teamPaused && !props.teamBusy && !attachmentsReading && (props.draft.trim() || props.attachments?.length));
   const runs = useMemo(() => ({ ...props.historyRuns, ...(props.run ? { [props.run.runId]: props.run } : {}) }), [props.historyRuns, props.run]);
+  const compactionCount = Object.values(runs).reduce((count, run) => count + run.compactions.length, 0);
   const rootRuns = useMemo(() => Object.fromEntries(Object.entries(runs).map(([id, run]) => [id, rootProcessRun(run)])), [runs]);
   const plansByRun = useMemo(() => conversationPlans(props.planningSnapshot?.plans), [props.planningSnapshot?.plans]);
   const teamsByRun = useMemo(() => {
@@ -113,6 +133,7 @@ export function ChatWorkspace(props: Props) {
   const anchors = useMemo(() => processAnchors(props.messages, [...new Set([...Object.keys(runs), ...Object.keys(plansByRun), ...Object.keys(teamsByRun)])]), [props.messages, runs, plansByRun, teamsByRun]);
   const process = (id: string) => <Fragment key={id}>
     {rootRuns[id] && <ThinkingProcess run={rootRuns[id]} />}
+    {runs[id]?.compactions.map(event => <CompactionNotice key={event.seq} event={event} />)}
     {runs[id] && <NativeCollaboration run={runs[id]} relatedRuns={runs} sync={props.collaborationSync} onContinue={text => { props.onDraft(text); inputRef.current?.focus(); }} />}
     {plansByRun[id]?.map(plan => <PlanMessage key={plan.id} plan={plan}
       current={plan.id === props.planningSnapshot?.state.active_plan_id} busy={busy || props.planBusy}
@@ -138,7 +159,7 @@ export function ChatWorkspace(props: Props) {
   useEffect(() => {
     if (!following) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [props.messages, answer?.text, props.run?.actionOrder.length, following, planPresentationKey, teamPresentationKey, approvalKey]);
+  }, [props.messages, answer?.text, props.run?.actionOrder.length, compactionCount, following, planPresentationKey, teamPresentationKey, approvalKey]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -174,6 +195,7 @@ export function ChatWorkspace(props: Props) {
             ) : (
               <><span className="size-1.5 rounded-full bg-success" /><span className="truncate">{props.runtimeModel || "本地 Agent"}</span></>
             )}
+            {compactionCount > 0 && <span>· 已记录 {compactionCount} 次上下文压缩</span>}
           </div>
         </div>
         {props.workspace && <div className="hidden max-w-52 truncate rounded-lg border border-line bg-surface-muted px-2.5 py-1 font-mono text-[9px] text-ink-muted md:block" title={props.workspace}>{props.workspace}</div>}

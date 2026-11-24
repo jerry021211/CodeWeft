@@ -23,6 +23,7 @@ export type RunViewState = {
   connection: ConnectionState;
   lastSeq: number;
   events: RunEvent[];
+  compactions: RunEvent[];
   eventKeys: Record<string, true>;
   streamingText: string;
   actions: Record<string, RunAction>;
@@ -59,6 +60,7 @@ function blankRun(runId: string, status: RunStatus = "queued", queuePosition?: n
     connection: "idle",
     lastSeq: 0,
     events: [],
+    compactions: [],
     eventKeys: {},
     streamingText: "",
     actions: {},
@@ -135,6 +137,7 @@ function actionKind(type: string): ActionKind | undefined {
 }
 
 function actionStatus(type: string, payload: Record<string, unknown>): ActionStatus {
+  if (type === "context_compacted") return "completed";
   if (type.includes("cancelling")) return "waiting";
   if (type.includes("interrupted")) return "unknown";
   if (type.includes("waiting") || type.includes("approval_requested")) return "waiting";
@@ -229,6 +232,9 @@ function reduceEvent(state: RunViewState, event: RunEvent): RunViewState {
   };
 
   const nativeWorker = Boolean(event.parent_agent_id && event.agent_id.startsWith("collab_"));
+  if (type === "context_compacted" && !event.parent_agent_id) {
+    next.compactions = [...state.compactions, event].sort((a, b) => a.seq - b.seq);
+  }
   if (!nativeWorker && (type.includes("text_delta") || type === "assistant_delta" || type === "content_delta")) {
     next.streamingText += stringFrom(payload, "delta", "text", "content") ?? "";
   } else if (!nativeWorker && (type === "assistant_message" || type === "message_completed")) {

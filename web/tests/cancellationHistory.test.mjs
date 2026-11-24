@@ -56,6 +56,32 @@ test("cancelled run without assistant reply stays next to its own prompt", () =>
   assert.match(html, /first question[\s\S]*Thinking[\s\S]*second question[\s\S]*Thinking/);
 });
 
+test("chat shows each committed root compaction once in its turn, live and after replay", () => {
+  const first = buildRunHistory("first", "completed", [event(1, "context.compacted", {})]);
+  const completed = event(3, "context.compacted", { reason: "auto_compact", folded_messages: 28 }, "second");
+  const events = [
+    event(1, "context.compaction_skipped", {}, "second"),
+    event(2, "context.compaction_failed", {}, "second"),
+    completed,
+    { ...event(4, "context.compacted", {}, "second"), parent_agent_id: "root", agent_id: "child" },
+  ];
+  useRunStore.setState({ runs: {} });
+  useRunStore.getState().mergeEvents(events);
+  useRunStore.getState().mergeEvent(completed);
+  const messages = ["first", "second"].map(id => ({
+    id, role: "user", run_id: id, content: id + " question", conversation_id: "chat", created_at: completed.occurred_at,
+  }));
+  const live = useRunStore.getState().runs.second;
+  const replay = buildRunHistory("second", "completed", events);
+  for (const props of [{ run: live, historyRuns: { first } }, { historyRuns: { first, second: replay } }]) {
+    const html = renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() },
+      createElement(ChatWorkspace, { messages, draft: "", theme: "light", ...props })));
+    assert.equal((html.match(/上下文已压缩/g) ?? []).length, 2);
+    assert.match(html, /已记录 2 次上下文压缩/);
+    assert.match(html, /first question[\s\S]*上下文已压缩[\s\S]*second question[\s\S]*上下文已压缩[\s\S]*达到压缩阈值[\s\S]*折叠 28 条消息/);
+  }
+});
+
 test("history fetch follows pagination and does not require an SSE connection", async () => {
   const original = globalThis.fetch;
   const urls = [];
